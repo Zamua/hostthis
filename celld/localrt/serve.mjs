@@ -27,7 +27,7 @@ function mtime(path) {
     return -1;
   }
 }
-const sources = [join(celld, "src"), join(celld, "build"), join(celld, "..", "web", "shells")]
+const sources = [join(celld, "src"), join(celld, "build"), join(celld, "vendor"), join(celld, "..", "web", "shells")]
   .flatMap((dir) => readdirSync(dir, { recursive: true, withFileTypes: true }))
   .filter((entry) => entry.isFile())
   .map((entry) => mtime(join(entry.parentPath, entry.name)));
@@ -45,7 +45,11 @@ const mf = new Miniflare({
   modules: true,
   scriptPath: join(here, "entry.mjs"),
   modulesRoot: join(here, ".."),
-  modulesRules: [{ type: "ESModule", include: ["**/*.js", "**/*.mjs"] }],
+  // The bundle imports its WASM decoder as a module, as Workers require.
+  modulesRules: [
+    { type: "ESModule", include: ["**/*.js", "**/*.mjs"] },
+    { type: "CompiledWasm", include: ["**/*.wasm"] },
+  ],
   compatibilityDate: config.compatibility_date,
   host: process.env.HOST ?? "127.0.0.1",
   // The Worker reads no request.cf, and fetching it would need the network.

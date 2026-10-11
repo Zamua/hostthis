@@ -1,10 +1,11 @@
-// Builds the Worker bundle, dist/index.js, and beside it what a Cloudflare
-// deploy serves without running the Worker: dist/assets (the renderer assets
-// at _hostthis/<name> and their _headers) and dist/static-r2.json (the assets
-// too large for static assets, with the PAYLOADS key each is uploaded to).
+// Builds the Worker bundle, dist/index.js, with each WASM module it imports
+// beside it (dist/<name>.wasm), and what a Cloudflare deploy serves without
+// running the Worker: dist/assets (the renderer assets at _hostthis/<name> and
+// their _headers) and dist/static-r2.json (the assets too large for static
+// assets, with the PAYLOADS key each is uploaded to).
 import { build } from "esbuild";
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { listAssets, MAX_ASSET_BYTES, REPO, shellsPlugin } from "./shells.mjs";
@@ -14,6 +15,23 @@ const dist = join(celld, "dist");
 
 const CACHE_CONTROL = "public, max-age=31536000, immutable";
 
+// A runtime compiles WASM only from a module it was handed, never from bytes,
+// so each .wasm import stays an import of a sibling file.
+const wasm = new Map();
+const wasmPlugin = {
+  name: "hostthis-wasm",
+  setup(b) {
+    b.onResolve({ filter: /\.wasm$/ }, (args) => {
+      const source = resolve(args.resolveDir, args.path);
+      const name = basename(source);
+      if (wasm.has(name) && wasm.get(name) !== source) throw new Error(`two WASM modules named ${name}`);
+      wasm.set(name, source);
+      return { path: `./${name}`, external: true };
+    });
+  },
+};
+
+rmSync(dist, { recursive: true, force: true });
 await build({
   absWorkingDir: celld,
   entryPoints: ["src/index.js"],
@@ -23,11 +41,11 @@ await build({
   keepNames: true,
   logLevel: "warning",
   outfile: "dist/index.js",
-  plugins: [shellsPlugin],
+  plugins: [shellsPlugin, wasmPlugin],
 });
+for (const [name, source] of wasm) copyFileSync(source, join(dist, name));
 
 const assets = join(dist, "assets");
-rmSync(assets, { recursive: true, force: true });
 mkdirSync(join(assets, "_hostthis"), { recursive: true });
 const rules = [];
 const r2 = [];

@@ -29,6 +29,13 @@ immutable caching, and `dist/static-r2.json`, the assets over the 25 MiB static
 asset limit with the `PAYLOADS` key each is uploaded to,
 `static/<shell version>/<name>`.
 
+Stored payloads are zstd-compressed, and the Worker decodes them with libzstd's
+decompressor compiled to WASM: `vendor/zstd/zd.wasm`, built from a pinned zstd
+release by `vendor/zstd/build.sh` (zig from nixpkgs), which also records its
+sha256 in `zd.wasm.sha256`; `npm test` checks the committed module against it.
+Runtimes compile WASM only from a module they are handed, so the bundle keeps
+`import ... from "./zd.wasm"` and the build copies the module beside it.
+
 ## Local development
 
 `localrt/` runs the bundle under Miniflare (workerd) with the bindings
