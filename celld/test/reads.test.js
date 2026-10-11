@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { listAssets, REPO } from "../build/shells.mjs";
 import { goStringList } from "../src/public/gojson.js";
+import { cleanRedirect } from "../src/public/path.js";
 import { rawContentType, renderShell } from "../src/public/shells.js";
 import {
   APEX, assertGolden, at, documentRow, FORWARDED, GOLDEN, headersOf, sha256, SLUG, TOKEN, UPDATED, world,
@@ -267,6 +268,59 @@ test("the path is decoded once and a malformed escape is a 400", async () => {
   assert.equal(res.status, 307);
   assert.equal(res.headers.get("Location"), "/x/y?raw");
   assert.equal(res.headers.get("Content-Type"), null);
+});
+
+// Each request path, and the Location Go's ServeMux answers it with (null: only
+// that it stays on the request's host).
+const ESCAPED_SEPARATOR_REDIRECTS = [
+  ["/%2Fevil.com//", "/%2Fevil.com/"],
+  ["/%2F%2Fevil.com//", "/%2F%2Fevil.com/"],
+  ["/%2f%2fevil.com//?raw", "/%2f%2fevil.com/?raw"],
+  ["//%2Fevil.com", "/%2Fevil.com"],
+  ["/%5Cevil.com//", "/%5Cevil.com/"],
+  ["/%5C%5Cevil.com//", "/%5C%5Cevil.com/"],
+  ["/%2F%5Cevil.com//", "/%2F%5Cevil.com/"],
+  ["/%5c/evil.com//", "/%5c/evil.com/"],
+  ["/\\evil.com//", "/evil.com/"],
+  ["/%2Fevil.com/|//", "/evil.com/%7C/"],
+  ["/api/rooms/%2F%2Fevil.com//", "/api/rooms/%2F%2Fevil.com/"],
+  ["/api/push/key/%2F%2Fevil.com//x", "/api/push/key/%2F%2Fevil.com/x"],
+  ["/_hostthis/%2F%2Fevil.com//", "/_hostthis/%2F%2Fevil.com/"],
+  ["/%2F%2Fevil.com/%2E%2E//", null],
+];
+
+test("a clean redirect keeps escaped separators escaped and stays on the host, on every public host", async () => {
+  const w = world({ HOSTTHIS_URL_MODE: "path" });
+  const targets = [
+    (path) => [at(path), {}],
+    (path) => [`https://${APEX}${path}`, {}],
+    (path) => [`https://www.${APEX}${path}`, {}],
+    (path) => [`https://a.b.${APEX}${path}`, {}],
+    (path) => [`http://celld.internal${path}`, { Authorization: `Bearer ${TOKEN}`, [FORWARDED]: `${SLUG}.${APEX}` }],
+  ];
+  for (const [path, want] of ESCAPED_SEPARATOR_REDIRECTS) {
+    for (const target of targets) {
+      const [url, headers] = target(path);
+      for (const method of ["GET", "HEAD"]) {
+        const res = await w.fetch(url, { method, headers });
+        const location = res.headers.get("Location");
+        assert.equal(res.status, 307, `${method} ${url}`);
+        assert.doesNotMatch(location, /^\/[/\\]/, `${method} ${url}`);
+        assert.equal(new URL(location, url).host, new URL(url).host, `${method} ${url} -> ${location}`);
+        if (want !== null) assert.equal(location, want, `${method} ${url}`);
+      }
+    }
+    // Path mode's prefix is part of the path the redirect keeps.
+    const res = await w.fetch(`https://${APEX}/p/${SLUG}${path}`);
+    assert.equal(new URL(res.headers.get("Location"), `https://${APEX}/`).host, APEX, path);
+  }
+  assert.deepEqual(w.cellRequests, []);
+});
+
+test("a clean redirect escapes a backslash the URL parser left in the path", () => {
+  for (const [pathname, want] of [["/\\evil.com//", "/%5Cevil.com/"], ["/\\/evil.com//", "/%5C/evil.com/"]]) {
+    assert.equal(cleanRedirect("GET", pathname, "").headers.get("Location"), want, pathname);
+  }
 });
 
 test("flags parse as Go's URL.Query().Has does", async () => {
