@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import http from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,6 +72,8 @@ before(async () => {
   const text = readFileSync(join(dir, "text.hz"));
   await internal("/blob/uploads/live/truncated", { method: "PUT", body: text.subarray(0, text.length - 2) });
   files["truncated.txt"] = { Key: "uploads/live/truncated", Size: manifest.text.size, ContentType: "text/plain" };
+  // Whole bytes, one short of the size the manifest gives them.
+  files["oversized.txt"] = { Key: "uploads/live/text", Size: manifest.text.size + 1, ContentType: "text/plain" };
   await internal("/blob/uploads/live/unframed", { method: "PUT", body: Buffer.from("not at rest") });
   files["unframed.txt"] = { Key: "uploads/live/unframed", Size: 11, ContentType: "text/plain" };
   await internal(`/paste/put?slug=${SLUG}`, {
@@ -90,7 +93,29 @@ after(async () => {
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 
-test("every corpus blob decodes in workerd to its bytes", { skip }, async () => {
+// A GET over the runtime's own HTTP server, which shows the framing a client
+// sees (dispatchFetch's proxy re-encodes the body and drops Content-Length).
+// aborted is whether the connection broke before the body ended.
+async function wireGet(path) {
+  const url = new URL(path, await mf.ready);
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { agent: false, headers: { Host: `${SLUG}.${APEX}` } }, (res) => {
+      const hash = createHash("sha256");
+      let size = 0;
+      let aborted = false;
+      res.on("data", (chunk) => {
+        hash.update(chunk);
+        size += chunk.length;
+      });
+      res.on("aborted", () => { aborted = true; });
+      res.on("error", () => { aborted = true; });
+      res.on("close", () => resolve({ status: res.statusCode, headers: res.headers, size, sha256: hash.digest("hex"), aborted }));
+    });
+    req.on("error", reject);
+  });
+}
+
+test("every corpus blob decodes in workerd to its bytes, with its size as Content-Length", { skip }, async () => {
   for (const name of FILES) {
     const res = await mf.dispatchFetch(`https://${SLUG}.${APEX}/${name}.txt`);
     assert.equal(res.status, 200, name);
@@ -103,22 +128,23 @@ test("every corpus blob decodes in workerd to its bytes", { skip }, async () => 
     }
     assert.equal(size, manifest[name].size, name);
     assert.equal(hash.digest("hex"), manifest[name].sha256, name);
+    if (name === "repeat100m") continue;
+    const wire = await wireGet(`/${name}.txt`);
+    assert.equal(wire.headers["content-length"], String(manifest[name].size), name);
+    assert.equal(wire.headers["transfer-encoding"], undefined, name);
+    assert.deepEqual([wire.size, wire.sha256, wire.aborted], [manifest[name].size, manifest[name].sha256, false], name);
   }
 });
 
-test("damage before the first byte is a 500, and after it the body ends short", { skip }, async () => {
+test("damage before the first byte is a 500, and after it the body ends short of its Content-Length", { skip }, async () => {
   const unframed = await mf.dispatchFetch(`https://${SLUG}.${APEX}/unframed.txt`);
   assert.equal(unframed.status, 500);
   assert.equal(await unframed.text(), "internal error\n");
-  // The body stream errors; how a client sees that is the runtime's: through
-  // Miniflare's proxy, the response just ends short.
-  const truncated = await mf.dispatchFetch(`https://${SLUG}.${APEX}/truncated.txt`);
-  assert.equal(truncated.status, 200);
-  let size = 0;
-  try {
-    for await (const chunk of truncated.body) size += chunk.length;
-  } catch {
-    // an aborted body is the other way to end short
+  for (const [name, length] of [["truncated", manifest.text.size], ["oversized", manifest.text.size + 1]]) {
+    const wire = await wireGet(`/${name}.txt`);
+    assert.equal(wire.status, 200, name);
+    assert.equal(wire.headers["content-length"], String(length), name);
+    assert.ok(wire.size < length, `${name}: ${wire.size} of ${length} bytes`);
+    assert.ok(wire.aborted, `${name}: the connection ended as if the body were whole`);
   }
-  assert.ok(size < manifest.text.size, `${size} of ${manifest.text.size} bytes`);
 });

@@ -57,7 +57,7 @@ export function lockstepTee(source) {
     c.cancelled = true;
     c.waiter?.();
     c.waiter = null;
-    return live().length === 0 ? reader.cancel(reason) : step();
+    return live().length === 0 ? reader.cancel(reason).catch(() => {}) : step();
   }
 
   const copy = (i) => new ReadableStream({

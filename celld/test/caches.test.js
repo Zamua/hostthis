@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { lockstepTee, withEdgeCache } from "../src/public/caches.js";
 import { publicReads } from "../src/public/surface.js";
-import { at, documentRow, FORWARDED, headersOf, SLUG, TOKEN, world } from "./public-world.js";
+import { at, documentRow, FORWARDED, headersOf, hiRow, SLUG, TOKEN, world } from "./public-world.js";
 import { stored } from "./stored.js";
 
 // A Cache API double: put reads the whole body (and fails when it errors), and
@@ -55,7 +55,7 @@ async function settle(w) {
 
 function htmlWorld(vars) {
   const w = world(vars);
-  w.row(SLUG, documentRow("html"));
+  w.row(SLUG, hiRow());
   w.blob("uploads/a/0", "<h1>hi</h1>");
   return w;
 }
@@ -165,7 +165,7 @@ test("errors, misses and lifecycle pages are never stored", async () => {
       assert.ok([200, 410].includes((await w.fetch(at("/"))).status));
     }
     const missing = world(TTL);
-    missing.row(SLUG, documentRow("html"));
+    missing.row(SLUG, hiRow());
     const warn = console.warn;
     console.warn = () => {};
     try {
@@ -209,16 +209,16 @@ test("the blob cache keeps decoded payloads under the size cap, by object key", 
     manifest: { Files: {
       "index.html": { Key: "k-small", Size: 5 },
       "big.txt": { Key: "k-big", Size: 101 },
-      "unsized.txt": { Key: "k-unsized" },
+      "empty.txt": { Key: "k-empty", Size: 0 },
     } },
   });
   w.blob("k-small", "small");
   w.blob("k-big", "b".repeat(101));
-  w.blob("k-unsized", "u");
+  w.blob("k-empty", "");
   await withCaches(cache, async () => {
-    for (const path of ["/", "/big.txt", "/unsized.txt"]) await (await w.fetch(at(path))).text();
+    for (const path of ["/", "/big.txt", "/empty.txt"]) await (await w.fetch(at(path))).text();
     await settle(w);
-    assert.deepEqual([...cache.entries.keys()], ["https://paste.test/_blobs/k-small", "https://paste.test/_blobs/k-unsized"]);
+    assert.deepEqual([...cache.entries.keys()], ["https://paste.test/_blobs/k-small", "https://paste.test/_blobs/k-empty"]);
     assert.equal(new TextDecoder().decode(cache.entries.get("https://paste.test/_blobs/k-small").body), "small");
     w.payloadCalls.length = 0;
     assert.equal(await (await w.fetch(at("/"))).text(), "small");
@@ -230,7 +230,7 @@ test("the blob cache keeps decoded payloads under the size cap, by object key", 
 test("a payload that fails to decode is not kept", async () => {
   const cache = new FakeCache();
   const w = world({ HOSTTHIS_BLOB_CACHE_MAX_BYTES: "1000000", ...TTL });
-  w.row(SLUG, documentRow("html"));
+  w.row(SLUG, documentRow("html", "ready", 300 * 1024));
   const whole = stored(new Uint8Array(300 * 1024).fill(0x61));
   w.object("uploads/a/0", whole.subarray(0, whole.length - 10));
   const warn = console.warn;

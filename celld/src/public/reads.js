@@ -4,6 +4,7 @@ import { reportingErrors } from "./blobs.js";
 import { notModified } from "./conditional.js";
 import { goStringList } from "./gojson.js";
 import { formatHTTPDate } from "./httpdate.js";
+import { exactLength } from "./length.js";
 import { FAILED_PAGE, LOADING_PAGE } from "./pages.js";
 import { internalError, methodNotAllowed, notFound } from "./responses.js";
 import { rawContentType, renderShell } from "./shells.js";
@@ -92,8 +93,13 @@ export function readPath(openBlob) {
         warn(target.slug, `${what} blob read: ${error.message}`);
         return internalError();
       }
-      // Damage found after the headers ends the body early; the log still
-      // names it.
+      // The manifest's size is the decoded length; held to it, damage found
+      // after the headers leaves a body short of its Content-Length.
+      const size = entry.size;
+      if (Number.isSafeInteger(size) && size >= 0) {
+        headers["Content-Length"] = String(size);
+        body = exactLength(body, size);
+      }
       const reported = reportingErrors(body, (error) => warn(target.slug, `${what} blob read: ${error.message}`));
       return new Response(reported, { headers });
     };
