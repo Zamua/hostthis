@@ -322,7 +322,9 @@ func buildCachePurger(logger *log.Logger, apex, mode string) (service.CachePurge
 		}
 		logger.Printf("cache: cloudflare purger enabled for zone %s", zone)
 		cf := &cache.Cloudflare{ZoneID: zone, Token: token, Apex: apex, Mode: mode, Logger: logger}
-		return cf, cf.Shutdown
+		// The Worker's edge cache can be refilled by a read racing the purge.
+		rp := cache.NewRepurging(cf, cache.RepurgeDelay)
+		return rp, rp.Shutdown
 	default:
 		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
 		return nil, nil

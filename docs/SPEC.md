@@ -3868,6 +3868,20 @@ The purge is best-effort: a purge error is logged but never fails the
 underlying operation (the paste IS updated/deleted on origin; the CDN
 just keeps stale content until its TTL ends).
 
+**Purged twice.** A read that started before a write can resolve with the
+old state and store that response in the edge cache after the write's
+purge went out. The Worker abandons any such store that completes more
+than 10 seconds after its read resolved, so a second purge of the slug 15
+seconds after its last purge drops whatever raced the first. A
+`Repurging` decorator around the CDN adapter, wired at the composition
+root, does this for every purge: it purges at once and arms a 15-second
+timer per slug, which a further purge of the same slug re-arms, so a burst
+of writes costs one delayed purge, timed from the last. The bound this
+gives: **a stale edge entry can survive a write by at most about 15
+seconds** (plus the purge's own pacing and propagation), not until the
+edge TTL ends. Shutdown cancels the timers still armed; a write in its
+last 15 seconds before a restart keeps only its first purge.
+
 Three implementations ship:
 
 | Impl | When used | Behavior |
