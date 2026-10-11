@@ -81,3 +81,11 @@ requires `Authorization: Bearer <token>` and answers 401 without it. `hostthisd`
 sends the header when its own `HOSTTHIS_CELLD_TOKEN` is set, and `localrt`
 passes the variable through to the Worker. Left unset, the routes are open, for
 a Worker reachable only inside its cluster.
+
+`HOSTTHIS_APEX_DOMAIN` gives the Worker a public surface. Requests for the apex
+and every host under it go to a separate public router (`src/public/`) that
+never reaches the routes above; it answers 404 to everything for now. The token
+then becomes mandatory: without it, every other request answers 503. A request
+carrying the token and `X-Hostthis-Forwarded-Host: <host under the apex>` is
+served by the public router as that host. Left unset, the Worker routes as
+above whatever the Host. See `docs/SPEC.md`, "Public and internal hosts".

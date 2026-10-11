@@ -1,3 +1,6 @@
+import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
+import { publicRouter } from "./public/router.js";
+
 // The owner identity scopes intents, quota reservations, and the paste index.
 // Paste rows use slug-scoped cells, so cross-cell creates recover through the
 // owner's durable intent log.
@@ -3202,7 +3205,7 @@ function namesCellInternal(pathname) {
   });
 }
 
-export default {
+const internalRouter = {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
@@ -3250,5 +3253,32 @@ export default {
     }
     // One owner maps deterministically to one cell holding intents, quota, and index.
     return env.IDENTITY.get(env.IDENTITY.idFromName(scope)).fetch(request);
+  },
+};
+
+// The host picks the router before any path is read (docs/SPEC.md "Public and
+// internal hosts"). Without an apex the internal router answers everything.
+export default {
+  async fetch(request, env) {
+    const apex = normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? "");
+    if (!apex) {
+      return internalRouter.fetch(request, env);
+    }
+    const host = normalizeHost(new URL(request.url).hostname);
+    if (withinApex(host, apex)) {
+      return publicRouter(request, env, host);
+    }
+    if (!env.HOSTTHIS_CELLD_TOKEN) {
+      return new Response("internal routes need HOSTTHIS_CELLD_TOKEN\n", { status: 503 });
+    }
+    const forwarded = request.headers.get(FORWARDED_HOST);
+    if (forwarded !== null && (await authorized(request, env))) {
+      const target = normalizeHost(forwarded);
+      if (!isHostname(target) || !withinApex(target, apex)) {
+        return new Response("forwarded host outside the apex\n", { status: 400 });
+      }
+      return publicRouter(request, env, target);
+    }
+    return internalRouter.fetch(request, env);
   },
 };
