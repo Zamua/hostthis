@@ -18,18 +18,16 @@ import (
 // status; the wrapped message carries the status and body.
 var ErrPurgeRejected = errors.New("cloudflare purge rejected")
 
-// Cloudflare purges a paste's cached representations from the Cloudflare CDN
-// edge. The token needs only the zone "Cache:Purge" permission.
-//
-// Scheme/Apex/Mode map a slug to its public URL variants (pasteCacheURLs).
-// That policy lives in the adapter; the service layer only names the slug.
+// Cloudflare purges a paste's cached responses from the Cloudflare edge, by
+// hostname (or path prefix in path mode): every URL the slug answers, and any
+// Cache API entry a Worker stored under that host. The token needs only the
+// zone "Cache:Purge" permission.
 type Cloudflare struct {
 	ZoneID string
 	Token  string
 
-	Scheme string // public scheme, e.g. "https"
-	Apex   string // apex domain, e.g. "hostthis.dev"
-	Mode   string // url mode: "subdomain" (prod) | "path" (dev)
+	Apex string // apex domain, e.g. "hostthis.dev"
+	Mode string // url mode: "subdomain" (prod) | "path" (dev)
 
 	Logger *log.Logger
 
@@ -44,21 +42,17 @@ func (c *Cloudflare) client() *http.Client {
 	return &http.Client{Timeout: 5 * time.Second}
 }
 
-// PurgePaste purges every CDN cache key the slug is reachable at. The variant
-// policy is provider-agnostic (pasteCacheURLs in urls.go); this adapter only
-// submits the list.
+// PurgePaste purges everything cached under the slug's scope (slugScope).
 func (c *Cloudflare) PurgePaste(slug domain.Slug) error {
-	return c.purgeURLs(pasteCacheURLs(c.Scheme, c.Apex, c.Mode, slug))
-}
-
-func (c *Cloudflare) purgeURLs(urls []string) error {
-	if len(urls) == 0 {
-		return nil
-	}
 	if c.ZoneID == "" || c.Token == "" {
 		return errors.New("cloudflare purger: missing zone id or token")
 	}
-	payload, err := json.Marshal(map[string]any{"files": urls})
+	sc := slugScope(c.Apex, c.Mode, slug)
+	body := map[string][]string{"hosts": {sc.Host}}
+	if sc.Prefix != "" {
+		body = map[string][]string{"prefixes": {sc.Prefix}}
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("cloudflare purger: marshal: %w", err)
 	}
@@ -72,18 +66,18 @@ func (c *Cloudflare) purgeURLs(urls []string) error {
 
 	resp, err := c.client().Do(req)
 	if err != nil {
-		c.logf("cloudflare purge http: %v (urls=%v)", err, urls)
+		c.logf("cloudflare purge http: %v (%v)", err, body)
 		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		err := fmt.Errorf("%w: %d %s", ErrPurgeRejected, resp.StatusCode, string(body))
-		c.logf("%v (urls=%v)", err, urls)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		err := fmt.Errorf("%w: %d %s", ErrPurgeRejected, resp.StatusCode, string(b))
+		c.logf("%v (%v)", err, body)
 		return err
 	}
 	// Low-volume (one per mutation), so success is logged too.
-	c.logf("cache: purged %v", urls)
+	c.logf("cache: purged %v", body)
 	return nil
 }
 
