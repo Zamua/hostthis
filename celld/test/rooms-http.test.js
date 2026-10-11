@@ -188,21 +188,26 @@ test("a scan re-encodes every value from its bytes", async () => {
   assert.equal((await put(w, id, "text", "hello")).status, 204);
   assert.equal((await put(w, id, "big", "1e400")).status, 204);
   assert.equal((await put(w, id, "bad", new Uint8Array([0x61, 0xe2, 0x82]))).status, 204);
+  assert.equal((await put(w, id, "badjson", new Uint8Array([0x22, 0x61, 0xe2, 0x82, 0xff, 0x22]))).status, 204);
   assert.equal((await put(w, id, "empty", "")).status, 204);
   const res = await w.fetch(url(`/api/rooms/${id}`));
   assert.equal(res.status, 200);
   assert.equal(res.headers.get("Content-Type"), "application/json; charset=utf-8");
   assert.equal(res.headers.get("Cache-Control"), "no-store");
-  const text = await res.text();
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   assert.ok(text.endsWith("}\n"));
   assert.ok(text.includes('"big":1e400'), "a JSON value is embedded as stored");
-  assert.deepEqual(JSON.parse(text), {
-    obj: { a: [1, true] }, text: "hello", big: Infinity, bad: "a\ufffd\ufffd", empty: "",
+  const scanned = JSON.parse(text);
+  assert.deepEqual(scanned, {
+    obj: { a: [1, true] }, text: "hello", big: Infinity, bad: "a\ufffd\ufffd", badjson: "a\ufffd\ufffd\ufffd",
+    empty: "",
   });
-  // The frames carry the encoding computed at write time, the same values.
+  // The frames carry the encoding computed at write time: the same values.
   const { wire } = w.doc(APP, id);
-  assert.deepEqual(JSON.parse(wire.bad), "a\ufffd\ufffd");
-  assert.deepEqual(JSON.parse(wire.obj), { a: [1, true] });
+  for (const key of ["obj", "text", "bad", "badjson", "empty"]) {
+    assert.deepEqual(JSON.parse(wire[key]), scanned[key], key);
+  }
 });
 
 test("an empty room scans to {} and a missing one to 404", async () => {
