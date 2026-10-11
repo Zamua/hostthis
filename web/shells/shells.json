@@ -1,0 +1,124 @@
+{
+  "csp": {
+    "shell": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "wasmWorker": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  },
+  "kinds": {
+    "markdown": { "shell": "mdshell", "raw": "text/markdown; charset=utf-8" },
+    "diff": { "shell": "diffshell", "raw": "text/plain; charset=utf-8" },
+    "mermaid": { "shell": "mermaidshell", "raw": "text/plain; charset=utf-8" },
+    "pdf": { "shell": "pdfshell", "raw": "application/pdf" },
+    "csv": { "shell": "datashell", "raw": "text/plain; charset=utf-8" },
+    "json": { "shell": "datashell", "raw": "application/json; charset=utf-8" },
+    "flamegraph": { "shell": "flameshell", "raw": "text/plain; charset=utf-8" },
+    "text": { "shell": "textshell", "raw": "text/plain; charset=utf-8" },
+    "log": { "shell": "logshell", "raw": "application/x-ndjson; charset=utf-8" },
+    "knowledgebase": { "shell": "kbshell", "raw": "text/markdown; charset=utf-8" }
+  },
+  "shells": {
+    "mdshell": {
+      "version": "mdshell-v7",
+      "csp": "shell",
+      "assets": {
+        "marked.min.js": "text/javascript; charset=utf-8",
+        "purify.min.js": "text/javascript; charset=utf-8",
+        "md.js": "text/javascript; charset=utf-8",
+        "md.css": "text/css; charset=utf-8"
+      }
+    },
+    "diffshell": {
+      "version": "diffshell-v32",
+      "csp": "shell",
+      "assets": {
+        "diff2html-ui-base.min.js": "text/javascript; charset=utf-8",
+        "highlight.min.js": "text/javascript; charset=utf-8",
+        "diff.js": "text/javascript; charset=utf-8",
+        "diff2html.min.css": "text/css; charset=utf-8",
+        "hljs-light.css": "text/css; charset=utf-8",
+        "hljs-dark.css": "text/css; charset=utf-8",
+        "diff.css": "text/css; charset=utf-8"
+      }
+    },
+    "mermaidshell": {
+      "version": "mermaidshell-v1",
+      "csp": "shell",
+      "note": "mdshell lazy-loads mermaid.min.js by name when a document has a mermaid fence.",
+      "assets": {
+        "mermaid.min.js": "text/javascript; charset=utf-8",
+        "mermaid.js": "text/javascript; charset=utf-8",
+        "mermaid.css": "text/css; charset=utf-8"
+      }
+    },
+    "pdfshell": {
+      "version": "pdfshell-v4",
+      "csp": "wasmWorker",
+      "assets": {
+        "pdf.min.mjs": "text/javascript; charset=utf-8",
+        "pdf.worker.min.mjs": "text/javascript; charset=utf-8",
+        "pdf.js": "text/javascript; charset=utf-8",
+        "pdf.css": "text/css; charset=utf-8"
+      }
+    },
+    "datashell": {
+      "version": "datashell-v7",
+      "csp": "wasmWorker",
+      "note": "duckdb-eh.wasm and codemirror.min.js load only with the SQL console. apache-arrow.js, flatbuffers.js and tslib.js resolve duckdb's bare specifiers, rewritten to this namespace at vendor time. CodeMirror is one bundle because separately loaded packages each get their own @codemirror/state, which CodeMirror rejects.",
+      "assets": {
+        "data.js": "text/javascript; charset=utf-8",
+        "data.css": "text/css; charset=utf-8",
+        "duckdb-browser.mjs": "text/javascript; charset=utf-8",
+        "duckdb-browser-eh.worker.js": "text/javascript; charset=utf-8",
+        "duckdb-eh.wasm": "application/wasm",
+        "apache-arrow.js": "text/javascript; charset=utf-8",
+        "flatbuffers.js": "text/javascript; charset=utf-8",
+        "tslib.js": "text/javascript; charset=utf-8",
+        "codemirror.min.js": "text/javascript; charset=utf-8"
+      }
+    },
+    "flameshell": {
+      "version": "flameshell-v2",
+      "csp": "shell",
+      "assets": {
+        "flame.js": "text/javascript; charset=utf-8",
+        "flame.css": "text/css; charset=utf-8"
+      }
+    },
+    "textshell": {
+      "version": "textshell-v1",
+      "csp": "shell",
+      "assets": {
+        "text.js": "text/javascript; charset=utf-8",
+        "text.css": "text/css; charset=utf-8"
+      }
+    },
+    "logshell": {
+      "version": "logshell-v4",
+      "csp": "shell",
+      "assets": {
+        "log.js": "text/javascript; charset=utf-8",
+        "query.js": "text/javascript; charset=utf-8",
+        "log.css": "text/css; charset=utf-8"
+      }
+    },
+    "kbshell": {
+      "version": "kbshell-v4",
+      "csp": "shell",
+      "note": "Loads marked and DOMPurify from mdshell by name.",
+      "assets": {
+        "kb.css": "text/css; charset=utf-8",
+        "kb.js": "text/javascript; charset=utf-8",
+        "kb-tree.js": "text/javascript; charset=utf-8",
+        "kb-search.js": "text/javascript; charset=utf-8"
+      }
+    },
+    "common": {
+      "version": "common-v6",
+      "note": "No page: every shell loads these under its own version, so a change here also needs a bump of each shell that loads the file.",
+      "assets": {
+        "deeplink.js": "text/javascript; charset=utf-8",
+        "linegutter.js": "text/javascript; charset=utf-8",
+        "linegutter.css": "text/css; charset=utf-8"
+      }
+    }
+  }
+}

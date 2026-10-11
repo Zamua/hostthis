@@ -114,16 +114,7 @@ func TestShells_WhitelistedAssetsExist(t *testing.T) {
 // iteration order. Kinds SHARING one shell are the same pointer and are fine.
 func TestShells_NoAssetNameCollision(t *testing.T) {
 	owner := map[string]*clientShell{}
-	all := make([]*clientShell, 0, len(shells)+1)
-	seen := map[*clientShell]bool{}
-	for _, sh := range shells {
-		if !seen[sh] {
-			seen[sh] = true
-			all = append(all, sh)
-		}
-	}
-	all = append(all, commonShell)
-	for _, sh := range all {
+	for _, sh := range shellsByDir {
 		for name := range sh.assets {
 			if prev, dup := owner[name]; dup && prev != sh {
 				t.Errorf("asset %q is claimed by both %s and %s", name, prev.dir, sh.dir)
