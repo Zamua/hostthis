@@ -160,14 +160,15 @@ func (s *Rooms) Get(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, 
 }
 
 // Scan returns the room's whole namespace. A scan of a nonexistent room is a
-// 404, not an empty 200, so existence is not leaked the other way either.
+// 404, not an empty 200, so existence is not leaked the other way either; that
+// includes a room that went away between its meta read and its scan.
 func (s *Rooms) Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
 	if _, err := s.Repo.GetRoom(appSlug, id); err != nil {
 		return domain.RoomKV{}, s.mapNotFound(err)
 	}
 	kv, err := s.Repo.ScanRoom(appSlug, id)
 	if err != nil {
-		return domain.RoomKV{}, err
+		return domain.RoomKV{}, s.mapNotFound(err)
 	}
 	return kv, nil
 }

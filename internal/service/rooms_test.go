@@ -69,6 +69,26 @@ func TestRoomsSvc_NonexistentRoomIs404Shape(t *testing.T) {
 	}
 }
 
+// scanGone answers the room's meta but not its scan: the room went away
+// between the two reads.
+type scanGone struct{ RoomRepo }
+
+func (scanGone) ScanRoom(domain.Slug, domain.RoomID) (domain.RoomKV, error) {
+	return domain.RoomKV{}, domain.ErrNotFound
+}
+
+func TestRoomsSvc_ScanOfARoomGoneAfterItsMetaIs404Shape(t *testing.T) {
+	svc, _ := newRoomsSvc(t)
+	room, err := svc.Create("app12345", "10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	svc.Repo = scanGone{svc.Repo}
+	if _, err := svc.Scan(room.AppSlug, room.ID); !errors.Is(err, ErrRoomNotFound) {
+		t.Fatalf("scan = %v, want ErrRoomNotFound", err)
+	}
+}
+
 func TestRoomsSvc_MissingKeyIs404(t *testing.T) {
 	svc, _ := newRoomsSvc(t)
 	room, _ := svc.Create("app12345", "10.0.0.0/24")
