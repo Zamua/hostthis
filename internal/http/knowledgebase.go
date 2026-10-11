@@ -19,7 +19,7 @@ func (s *Server) serveKnowledgeBase(w http.ResponseWriter, r *http.Request, slug
 	manifest domain.Manifest, uploadID string, updatedAt time.Time, reqPath string,
 ) {
 	if wantsFileList(r) {
-		s.serveFileList(w, r, manifest, uploadID, updatedAt, reqPath)
+		s.serveFileList(w, r, manifest, uploadID, updatedAt)
 		return
 	}
 
@@ -31,7 +31,7 @@ func (s *Server) serveKnowledgeBase(w http.ResponseWriter, r *http.Request, slug
 	doc := reqPath == domain.Root || domain.IsMarkdownPath(reqPath)
 	switch {
 	case hit && doc && wantsRaw(r):
-		s.streamDocument(w, r, slug, entry, updatedAt, reqPath)
+		s.streamDocument(w, r, slug, entry, updatedAt)
 		return
 	case hit && !doc:
 		s.serveFromManifest(w, r, slug, manifest, updatedAt, reqPath)
@@ -46,9 +46,9 @@ func (s *Server) serveKnowledgeBase(w http.ResponseWriter, r *http.Request, slug
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
-	// The shell is content-independent at every path it answers, so it caches
-	// like a paste's and validates on its version.
-	h.Set("Cache-Control", "public, max-age=3600")
+	// The shell is content-independent at every path it answers, so it
+	// validates on its version.
+	h.Set("Cache-Control", contentCacheControl)
 	if notModified(w, r, `"`+shell.version+`"`, updatedAt) {
 		return
 	}
@@ -60,12 +60,12 @@ func (s *Server) serveKnowledgeBase(w http.ResponseWriter, r *http.Request, slug
 // streamDocument writes one markdown document's raw bytes, what the shell
 // fetches to render. Streamed, so a GET never buffers the whole file.
 func (s *Server) streamDocument(w http.ResponseWriter, r *http.Request, slug domain.Slug,
-	entry domain.ManifestEntry, updatedAt time.Time, reqPath string,
+	entry domain.ManifestEntry, updatedAt time.Time,
 ) {
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
-	h.Set("Cache-Control", kbCacheControl(reqPath))
+	h.Set("Cache-Control", contentCacheControl)
 	if notModified(w, r, `"`+entry.Key+`"`, updatedAt) {
 		return
 	}
@@ -86,12 +86,12 @@ func (s *Server) streamDocument(w http.ResponseWriter, r *http.Request, slug dom
 // paths carries the query, and is sorted so the shell's bounded index falls in
 // a deterministic place.
 func (s *Server) serveFileList(w http.ResponseWriter, r *http.Request,
-	manifest domain.Manifest, uploadID string, updatedAt time.Time, reqPath string,
+	manifest domain.Manifest, uploadID string, updatedAt time.Time,
 ) {
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
-	h.Set("Cache-Control", kbCacheControl(reqPath))
+	h.Set("Cache-Control", contentCacheControl)
 	// A deploy's manifest is immutable and its upload prefix names that deploy,
 	// so the id validates the list without hashing the paths.
 	if notModified(w, r, `"files-`+uploadID+`"`, updatedAt) {
@@ -110,13 +110,3 @@ func (s *Server) serveFileList(w http.ResponseWriter, r *http.Request,
 // QUERY on the existing slug route, never a path of its own, so a base holding
 // files.json or a _files/ directory cannot shadow it.
 func wantsFileList(r *http.Request) bool { return r.URL.Query().Has("files") }
-
-// kbCacheControl caches the ROOT's variants, which a purge covers
-// (internal/cache/urls.go), and revalidates everything deeper, where a redeploy
-// is visible only through the file's own object-key ETag.
-func kbCacheControl(reqPath string) string {
-	if reqPath == domain.Root {
-		return "public, max-age=3600"
-	}
-	return "public, no-cache"
-}

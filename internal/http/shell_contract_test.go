@@ -38,7 +38,7 @@ func serveReady(t *testing.T, kind domain.ContentKind, slug, key string, body []
 }
 
 // Every registered kind serves the same contract: the bare URL is the shell
-// for every Accept (no negotiation, so it edge-caches), with the shell's CSP
+// for every Accept (no negotiation, so a cache holds one representation), with the shell's CSP
 // and a content-independent ETag; ?raw=1 is the stored bytes under the kind's
 // raw type, ETag'd by object key, with no CSP.
 func TestShells_ServeContractForEveryKind(t *testing.T) {
@@ -59,8 +59,8 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 				if csp := w.Header().Get("Content-Security-Policy"); csp != sh.policy() {
 					t.Errorf("Accept %q: CSP %q, want %q", accept, csp, sh.policy())
 				}
-				if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
-					t.Errorf("Accept %q: Cache-Control %q, want public, max-age=3600", accept, cc)
+				if cc := w.Header().Get("Cache-Control"); cc != "public, no-cache" {
+					t.Errorf("Accept %q: Cache-Control %q, want public, no-cache", accept, cc)
 				}
 				etag := w.Header().Get("ETag")
 				if etag != `"`+sh.version+`"` || strings.Contains(etag, keyA) {
@@ -85,15 +85,15 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 			if csp := w.Header().Get("Content-Security-Policy"); csp != "" {
 				t.Errorf("raw response carries a CSP: %q", csp)
 			}
-			if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
-				t.Errorf("raw Cache-Control %q, want public, max-age=3600", cc)
+			if cc := w.Header().Get("Cache-Control"); cc != "public, no-cache" {
+				t.Errorf("raw Cache-Control %q, want public, no-cache", cc)
 			}
 		})
 	}
 }
 
 // HTML is served as itself: the stored bytes, object-key ETag, no shell CSP,
-// and the same edge-cacheable posture.
+// and the same cache posture.
 func TestHTMLPaste_ServedAsItself(t *testing.T) {
 	body := []byte("<!doctype html><h1>html paste</h1>")
 	w := serveReady(t, domain.KindHTML, "abc23456", keyA, body, "/p/abc23456", "text/html")
@@ -109,8 +109,8 @@ func TestHTMLPaste_ServedAsItself(t *testing.T) {
 	if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
 		t.Errorf("ETag %q, want the object key", got)
 	}
-	if cc := w.Header().Get("Cache-Control"); cc != "public, max-age=3600" {
-		t.Errorf("Cache-Control %q, want public, max-age=3600", cc)
+	if cc := w.Header().Get("Cache-Control"); cc != "public, no-cache" {
+		t.Errorf("Cache-Control %q, want public, no-cache", cc)
 	}
 }
 
