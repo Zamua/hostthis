@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Room is the aggregate for the no-auth, capability-based persistence tier
@@ -140,6 +141,9 @@ var (
 	ErrRoomKeyEmpty = errors.New("room key is empty")
 	// ErrRoomKeyTooLong is returned when a key exceeds MaxRoomKeyLen.
 	ErrRoomKeyTooLong = errors.New("room key is too long")
+	// ErrRoomKeyNotUTF8 is returned for a key whose bytes are not UTF-8: no
+	// two servers or cell calls would agree on the text such a key names.
+	ErrRoomKeyNotUTF8 = errors.New("room key is not valid UTF-8")
 )
 
 // Reserved room path segments: the room API serves these as something other
@@ -155,15 +159,18 @@ func IsReservedRoomKey(key string) bool {
 	return key == RoomKeyWS || key == RoomKeyPush || strings.HasPrefix(key, RoomKeyPush+"/")
 }
 
-// ValidateRoomKey checks a key against the empty, length and reserved rules.
-// Use it at the boundary where an untrusted key (an HTTP path segment) becomes
-// a stored key.
+// ValidateRoomKey checks a key against the empty, length, UTF-8 and reserved
+// rules. Use it at the boundary where an untrusted key (an HTTP path segment)
+// becomes a stored key.
 func ValidateRoomKey(key string) error {
 	if key == "" {
 		return ErrRoomKeyEmpty
 	}
 	if len(key) > MaxRoomKeyLen {
 		return ErrRoomKeyTooLong
+	}
+	if !utf8.ValidString(key) {
+		return ErrRoomKeyNotUTF8
 	}
 	if IsReservedRoomKey(key) {
 		return ErrRoomKeyReserved

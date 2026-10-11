@@ -5,7 +5,7 @@
 // per byte of the percent-decoded path, as a Go string holds them.
 
 import { FORWARDED_CLIENT_IP } from "../public/host.js";
-import { byteStringBytes, goText } from "./wire.js";
+import { byteStringBytes, goText, validUTF8 } from "./wire.js";
 
 export const ROOM_MAX_BYTES = 256 * 1024;
 export const ROOM_MAX_KEYS = 256;
@@ -83,6 +83,7 @@ function isReservedRoomKey(key) {
 export function roomKeyProblem(key) {
   if (key === "") return "room key is empty";
   if (key.length > ROOM_MAX_KEY_BYTES) return "room key is too long";
+  if (!validUTF8(byteStringBytes(key))) return "room key is not valid UTF-8";
   if (isReservedRoomKey(key)) return "room key is reserved";
   return null;
 }

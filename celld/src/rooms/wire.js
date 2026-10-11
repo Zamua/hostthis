@@ -69,6 +69,18 @@ export function goText(bytes, start = 0, end = bytes.length) {
   return parts.join("");
 }
 
+// Go's utf8.Valid.
+export function validUTF8(bytes) {
+  for (let i = 0; i < bytes.length;) {
+    const [, size] = decodeRune(bytes, i);
+    if (size === 1 && bytes[i] >= 0x80) {
+      return false;
+    }
+    i += size;
+  }
+  return true;
+}
+
 // A string whose chars are bytes (0-255), such as a decoded URL path, as
 // bytes.
 export function byteStringBytes(text) {
