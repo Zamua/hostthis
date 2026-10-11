@@ -163,6 +163,28 @@ func TestRoomsHTTP_NonexistentRoomIs404(t *testing.T) {
 	}
 }
 
+// A key is read under the name it was written with: one that decodes to bytes
+// that are not UTF-8 is refused on every verb, before any cell call.
+func TestRoomsHTTP_KeyNotUTF8Is400(t *testing.T) {
+	srv := buildRoomServer(t)
+	const slug = "appz2345"
+	id := createRoomID(t, srv, slug)
+	for _, key := range []string{"k%FF", "k%E2%82", "%C0%80"} {
+		for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+			w := req(t, srv, method, slug, "/api/rooms/"+id+"/"+key, []byte("v"))
+			if w.Code != http.StatusBadRequest || w.Body.String() != "invalid key\n\n" {
+				t.Fatalf("%s %s: code %d body %q, want 400 invalid key", method, key, w.Code, w.Body.String())
+			}
+		}
+	}
+	if w := req(t, srv, http.MethodPut, slug, "/api/rooms/"+id+"/caf%C3%A9%E2%82%AC", []byte("v")); w.Code != http.StatusNoContent {
+		t.Fatalf("UTF-8 key put: code %d", w.Code)
+	}
+	if w := req(t, srv, http.MethodGet, slug, "/api/rooms/"+id+"/caf%C3%A9%E2%82%AC", nil); w.Code != http.StatusOK || w.Body.String() != "v" {
+		t.Fatalf("UTF-8 key get: code %d body %q", w.Code, w.Body.String())
+	}
+}
+
 func TestRoomsHTTP_MalformedUUIDIs400(t *testing.T) {
 	srv := buildRoomServer(t)
 	// Must stay distinct from the 404 a well-formed-but-nonexistent room gets.
