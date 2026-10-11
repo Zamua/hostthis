@@ -1243,6 +1243,13 @@ space: a site's manifest lookup never serves a file at `/api/rooms/...`,
 so the API path and the static-file path do not collide. (In dev path
 mode the same routes live under `<apex>/p/<app-slug>/api/rooms/...`.)
 
+Two servers answer these routes with the same rules: `hostthisd`, and the
+celld Worker's public router once the Worker has `HOSTTHIS_APEX_DOMAIN` set
+(see "Public and internal hosts"). Both take the app from the host (or the
+path-mode prefix) and the room from the parsed UUID, never from a body or
+query. Unless a server is named, every rule in "Rooms", "Real-time room
+relay" and "Room push" holds for both.
+
 ```
 POST   /api/rooms                  mint a UUIDv4, create the room, return { "id": "<uuid>" }
 GET    /api/rooms/<uuid>           list/scan every key+value pair in the room (load full state on join)
@@ -1285,6 +1292,32 @@ A malformed UUID (not a parseable UUIDv4) is a **400**, distinct from the
 room id at all," a 404 says "no room here," and neither confirms the
 existence of any specific room.
 
+The remaining rules, shared by every route above:
+
+- A key is the rest of the decoded path after the UUID: 1 to 256 bytes, and
+  never `ws`, `push` or anything under `push/`, which are the relay and push
+  routes. A key over 256 bytes is a **400**.
+- A route answers only its listed methods; any other method is a **405** with
+  an `Allow` header naming them.
+- A PUT body is read to at most 256 KiB plus one byte, so an oversized body
+  reaches the per-room cap and is refused **413** there. Push bodies are read
+  to at most 64 KiB.
+- A refused creation is **429** with `Retry-After: 3600`; the per-room cap is
+  **413**; the per-app aggregate is **507**.
+- "Parses as JSON" means Go's `json.Valid`: nesting at most 10000 deep, a
+  byte-order mark is not whitespace, and bytes that are not UTF-8 are allowed
+  inside a string. Where a value becomes a JSON string, each byte of an
+  invalid UTF-8 sequence becomes one U+FFFD, as Go decodes it. The WebSocket
+  frames carry the encoding computed when the value was written, with the
+  same per-byte replacement inside an embedded JSON value. The whole-room GET
+  re-encodes every value from its stored bytes: the Worker replaces per byte
+  there too, while `hostthisd` passes such bytes inside an embedded value
+  through raw and leaves the replacement to the client's decoder.
+- Every response under `/api/rooms` carries `Cache-Control: no-store`, errors
+  included, since values change under fixed URLs and a CDN caches an
+  undirected 404 by its own default. The Worker also sets it on every
+  `/api/push/key` response; `hostthisd` sets it there only on a success.
+
 ### Storage: a room-namespaced KV over the metadata backend
 
 Room data is small JSON/bytes blobs - app STATE, not files - so it lives
@@ -1309,9 +1342,17 @@ The implementation follows the existing repo-behind-service pattern:
   contract.
 
 The slug-must-name-a-live-app **existence requirement** is enforced at the
-HTTP layer (it reads the site + paste readers the router already holds),
-NOT inside the room repo, so the room repo needs no separate existence
-reader: room creation 404s a slug that names no live site or paste.
+HTTP layer (`hostthisd` reads the site + paste readers its router already
+holds; the Worker asks the app's Paste cell, whose read-only `exists` op
+reports whether a row is present), NOT inside the room repo, so the room
+repo needs no separate existence reader: room creation 404s a slug that
+names no live site or paste.
+
+The Worker's public router reaches the same cell ops through its bindings:
+`exists`, `roomcounts` and `pushkey` on the app's Paste cell, and on the
+Room cell (`<slug>|<uuid>`) `create`, `meta`, `scan`, `get`, `put`, `del`,
+the push ops and the join. It computes the value's wire encoding itself and
+sends it with each PUT, as `hostthisd` does.
 
 ### Quota and abuse
 
@@ -1356,6 +1397,19 @@ informs them):
   every request's `RemoteAddr` is the proxy's own IP and the per-IP gate
   collapses to a single global bucket); an operator with hostthis directly
   on the public internet MUST leave it unset.
+
+  The Worker has no TCP peer address to read, so `HOSTTHIS_CLIENT_IP_SOURCE`
+  on the Worker names where the address comes from: `cf-connecting-ip` reads
+  the `CF-Connecting-IP` header Cloudflare's edge sets (a client cannot forge
+  it through the edge); `xff-rightmost` reads the right-most
+  `X-Forwarded-For` value, for a Worker behind a trusted proxy that appends
+  it. Unset, or any other value, puts every client in one bucket. A
+  forwarded request (see "Public and internal hosts") takes the address from
+  `X-Hostthis-Client-IP`, which only a token holder can send. An address
+  that does not parse is the `unknown` bucket. The subnet strings are the
+  ones `hostthisd` derives (`a.b.c.0/24`, the canonical IPv6 text of the
+  `/48` prefix plus `/48`, and an IPv4-mapped IPv6 address counts as IPv4),
+  so both servers count against the same per-app ledger.
 - **Per-room data cap.** A single room cannot store unbounded data:
   **default 256 KiB total value bytes** and **default 256 keys** per room.
   A `PUT` that would push the room past either cap is rejected (**413**)
@@ -1422,19 +1476,33 @@ GET (Upgrade: websocket) /api/rooms/<uuid>/ws
 
 The app slug must name a live paste or site, and the UUID must name an existing
 room. A malformed UUID is refused before upgrade; an unknown app or room is a
-404. The normal same-origin policy rejects a third-party browser origin. The
-room UUID remains the entire participant capability.
+404. A request that is not a WebSocket upgrade is a 426 (a missing
+`websocket` token in `Upgrade`) or a 405 (not GET). The origin is checked
+before the upgrade: a missing `Origin`, one whose host equals the request's
+host, and one whose host (port included, compared lowercase) matches
+`<apex>` or the glob `*.<apex>` are allowed; any other origin, or one that
+does not parse, is a 403. The room UUID remains the entire participant
+capability.
 
 ### Cell-owned fan-out
 
-`hostthisd` terminates the public socket and opens one cluster-internal socket
-to the Room cell. The Go proxy owns origin policy, per-process connection
-admission, and the client-facing heartbeat. It pipes text and binary frames in
-both directions without interpreting them. The upstream socket is not pinged,
-so a quiet hibernatable Room is not woken merely to prove liveness.
+Two front ends reach the same Room cell. `hostthisd` terminates the public
+socket and opens one cluster-internal socket to the Room cell; its Go proxy
+owns per-process connection admission and a client-facing heartbeat, both
+`hostthisd` only. It pipes text and binary frames in both directions without
+interpreting them. The upstream socket is not pinged, so a quiet hibernatable
+Room is not woken merely to prove liveness.
+
+The Worker's public router makes the checks above and then sends the Room cell
+a new upgrade request, `/room/join?room=<slug>|<uuid>` with only
+`Upgrade: websocket`, built from the host's slug and the parsed UUID. The
+cell's answer is the client's answer: a 101 hands the client's socket to the
+cell itself, with no proxy between them. The client's URL, query, headers and
+body never reach the cell, so no request can name a cell op.
 
 The Room cell is the only broadcast point. Exactly one cell owns one room, so
-there is no pod mesh and no cross-stream ordering problem.
+there is no pod mesh and no cross-stream ordering problem. Sockets from both
+front ends share it, so clients of the two interoperate in one room.
 
 Two frame classes share the socket:
 
@@ -1448,15 +1516,24 @@ Two frame classes share the socket:
   byte-identically to every OTHER socket in that Room, never back to its sender,
   never to another room or app, and never to storage. Text objects whose `type`
   is `snapshot`, `put`, or `delete` are reserved for server control frames and
-  close the sending socket rather than reaching peers. Durable changes continue
-  to use the HTTP KV path so the byte caps and sequence exist in one place.
+  close the sending socket (1008) rather than reaching peers. Durable changes
+  continue to use the HTTP KV path so the byte caps and sequence exist in one
+  place.
+
+One client frame is reserved for liveness: the text frame `{"type":"ping"}`,
+exactly those 15 bytes. The runtime answers it on the same socket with the text
+frame `{"type":"pong"}` without waking the cell, and it never reaches a peer.
+Any other spelling of a ping is an ordinary ephemeral frame.
 
 A client-sent ephemeral frame may carry at most 32 KiB, bounding one sender's
 fan-out amplification explicitly rather than inheriting the WebSocket library's
-default. Server-generated snapshot and mirror frames may carry up to 2 MiB so a
-full 256 KiB room still fits after worst-case JSON escaping. The Go proxy applies
-these asymmetric limits at the two read boundaries. A dead or closing peer is
-skipped without blocking the remaining fan-out.
+default. The Room cell enforces it for every socket: a larger frame closes the
+sender with 1009 and reaches no peer. Server-generated snapshot and mirror
+frames may carry up to 2 MiB so a full 256 KiB room still fits after
+worst-case JSON escaping; the cell writes them, so only `hostthisd`'s proxy
+limits them, at its upstream read boundary, as it also applies the 32 KiB
+limit at its client read boundary. A dead or closing peer is skipped without
+blocking the remaining fan-out.
 
 ### Snapshot and sequence contract
 
@@ -1483,14 +1560,31 @@ too; one that does has already closed it.
 
 ### Lifecycle and bounds
 
-Each Go process admits at most 64 connections for one room and 1024 across one
-app. These are process resource bounds, not global audience limits. A refused
-admission returns 429 before the WebSocket handshake. Each connection is
-released exactly once when dialing fails or either side closes.
+A room holds at most 64 sockets, counted by its Room cell across both front
+ends. The cell decides at each join, in the same turn that would accept the
+socket: it first evicts stale sockets (below), then counts the open ones it
+holds, and past the cap answers the join with 429 instead of a 101. On the
+Worker path that 429 is the client's own handshake response. `hostthisd`
+accepts its client before it dials the cell, so there a refused join closes
+the client with 1011. The Worker path has no per-app cap: the creation limits
+bound how many rooms an app has. `hostthisd`'s proxy also admits at most 64
+connections per room and 1024 per app per process, answering 429 before its
+own handshake; these bound that process, not the room, and go away with the
+proxy. Each of its connections is released exactly once when dialing fails or
+either side closes.
 
-The Go proxy pings the public client every 20 seconds and requires a pong within
-10 seconds. This is below normal reverse-proxy idle timeouts and reaps dead
-mobile connections. The canonical browser client also reconnects with
+Neither runtime pings or times out a hibernatable socket, so a client that
+vanishes without closing stays counted until a write to it fails. Liveness is
+therefore the client's job: the canonical browser client sends the ping frame
+every 20 seconds. At each join the cell closes (1000, reason `stale`) every
+socket whose last ping answer is more than 60 seconds old, so a vanished
+client stops counting against the cap. A socket that has never pinged is not
+evicted this way; it leaves when it closes or a write to it fails.
+
+`hostthisd`'s proxy also pings its public client every 20 seconds at the
+WebSocket protocol level and requires a pong within 10 seconds. This is below
+normal reverse-proxy idle timeouts and reaps dead mobile connections; it exists
+only on the `hostthisd` path. The canonical browser client also reconnects with
 exponential backoff and jitter, reconnects immediately on foreground recovery,
 and buffers only bounded durable actions while disconnected.
 
@@ -2238,6 +2332,19 @@ A `Schedule` is:
 - PUT replaces the whole schedule; an empty `items` list clears it. Validation
   refuses the whole document; nothing is applied partially.
 
+Statuses: an unknown app is 404 on every push route and on `/api/push/key`,
+checked before anything else; a path under `push/` other than the three
+above is 400; a body that is not one JSON document of the right shape is 400
+(`malformed JSON body`), and one that breaks a rule above is 400 naming the
+rule; a missing room is 404; a 17th subscription is 413; a second test within
+the minute is 429 with `Retry-After` in whole seconds, rounded up. Bodies
+decode as Go's `encoding/json` decodes them into the documents above: the
+first JSON value counts and anything after it is ignored, field names match
+case-insensitively with the last match winning, unknown fields are ignored, a
+`null` leaves a field unset, and a field of the wrong JSON type (a number
+with a fraction or exponent where a weekday is expected, among others)
+refuses the document.
+
 ### Delivery
 
 Delivery is Web Push (RFC 8030) with `aes128gcm` content encoding (RFC 8291)
@@ -2265,7 +2372,10 @@ One P-256 VAPID key pair exists per app, generated on first use and held by the
 app's own cell beside its room coordinator. No route returns the private key.
 A Room cell never holds it either: it asks the app cell for a signed VAPID
 token per push-service origin (`aud` is the origin, `sub` names the apex,
-`exp` is 12 hours out) and caches nothing across fires.
+`exp` is 12 hours out) and caches nothing across fires. The `sub` is the one
+the latest subscription or schedule write carried: `https://<apex>` from
+`hostthisd`, `<scheme>://<apex>` from the Worker, its scheme
+`HOSTTHIS_PUBLIC_SCHEME` (`https` when unset).
 
 ### Timer
 
@@ -3404,8 +3514,9 @@ classified in this order:
 1. **Public host.** A request whose host is the apex or any name under it
    (`<apex>`, `<slug>.<apex>`, `www.<apex>`, `a.b.<apex>`) goes to the public
    router, whatever its path, query, method or headers, a valid token
-   included. Nothing a public request carries reaches the internal router, a
-   cell or the payload bucket.
+   included. Nothing a public request carries reaches the internal router or
+   the payload bucket, and it reaches a cell only as values the public router
+   parsed (below).
 2. **No token, no internal router.** With `HOSTTHIS_CELLD_TOKEN` unset or
    empty, every other request, `/healthz` included, answers 503: a Worker with
    a public surface never runs an open internal router.
@@ -3415,16 +3526,35 @@ classified in this order:
    not already give. A forwarded host that is not a well-formed hostname
    (dot-separated labels of letters, digits and hyphens) equal to or under the
    apex answers 400. Without a valid token the header is ignored and the
-   request is internal (401, or `/healthz`).
+   request is internal (401, or `/healthz`). A forwarded request's client
+   address is the `X-Hostthis-Client-IP` header, trusted for the same reason;
+   a direct request's is never read from it.
 4. **Internal.** Everything else reaches the internal router, unchanged.
 
 Hosts compare after normalization: lowercase, no port, no trailing dot. The
 apex value is normalized the same way, so `Example.COM.:443` names
 `example.com`.
 
-The public router serves no routes yet. It answers every request 404 with
-`404 page not found`, `Content-Type: text/plain; charset=utf-8` and
-`X-Content-Type-Options: nosniff`, the 404 `hostthisd` gives an unknown slug.
+The public router serves an app on a slug host, `<slug>.<apex>` whose one
+label parses as a slug, and, with `HOSTTHIS_URL_MODE=path` (dev and tests
+only; `subdomain` is the default), under `/p/<slug>/` on the apex host. For an
+app it first does what Go's server and `ServeMux` do before `hostthisd`
+routes: a malformed percent escape is a 400, a path that cleaning changes (a
+doubled slash, a `.` or `..` segment; a trailing slash is kept) is redirected
+307 to its cleaned form with the query kept, and the path is percent-decoded
+once. It then serves the rooms API, room push and the room WebSocket
+(`/api/rooms[/...]` and `/api/push/key`, see "Rooms", "Real-time room relay"
+and "Room push"). It builds every cell request from parsed values: the slug
+from the host or the path-mode prefix, the room from the parsed UUID, the key
+from the decoded path, and a body it decoded, checked and encoded again.
+Neither the client's URL nor its query, headers or body reaches a cell, so
+no request can choose a cell op. Its other Worker settings are
+`HOSTTHIS_PUBLIC_SCHEME` (the push `sub`) and `HOSTTHIS_CLIENT_IP_SOURCE`
+(the room creation limit's client address, see "Quota and abuse").
+
+Every other request answers 404 with `404 page not found`,
+`Content-Type: text/plain; charset=utf-8` and `X-Content-Type-Options:
+nosniff`, the 404 `hostthisd` gives an unknown slug.
 
 ## Edge caching
 
