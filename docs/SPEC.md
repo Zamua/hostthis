@@ -3629,9 +3629,11 @@ Content responses carry the sandbox headers (see "HTML sandboxing"),
 conditional requests before any payload is read (see "Cache-Control
 posture"). Raw bytes take the kind's raw type (`text/plain; charset=utf-8`
 when it has none), a site or knowledge base file its stored type
-(`application/octet-stream` when empty). Every 500 logs one warning naming the
-slug and the cause, and nothing else (see "5xx observability on the read
-surface").
+(`application/octet-stream` when empty). Every 500 is bare, as `hostthisd`'s:
+its text with `Content-Type`, `X-Content-Type-Options: nosniff` and
+`Cache-Control: no-store`, no sandbox headers or validators. It logs one
+warning naming the slug and the cause, and nothing else (see "5xx
+observability on the read surface").
 
 The bytes stream from `PAYLOADS` through a check of the at-rest magic and a
 zstd decoder (see "On-disk format"), never held whole: libzstd's decompressor
