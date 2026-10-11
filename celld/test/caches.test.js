@@ -245,6 +245,36 @@ test("every edge key names the build, so a deploy starts a fresh key space", asy
   assert.equal(reads, 2, "each build misses once, then hits");
 });
 
+// hostthisd purges again 15 s after every purge, so a fill must land well
+// inside that of the read that began it.
+test("an edge fill that would end more than 10 s after its read began is abandoned", async () => {
+  const target = { slug: SLUG, path: "/", host: `${SLUG}.paste.test`, mount: "", flags: { raw: false, files: false } };
+  for (const [readTakes, bodyEndsAt, stores] of [[0, 10_000, true], [0, 10_001, false], [4_000, 10_001, false], [0, 2_000, true]]) {
+    const cache = new FakeCache();
+    const waits = [];
+    let clock = 1_000_000;
+    const began = clock;
+    let source;
+    const read = async () => {
+      clock = began + readTakes;
+      const body = new ReadableStream({ start: (c) => { source = c; } }, { highWaterMark: 0 });
+      return new Response(body, { headers: { "Cache-Control": "public, no-cache" } });
+    };
+    const cached = withEdgeCache(read, { cache, ttl: 60, build: "b", now: () => clock });
+    const res = await cached(new Request(at("/")), {}, { waitUntil: (p) => waits.push(p) }, target);
+    const reader = res.body.getReader();
+    const first = reader.read();
+    source.enqueue(new Uint8Array([1, 2, 3]));
+    assert.deepEqual([...(await first).value], [1, 2, 3]);
+    clock = began + bodyEndsAt;
+    const end = reader.read();
+    source.close();
+    assert.equal((await end).done, true, "the client reads to the end either way");
+    await Promise.all(waits);
+    assert.equal(cache.entries.size, stores ? 1 : 0, `read ${readTakes} ms, body ended at ${bodyEndsAt} ms`);
+  }
+});
+
 test("a client that stops reading stops the edge fill, the decoder and the payload read", async () => {
   for (const vars of [TTL, { ...TTL, HOSTTHIS_BLOB_CACHE_MAX_BYTES: String(8 * 1024 * 1024) }]) {
     const cache = new FakeCache();

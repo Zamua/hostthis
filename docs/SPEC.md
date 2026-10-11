@@ -3705,7 +3705,12 @@ off unless configured, and used only where the runtime has a Cache API
   response whose `Content-Length` (the manifest's size) is over it starts no
   fill, and one that states none (a shell, a file list) is abandoned once it
   runs past it. A write purges the slug's host (see "Active invalidation"),
-  which also drops these entries; the TTL bounds a missed purge.
+  which also drops these entries; the TTL bounds a missed purge. A read that
+  began before a write can still be filling when the purge lands, so a fill
+  must end within 10 s of its read beginning (timed from before the read's
+  cell call), and one that would end later is abandoned and stores nothing:
+  `hostthisd` purges the slug a second time 15 s after each purge, and that
+  second purge then finds every entry such a read stored.
 - `HOSTTHIS_BLOB_CACHE_MAX_BYTES` (default `0`, off) caches the decoded bytes
   of each object whose decoded size (the manifest's) is at most that many
   bytes, keyed by the object key. A key never names different bytes, so these
