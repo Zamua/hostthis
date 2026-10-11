@@ -163,10 +163,10 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 	case errors.Is(err, errCompressedCapExceeded):
 		return UpdateResult{}, ErrCompressedTooLarge
 	case err != nil:
-		return UpdateResult{}, fmt.Errorf("staging: %w", err)
+		return UpdateResult{}, fmt.Errorf("%w: %w", errStaging, err)
 	}
 	if staged.RawSize == 0 {
-		return UpdateResult{}, errors.New("empty upload")
+		return UpdateResult{}, ErrEmptyUpload
 	}
 	existing, err := m.requireOwner(slug, owner)
 	if err != nil {

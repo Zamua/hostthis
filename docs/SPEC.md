@@ -3811,21 +3811,22 @@ Operations that fire a purge:
 `rename` does NOT purge - the name is owner-only metadata, not part of
 the public response. Same with `versions`/`list`/`whoami`/`get`.
 
-**`delete` purges even when it reports failure.** The other three purge
-only on success, which is right for them: if an update did not happen,
-the cached bytes are still correct. A delete is different, because it can
-report an error *after* the paste is already gone - a transient storage
-error partway through, for instance - and then the URL serves deleted
-content from the edge until the edge's own TTL ends. Since
-purging a paste that still exists is harmless (the next reader simply
-re-fetches it), a delete purges unless the error proves nothing was
-touched.
+**A write purges even when it reports failure.** A write can report an
+error *after* it committed - a transport error that loses the cell's
+answer, a transient storage error partway through a delete - and then the
+URL serves the old state (or deleted content) from the edge until the
+edge's own TTL ends. Since purging a slug that did not change is harmless
+(the next reader simply re-fetches it), every purging write purges unless
+its error proves nothing was touched.
 
-"Nothing was touched" means the pre-mutation rejections only:
-`ErrNotFound` and `ErrEmptyOwner`, both raised by the ownership pre-check
-before any write is attempted. Excluding them is not
-an optimisation - it is what stops an unrelated caller from forcing
-purges on slugs they do not own by attempting deletes, which would spend
+"Nothing was touched" means the rejections raised before any write is
+attempted: `ErrNotFound` and `ErrEmptyOwner` from the ownership pre-check,
+and the refusals of an update's body while it is staged
+(`ErrRawTooLarge`, `ErrCompressedTooLarge`, an empty upload, a local
+staging failure). Excluding them is not an optimisation - it is what stops
+an unrelated caller from forcing purges on slugs they do not own: an
+update stages its body before it checks ownership, so without the staging
+refusals in the list, an empty or oversized update of any slug would spend
 the CDN's finite purge budget on request.
 
 The interface lives in the service layer; no production code - not even
@@ -3843,8 +3844,8 @@ Invalidation is **transparent to the business logic.** The verb service
 no `CachePurger` field and no purge calls. A thin `CacheInvalidating`
 decorator wraps the verb service at the composition root
 (`cmd/hostthisd`): it delegates every verb to the inner service and,
-after a *successful* `Update` / `Delete` / `Pin` / `Unpin`, fires
-`PurgePaste(slug)`. The mutation use-cases stay pure; cache invalidation
+after an `Update` / `Delete` / `Pin` / `Unpin` that succeeded or may have
+(see above), fires `PurgePaste(slug)`. The mutation use-cases stay pure; cache invalidation
 is a cross-cutting concern layered on by composition, not woven into the
 domain logic. `rename` / `versions` / `list` / `whoami` / `get` /
 `deleteVersion` are delegated without a purge - they don't change the

@@ -3,6 +3,8 @@ package service
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"testing"
 
@@ -145,6 +147,94 @@ type stubManager struct {
 }
 
 func (s stubManager) Delete(domain.Slug, string) error { return s.err }
+
+func (s stubManager) Update(domain.Slug, string, io.Reader, string) (UpdateResult, error) {
+	return UpdateResult{}, s.err
+}
+
+func (s stubManager) Pin(domain.Slug, string, int) (domain.Version, error) {
+	return domain.Version{}, s.err
+}
+
+func (s stubManager) Unpin(domain.Slug, string) error { return s.err }
+
+// Every mutating verb purges unless its error proves nothing was written: a
+// transport error after the cell committed leaves the new state served.
+func TestMutationsPurgeUnlessNothingWasTouched(t *testing.T) {
+	verbs := map[string]func(PasteManager, domain.Slug) error{
+		"update": func(m PasteManager, s domain.Slug) error {
+			_, err := m.Update(s, testOwner, strings.NewReader("x"), "")
+			return err
+		},
+		"pin": func(m PasteManager, s domain.Slug) error {
+			_, err := m.Pin(s, testOwner, 1)
+			return err
+		},
+		"unpin": func(m PasteManager, s domain.Slug) error { return m.Unpin(s, testOwner) },
+	}
+	for name, call := range verbs {
+		for _, tc := range []struct {
+			name      string
+			err       error
+			wantPurge bool
+		}{
+			{"success", nil, true},
+			{"transient storage error", assertErr("commit response lost"), true},
+			{"wrapped transient error", fmt.Errorf("append: %w", assertErr("timeout")), true},
+			{"not found", ErrNotFound, false},
+			{"anonymous", ErrEmptyOwner, false},
+			// Raised while staging the body, before ownership is checked.
+			{"too large", ErrRawTooLarge, false},
+			{"compressed too large", ErrCompressedTooLarge, false},
+			{"empty upload", ErrEmptyUpload, false},
+			{"staging", fmt.Errorf("%w: %w", errStaging, assertErr("disk full")), false},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				purger := &recordingPurger{}
+				mgr := NewCacheInvalidating(stubManager{err: tc.err}, purger)
+				if got := call(mgr, "abc12345"); got != tc.err {
+					t.Fatalf("error passthrough: got %v, want %v", got, tc.err)
+				}
+				if gotPurge := len(purger.calls()) == 1; gotPurge != tc.wantPurge {
+					t.Fatalf("purged=%v, want %v (err=%v)", gotPurge, tc.wantPurge, tc.err)
+				}
+			})
+		}
+	}
+}
+
+// An update of a slug the caller does not own never purges, whatever its body:
+// the body is staged before ownership is checked, so its rejections must be
+// recognised too.
+func TestUpdateOfAnotherOwnersPasteDoesNotPurge(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	purger := &recordingPurger{}
+	mgr := NewCacheInvalidating(manage, purger)
+	slug := newPaste(t, upload)
+	for name, body := range map[string]io.Reader{
+		"html":      bytes.NewReader(htmlBody(300)),
+		"empty":     strings.NewReader(""),
+		"too large": io.LimitReader(zeros{}, int64(domain.HardRawByteCap)+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			purger.reset()
+			if _, err := mgr.Update(slug, "key:someone-else", body, ""); err == nil {
+				t.Fatal("want an error updating another owner's paste")
+			}
+			if got := purger.calls(); len(got) != 0 {
+				t.Fatalf("another owner's slug purged %v", got)
+			}
+		})
+	}
+}
+
+// zeros is an endless stream of zero bytes.
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
 
 // A delete purges unless the error proves the paste was never touched. The
 // ambiguous middle - a removal that landed and then reported failure - is the
