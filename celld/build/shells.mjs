@@ -25,15 +25,18 @@ export function loadTable() {
   return { csp: raw.csp, kinds: raw.kinds, shells };
 }
 
-// Source of SHELLS_MODULE: the table and the template of every shell with a
-// page.
+// Source of SHELLS_MODULE: the table, the template of every shell with a
+// page, and the assets too large for static assets, which PAYLOADS serves.
 export function shellsModule() {
   const table = loadTable();
   const templates = {};
   for (const [dir, shell] of Object.entries(table.shells)) {
     if (shell.csp) templates[dir] = readFileSync(join(SHELLS_DIR, dir, TEMPLATE), "utf8");
   }
-  return `export const table = ${JSON.stringify(table)};\nexport const templates = ${JSON.stringify(templates)};\n`;
+  const r2 = listAssets(table).filter((a) => a.size > MAX_ASSET_BYTES).map((a) => a.name);
+  return `export const table = ${JSON.stringify(table)};\n`
+    + `export const templates = ${JSON.stringify(templates)};\n`
+    + `export const r2 = ${JSON.stringify(r2)};\n`;
 }
 
 // Resolves SHELLS_MODULE in an esbuild build.

@@ -31,7 +31,7 @@ before(async () => {
     modules: true,
     scriptPath: `${celld}dist/index.js`,
     modulesRoot: celld,
-    modulesRules: [{ type: "ESModule", include: ["**/*.js"] }],
+    modulesRules: [{ type: "ESModule", include: ["**/*.js"] }, { type: "CompiledWasm", include: ["**/*.wasm"] }],
     compatibilityDate: config.compatibility_date,
     cf: false,
     bindings: { HOSTTHIS_APEX_DOMAIN: APEX, HOSTTHIS_CELLD_TOKEN: TOKEN, ROOM_PING_STALE_MS: String(STALE_MS) },

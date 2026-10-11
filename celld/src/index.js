@@ -1,5 +1,6 @@
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
+import { publicReads } from "./public/surface.js";
 import { resolveRead } from "./read.js";
 import {
   PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP,
@@ -3344,14 +3345,14 @@ const internalRouter = {
 // The host picks the router before any path is read (docs/SPEC.md "Public and
 // internal hosts"). Without an apex the internal router answers everything.
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const apex = normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? "");
     if (!apex) {
       return internalRouter.fetch(request, env);
     }
     const host = normalizeHost(new URL(request.url).hostname);
     if (withinApex(host, apex)) {
-      return publicRouter(request, env, host);
+      return publicRouter(request, env, host, false, { ctx, reads: publicReads(env) });
     }
     if (!env.HOSTTHIS_CELLD_TOKEN) {
       return new Response("internal routes need HOSTTHIS_CELLD_TOKEN\n", { status: 503 });
@@ -3362,7 +3363,7 @@ export default {
       if (!isHostname(target) || !withinApex(target, apex)) {
         return new Response("forwarded host outside the apex\n", { status: 400 });
       }
-      return publicRouter(request, env, target, true);
+      return publicRouter(request, env, target, true, { ctx, reads: publicReads(env) });
     }
     return internalRouter.fetch(request, env);
   },

@@ -200,7 +200,7 @@ test("a public request never reaches the internal router, a cell or the bucket",
           const what = `${method} ${host}${path}`;
           const calls = [];
           const res = await call(env(vars, calls), `http://${host}${path}`, { method, headers });
-          assert.equal(res.status, 404, what);
+          assert.equal(res.status, path === "/healthz" ? 200 : 404, what);
           assert.deepEqual(calls, [], what);
         }
       }
@@ -237,7 +237,11 @@ test("a forwarded request reaches the public router only behind the token", asyn
       const what = `${forwarded} ${path}`;
       const calls = [];
       const res = await call(env(vars, calls), origin + path, { headers: { ...AUTH, [FORWARDED]: forwarded } });
-      await assertPublicNotFound(res, what);
+      if (path === "/healthz") {
+        assert.equal(await res.text(), "ok\n", what);
+      } else {
+        await assertPublicNotFound(res, what);
+      }
       assert.deepEqual(calls, [], what);
     }
   }

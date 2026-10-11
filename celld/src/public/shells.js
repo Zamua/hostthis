@@ -1,6 +1,6 @@
 // The render shells hostthisd serves, from web/shells: the build resolves
 // "hostthis:shells" to shells.json and the page templates. Pure, no I/O.
-import { table, templates } from "hostthis:shells";
+import { r2, table, templates } from "hostthis:shells";
 
 function own(object, key) {
   return Object.hasOwn(object, key) ? object[key] : undefined;
@@ -9,7 +9,7 @@ function own(object, key) {
 const assets = new Map();
 for (const shell of Object.values(table.shells)) {
   for (const [name, contentType] of Object.entries(shell.assets)) {
-    assets.set(name, { contentType, key: `static/${shell.version}/${name}` });
+    assets.set(name, { contentType, key: `static/${shell.version}/${name}`, r2: r2.includes(name) });
   }
 }
 
@@ -30,8 +30,9 @@ export function rawContentType(kind) {
   return own(table.kinds, kind)?.raw ?? null;
 }
 
-// A whitelisted /_hostthis/ asset: its Content-Type and the PAYLOADS key it is
-// served from where static assets cannot hold it. null for any other name.
+// A whitelisted /_hostthis/ asset: its Content-Type, the PAYLOADS key it is
+// served from where static assets cannot hold it, and whether they cannot
+// (r2). null for any other name.
 export function asset(name) {
   return assets.get(name) ?? null;
 }

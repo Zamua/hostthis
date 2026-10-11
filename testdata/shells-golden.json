@@ -413,6 +413,42 @@
     "size": 10708,
     "sha256": "4f4982b6423bc56309d1d97cc76b26a4dc0e36c6cec7fee540a2ff8e0f408115"
   },
+  "error/notfound": {
+    "status": 404,
+    "header": {
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "size": 19,
+    "sha256": "b16e15764b8bc06c5c3f9f19bc8b99fa48e7894aa5a6ccdad65da49bbf564793"
+  },
+  "health/healthz": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/plain; charset=utf-8"
+    },
+    "size": 3,
+    "sha256": "dc51b8c96c2d745df3bd5590d990230a482fd247123599548e0632fdbf97fc22"
+  },
+  "health/readyz": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json; charset=utf-8"
+    },
+    "size": 15,
+    "sha256": "5e14e40959fca7910afc84bc78fef3e3d399d79cf1d430b7dba7edd558f1d3c5"
+  },
+  "health/redirect": {
+    "status": 307,
+    "header": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Location": "/healthz"
+    },
+    "size": 44,
+    "sha256": "cf4b5d436db99be821db085e5d3c0dc31782e1ce883466cecc45efedea1466f2"
+  },
   "kb/document": {
     "status": 200,
     "header": {
@@ -427,6 +463,34 @@
     },
     "size": 2172,
     "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
+  },
+  "kb/files": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, no-cache",
+      "Content-Type": "application/json; charset=utf-8",
+      "Etag": "\"files-up-kb\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 97,
+    "sha256": "657f823d65043e5835ecc6455a73f418c1ad7fe24cd8dbfd93b339c58ddeac08"
+  },
+  "kb/files-escapes": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, no-cache",
+      "Content-Type": "application/json; charset=utf-8",
+      "Etag": "\"files-up-escapes\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 162,
+    "sha256": "59fbab191712bd0626a0e5136adeb262a147af36f55f4b04b99b1652c337254c"
   },
   "kb/raw": {
     "status": 200,
@@ -597,6 +661,33 @@
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
   },
+  "redirect/clean": {
+    "status": 307,
+    "header": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Location": "/a/b?raw=1"
+    },
+    "size": 46,
+    "sha256": "b4bed7daf55510d392ba301506d9677aa9509db840f0ac24db56cc9af3f130bc"
+  },
+  "redirect/head": {
+    "status": 307,
+    "header": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Location": "/a/b"
+    },
+    "size": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "redirect/tree": {
+    "status": 307,
+    "header": {
+      "Content-Type": "text/html; charset=utf-8",
+      "Location": "/_hostthis/?v=x"
+    },
+    "size": 51,
+    "sha256": "742688ae11d9fb08dd4621de2b7c7e1416998108ba4c619f0a167160c9949212"
+  },
   "shell/csv": {
     "status": 200,
     "header": {
@@ -746,5 +837,28 @@
     },
     "size": 725,
     "sha256": "7f49bdddeb81a9701ca0c087d6b048eaa233456df577d6aab12e1d73c9fe01f3"
+  },
+  "status/failed": {
+    "status": 410,
+    "header": {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/html; charset=utf-8",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 805,
+    "sha256": "2346ecb7503501b9f71b705aa23d00730bbf60372918f44091bf73845aa66598"
+  },
+  "status/pending": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/html; charset=utf-8",
+      "Referrer-Policy": "no-referrer",
+      "Retry-After": "1",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 1206,
+    "sha256": "8f9db65481eeb4644ff65de6ee48f46db18c327c5bca7ea37d259f26c0efbe87"
   }
 }

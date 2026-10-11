@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"fmt"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"os"
@@ -48,8 +49,34 @@ func shellResponses(t *testing.T) map[string]goldenResponse {
 		got["raw/"+string(kind)] = recordResponse(serveReady(t, kind, "abc23456", keyA, src, "/p/abc23456?raw=1", "text/html"))
 	}
 	kb := buildKBServer(t).Handler()
-	for name, path := range map[string]string{"kb/root": "/", "kb/document": "/guide/setup.md", "kb/raw": "/guide/setup.md?raw=1"} {
+	for name, path := range map[string]string{
+		"kb/root": "/", "kb/document": "/guide/setup.md", "kb/raw": "/guide/setup.md?raw=1", "kb/files": "/?files=1",
+	} {
 		got[name] = recordResponse(kbGet(t, kb, path))
+	}
+	got["kb/files-escapes"] = recordResponse(kbGet(t, escapingKBServer().Handler(), "/?files=1"))
+	for name, status := range map[string]domain.PasteStatus{"status/pending": domain.PasteStatusPending, "status/failed": domain.PasteStatusFailed} {
+		srv := &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{p: domain.Paste{
+			Slug: "abc23456", Status: status, Kind: domain.KindMarkdown,
+			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: keyA}),
+		}}}
+		got[name] = recordResponse(kbGet(t, srv.Handler(), "/"))
+	}
+	for name, req := range map[string][2]string{
+		"error/notfound":  {"GET", "/"},
+		"redirect/clean":  {"GET", "/a//b?raw=1"},
+		"redirect/head":   {"HEAD", "/a//b"},
+		"redirect/tree":   {"GET", "/_hostthis?v=x"},
+		"health/healthz":  {"GET", "/healthz"},
+		"health/readyz":   {"GET", "/readyz"},
+		"health/redirect": {"GET", "//healthz"},
+	} {
+		srv := &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{}}
+		r := httptest.NewRequest(req[0], req[1], nil)
+		r.Host = "abc23456.paste.test"
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		got[name] = recordResponse(w)
 	}
 	mux := (&Server{ApexDomain: "paste.test"}).Handler()
 	names := []string{"shell.html", "shells.json", "evil.js", "mdshell/md.js", "common/deeplink.js"}
@@ -66,8 +93,27 @@ func shellResponses(t *testing.T) map[string]goldenResponse {
 	return got
 }
 
+// escapingKBPaths are knowledge base paths whose file list exercises the JSON
+// encoder's escapes and UTF-8 byte order.
+var escapingKBPaths = []string{
+	"a<b>&c.md", "line sep .md", "quote\"back\\slash.md", "tab\tnl\n.md", "ctl\x01\x1f\b\f.md",
+	"del\x7f.md", "é.md", "\U0001d11e.md", ".md", "z.md",
+}
+
+func escapingKBServer() *Server {
+	m := domain.NewManifest()
+	for i, p := range escapingKBPaths {
+		m.Add(p, domain.ManifestEntry{Key: fmt.Sprintf("key-%d", i), Size: 1})
+	}
+	return &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{p: domain.Paste{
+		Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindKnowledgeBase,
+		UploadID: "up-escapes", UpdatedAt: kbUpdated, Manifest: m,
+	}}}
+}
+
 // Shell pages, raw responses and renderer assets keep their exact status,
-// headers and bytes wherever the shell files and table live.
+// headers and bytes wherever the shell files and table live. The Worker's
+// tests hold its public surface to the same records.
 func TestShells_GoldenResponses(t *testing.T) {
 	got := shellResponses(t)
 	if *updateShellGolden {
