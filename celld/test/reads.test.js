@@ -441,10 +441,13 @@ async function capturingWarnings(run) {
   return warned;
 }
 
+// A read-path 5xx is bare, as hostthisd's: its text, and nothing a cache keeps.
+const BARE_500 = { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff", "cache-control": "no-store" };
+
 async function assertInternalError(res) {
   assert.equal(res.status, 500);
   assert.equal(await res.text(), "internal error\n");
-  assert.deepEqual(headersOf(res), { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" });
+  assert.deepEqual(headersOf(res), BARE_500);
 }
 
 test("a payload that is missing or damaged before the first byte is a 500 with one warning", async () => {
@@ -599,11 +602,14 @@ test("a stored kind with no shell is a 500 naming it", async () => {
   const w = world();
   w.row(SLUG, documentRow("hologram"));
   const warned = await capturingWarnings(async () => {
-    const res = await w.fetch(at("/"));
-    assert.equal(res.status, 500);
-    assert.equal(await res.text(), "unsupported kind\n");
+    for (const headers of [{}, { "If-None-Match": "*" }]) {
+      const res = await w.fetch(at("/"), { headers });
+      assert.equal(res.status, 500);
+      assert.equal(await res.text(), "unsupported kind\n");
+      assert.deepEqual(headersOf(res), BARE_500);
+    }
   });
-  assert.equal(warned.length, 1);
+  assert.equal(warned.length, 2);
   assert.match(warned[0], /hologram/);
 });
 
@@ -650,7 +656,12 @@ test("an asset HEAD reads nothing, and a missing stored asset is a 500", async (
   assert.equal(res.headers.get("Content-Type"), "text/javascript; charset=utf-8");
   assert.equal(await res.text(), "");
   assert.deepEqual(w.payloadCalls, []);
-  const warned = await capturingWarnings(async () => assertInternalError(await w.fetch(at("/_hostthis/md.js"))));
+  const warned = await capturingWarnings(async () => {
+    const failed = await w.fetch(at("/_hostthis/md.js"));
+    assert.equal(failed.status, 500);
+    assert.equal(await failed.text(), "internal error\n");
+    assert.deepEqual(headersOf(failed), { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" });
+  });
   assert.equal(warned.length, 1);
   // Assets answer on every public host.
   w.assets(staticAssets);

@@ -6,7 +6,7 @@ import { goStringList } from "./gojson.js";
 import { formatHTTPDate } from "./httpdate.js";
 import { exactLength } from "./length.js";
 import { FAILED_PAGE, LOADING_PAGE } from "./pages.js";
-import { internalError, methodNotAllowed, notFound } from "./responses.js";
+import { goError, methodNotAllowed, notFound } from "./responses.js";
 import { rawContentType, renderShell } from "./shells.js";
 
 // Every content response's: stored by any cache, revalidated before each reuse.
@@ -21,6 +21,12 @@ function sandbox() {
 
 function warn(slug, cause) {
   console.warn(`warn: read 500: slug=${slug} ${cause}`);
+}
+
+// A read-path 5xx is bare, as hostthisd's: its text, and nothing a cache may
+// keep.
+function failure(message = "internal error") {
+  return goError(500, message, { "Cache-Control": "no-store" });
 }
 
 // The answer for target, from a request built of parsed values alone.
@@ -54,7 +60,7 @@ export function readPath(openBlob) {
       answer = await resolveAnswer(env, target);
     } catch (error) {
       warn(target.slug, `metadata resolve: ${error.message}`);
-      return internalError();
+      return failure();
     }
     if (answer.found === false) {
       return notFound();
@@ -91,7 +97,7 @@ export function readPath(openBlob) {
         body = await openBlob(env, entry, ctx);
       } catch (error) {
         warn(target.slug, `${what} blob read: ${error.message}`);
-        return internalError();
+        return failure();
       }
       // The manifest's size is the decoded length; held to it, damage found
       // after the headers leaves a body short of its Content-Length.
@@ -108,7 +114,7 @@ export function readPath(openBlob) {
       const shell = renderShell(shellKind);
       if (!shell) {
         warn(target.slug, `unsupported stored kind ${JSON.stringify(kind)}`);
-        return internalError("unsupported kind");
+        return failure("unsupported kind");
       }
       const headers = content(`"${shell.version}"`);
       if (unchanged(headers)) {
@@ -143,7 +149,7 @@ export function readPath(openBlob) {
       }
       default:
         warn(target.slug, `unknown resolve action ${JSON.stringify(answer.action)}`);
-        return internalError();
+        return failure();
     }
   };
 }
