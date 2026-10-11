@@ -3857,9 +3857,9 @@ decorator wraps the verb service at the composition root
 after an `Update` / `Delete` / `Pin` / `Unpin` that succeeded or may have
 (see above), fires `PurgePaste(slug)`. A `SiteCacheInvalidating` decorator
 does the same around the site deploy service for `DeployToSlug` and its
-`Delete`, by the same rule. The mutation use-cases stay pure; cache invalidation
-is a cross-cutting concern layered on by composition, not woven into the
-domain logic. `rename` / `versions` / `list` / `whoami` / `get` /
+`Delete`, by the same rule. The mutation use-cases stay pure; cache
+invalidation is a cross-cutting concern layered on by composition, not
+woven into the domain logic. `rename` / `versions` / `list` / `whoami` / `get` /
 `deleteVersion` are delegated without a purge - they don't change the
 bytes served at the public URL (`deleteVersion` is refused outright when
 the target is the currently-served version).
