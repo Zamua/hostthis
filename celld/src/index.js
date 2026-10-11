@@ -1,6 +1,9 @@
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
 import { resolveRead } from "./read.js";
+import {
+  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP,
+} from "./rooms/policy.js";
 
 // The owner identity scopes intents, quota reservations, and the paste index.
 // Paste rows use slug-scoped cells, so cross-cell creates recover through the
@@ -1375,6 +1378,9 @@ export class Room {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    // The runtime answers the ping itself, without waking the cell, and
+    // records when it last did: the liveness admit() reads.
+    state.setWebSocketAutoResponse?.(new WebSocketRequestResponsePair(PING_FRAME, PONG_FRAME));
   }
 
   // The app's paste cell, which owns the per-app room budget and the creation
@@ -1436,6 +1442,12 @@ export class Room {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
     }
+    // Nothing awaits between the cap check and the accept, so concurrent joins
+    // cannot both take the last place.
+    const refused = this.admit(Date.now());
+    if (refused) {
+      return refused;
+    }
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     // acceptWebSocket, not server.accept(): the hibernatable form is what lets
@@ -1455,6 +1467,37 @@ export class Room {
       server.send(JSON.stringify({ type: "snapshot", seq: doc ? doc.seq : 0, state }));
     }
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // Closes the sockets whose last ping answer is stale, then refuses a join
+  // past the cap with the 429 the client sees in place of the 101. A socket
+  // that never pinged has no answer to go stale; it leaves when it closes or a
+  // write to it fails. ROOM_PING_STALE_MS in env is a test hook.
+  admit(now) {
+    const staleAfter = Number(this.env?.ROOM_PING_STALE_MS ?? ROOM_PING_STALE_MS);
+    let open = 0;
+    for (const ws of this.state.getWebSockets()) {
+      const answered = this.state.getWebSocketAutoResponseTimestamp?.(ws) ?? null;
+      if (answered !== null && now - answered.getTime() > staleAfter) {
+        try {
+          ws.close(1000, "stale");
+        } catch {
+          // closed already
+        }
+        continue;
+      }
+      // A socket already closing is on its way out.
+      if (!(ws.readyState >= 2)) {
+        open++;
+      }
+    }
+    if (open < ROOM_SOCKET_CAP) {
+      return null;
+    }
+    return new Response("room connection limit reached\n", {
+      status: 429,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
 
   // Direct entry points, same gating as the op table.
@@ -1996,6 +2039,14 @@ export class Room {
   }
 
   async webSocketMessage(ws, message) {
+    if (overFrameLimit(message)) {
+      try {
+        ws.close(1009, "frame too large");
+      } catch {
+        // closed already
+      }
+      return;
+    }
     if (typeof message === "string") {
       try {
         const frame = JSON.parse(message);
@@ -2019,6 +2070,18 @@ export class Room {
       }
     }
   }
+}
+
+// Every UTF-16 unit is one to three bytes of UTF-8, so only a frame between
+// the two bounds needs encoding to be measured.
+function overFrameLimit(message) {
+  if (typeof message !== "string") {
+    return message.byteLength > ROOM_CLIENT_FRAME_LIMIT;
+  }
+  if (message.length > ROOM_CLIENT_FRAME_LIMIT) {
+    return true;
+  }
+  return message.length * 3 > ROOM_CLIENT_FRAME_LIMIT && utf8(message).length > ROOM_CLIENT_FRAME_LIMIT;
 }
 
 // 1000 and application codes (3000-4999) are the close() codes every runtime
@@ -3299,7 +3362,7 @@ export default {
       if (!isHostname(target) || !withinApex(target, apex)) {
         return new Response("forwarded host outside the apex\n", { status: 400 });
       }
-      return publicRouter(request, env, target);
+      return publicRouter(request, env, target, true);
     }
     return internalRouter.fetch(request, env);
   },
