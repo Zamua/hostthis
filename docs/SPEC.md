@@ -3673,8 +3673,8 @@ off unless configured, and used only where the runtime has a Cache API
   client gets the browser headers. A hit answers GET, HEAD and conditional
   requests (the cache answers `If-None-Match` and `If-Modified-Since` with a
   304 itself, by RFC 9110's rules) without a cell call or a payload read, and
-  reaches the client
-  with `Cache-Control: public, no-cache`. A conditional request or a HEAD that
+  reaches the client with `Cache-Control: public, no-cache`; a 304, or the
+  answer to a HEAD, carries no body. A conditional request or a HEAD that
   misses goes to the read path and fills nothing. Only a `200` with the
   content posture is stored: never a 5xx, a 404, or a pending or failed page.
   A write purges the slug's host (see "Active invalidation"), which also

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { lockstepTee } from "../src/public/caches.js";
+import { lockstepTee, withEdgeCache } from "../src/public/caches.js";
 import { publicReads } from "../src/public/surface.js";
 import { at, documentRow, FORWARDED, headersOf, SLUG, TOKEN, world } from "./public-world.js";
 import { stored } from "./stored.js";
@@ -115,6 +115,31 @@ test("a GET fills the edge cache, and a hit answers GET, HEAD and conditionals a
     assert.equal(conditional.headers.get("Cache-Tag"), null);
     assert.deepEqual([w.cellRequests.length, w.payloadCalls.length], calls, "a hit makes no cell call or payload read");
   });
+});
+
+test("a stored 304, and a hit for a HEAD, reach the client without a body", async () => {
+  const headers = { "ETag": "\"k\"", "Cache-Control": "public, max-age=60", "Cache-Tag": SLUG };
+  const bodies = [];
+  // A runtime may hand back a 304 that still carries an (empty) body stream.
+  const cache = {
+    async match(request) {
+      const body = new ReadableStream({ cancel: () => { body.cancelled = true; } });
+      bodies.push(body);
+      return { status: request.headers.has("If-None-Match") ? 304 : 200, headers: new Headers(headers), body };
+    },
+    put: async () => {},
+  };
+  const read = withEdgeCache(() => assert.fail("a hit reached the read path"), { cache, ttl: 60, build: "b" });
+  const target = { slug: SLUG, path: "/", host: `${SLUG}.paste.test`, mount: "", flags: { raw: false, files: false } };
+  const revalidated = await read(new Request(at("/"), { headers: { "If-None-Match": "\"k\"" } }), {}, {}, target);
+  assert.equal(revalidated.status, 304);
+  assert.equal(revalidated.body, null);
+  assert.equal(revalidated.headers.get("Cache-Control"), "public, no-cache");
+  const head = await read(new Request(at("/"), { method: "HEAD" }), {}, {}, target);
+  assert.equal(head.status, 200);
+  assert.equal(head.body, null);
+  assert.equal(head.headers.get("Cache-Tag"), null);
+  assert.ok(bodies.every((b) => b.cancelled), "a body the client never gets is cancelled");
 });
 
 test("a conditional request or a HEAD that misses fills nothing", async () => {
