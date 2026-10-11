@@ -69,6 +69,25 @@ export function goText(bytes, start = 0, end = bytes.length) {
   return parts.join("");
 }
 
+// Strings in Go's order, the order of their UTF-8 bytes, which is code point
+// order. The default sort compares UTF-16 units and puts U+10000 and above
+// before U+E000 to U+FFFF.
+export function compareCodePoints(a, b) {
+  const left = a[Symbol.iterator]();
+  const right = b[Symbol.iterator]();
+  for (;;) {
+    const x = left.next();
+    const y = right.next();
+    if (x.done || y.done) {
+      return (x.done ? 0 : 1) - (y.done ? 0 : 1);
+    }
+    const diff = x.value.codePointAt(0) - y.value.codePointAt(0);
+    if (diff !== 0) {
+      return diff;
+    }
+  }
+}
+
 // Go's utf8.Valid.
 export function validUTF8(bytes) {
   for (let i = 0; i < bytes.length;) {

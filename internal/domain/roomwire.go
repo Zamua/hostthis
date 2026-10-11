@@ -12,10 +12,10 @@ import (
 // byte of an invalid UTF-8 sequence becomes one U+FFFD, as the frames carry
 // it, so a client never meets bytes its own decoder would replace otherwise.
 //
-// The HTTP scan handler and the relay's snapshot / mirror frames MUST carry
-// the same value: the client splice contract treats a relay snapshot and a
-// cold-start HTTP scan as interchangeable (docs/SPEC.md "The client splice
-// contract").
+// The text computed at write time is stored with the value, and the HTTP scan
+// handler and the relay's snapshot / mirror frames all carry that stored text
+// (RoomKV.WireValue): the client splice contract treats a relay snapshot and
+// a cold-start HTTP scan as interchangeable.
 //
 // The result is always valid JSON: json.Marshal of a Go string cannot fail;
 // the "null" fallback is defensive.
@@ -34,6 +34,16 @@ func RoomWireValue(v []byte) json.RawMessage {
 		return json.RawMessage("null")
 	}
 	return json.RawMessage(encoded)
+}
+
+// WireValue is the text every surface carries for key: the stored text when
+// the backend holds one, so the whole-room GET and the frames agree byte for
+// byte whoever wrote the value, else the value's own encoding.
+func (kv RoomKV) WireValue(key string) json.RawMessage {
+	if text, ok := kv.Wire[key]; ok {
+		return text
+	}
+	return RoomWireValue(kv.Values[key])
 }
 
 // RoomValueIsJSON is the predicate RoomWireValue passes a value through raw on.

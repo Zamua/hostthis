@@ -13,11 +13,14 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -263,6 +266,134 @@ func TestLiveRoom_DeleteFrameArrives(t *testing.T) {
 	}
 	if f := liveRead(t, ctx, c); f.Type != "delete" || f.Key != "gone" || f.Seq != 2 {
 		t.Fatalf("frame 2 = %+v; want delete \"gone\" at seq 2", f)
+	}
+}
+
+// roomValue is one value of testdata/room-wire-vectors.json written to a room.
+type roomValue struct {
+	name  string
+	bytes []byte
+	json  bool
+	text  string // the wire text of a JSON value, the decoded string of any other
+}
+
+// The shared vectors, but those nested 10000 deep: inside the whole-room
+// object they pass Go's decoding depth.
+func roomValues(t *testing.T) []roomValue {
+	t.Helper()
+	raw, err := os.ReadFile("../../testdata/room-wire-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file struct {
+		Vectors []struct {
+			Name  string          `json:"name"`
+			In    string          `json:"in"`
+			Hex   string          `json:"hex"`
+			Nest  json.RawMessage `json:"nest"`
+			JSON  bool            `json:"json"`
+			Wire  *string         `json:"wire"`
+			Value *string         `json:"value"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	var out []roomValue
+	for _, v := range file.Vectors {
+		if v.Nest != nil {
+			continue
+		}
+		b := []byte(v.In)
+		if v.Hex != "" {
+			if b, err = hex.DecodeString(v.Hex); err != nil {
+				t.Fatal(err)
+			}
+		}
+		text := string([]rune(string(b)))
+		if v.Wire != nil {
+			text = *v.Wire
+		} else if v.Value != nil {
+			text = *v.Value
+		}
+		out = append(out, roomValue{name: v.Name, bytes: b, json: v.JSON, text: text})
+	}
+	return out
+}
+
+func liveReadRaw(t *testing.T, ctx context.Context, c *websocket.Conn) []byte {
+	t.Helper()
+	_, data, err := c.Read(ctx)
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	return data
+}
+
+// Every value reaches a client byte for byte as the whole-room GET serves it,
+// in the snapshot and in a put frame: the text the cell stored, never a
+// re-serialization of it (which turns 1e400 into null and -0 into 0, and
+// reorders an object's integer-like names).
+func TestLiveRoom_FramesCarryTheBytesTheGETServes(t *testing.T) {
+	ts, slug := liveCelldServer(t)
+	id := liveCreateRoom(t, ts, slug)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	values := roomValues(t)
+	// Keys put out of order: both the GET and the snapshot list them as Go
+	// sorts a map's keys.
+	values = append(values, roomValue{name: "\U0001F600", bytes: []byte("1"), json: true, text: "1"},
+		roomValue{name: "�", bytes: []byte("2"), json: true, text: "2"})
+	for _, v := range values {
+		livePut(t, ts, slug, id, url.PathEscape(v.name), string(v.bytes))
+	}
+
+	resp, err := nethttp.Get(ts.URL + "/p/" + slug + "/api/rooms/" + id)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	var scan map[string]json.RawMessage
+	if err := json.Unmarshal(body, &scan); err != nil {
+		t.Fatalf("scan %q: %v", body, err)
+	}
+	for _, v := range values {
+		raw := scan[v.name]
+		if v.json {
+			if got := string(raw); got != strings.Trim(v.text, " \t\r\n") {
+				t.Errorf("%s: GET carries %q, want the stored text %q", v.name, got, v.text)
+			}
+			continue
+		}
+		var got string
+		if err := json.Unmarshal(raw, &got); err != nil || got != v.text {
+			t.Errorf("%s: GET carries %q (%v), want a string of %q", v.name, raw, err, v.text)
+		}
+	}
+
+	c := liveDialRoom(t, ctx, ts, slug, id)
+	defer c.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
+	snapshot := liveReadRaw(t, ctx, c)
+	want := fmt.Sprintf(`{"type":"snapshot","seq":%d,"state":%s}`, len(values), bytes.TrimSuffix(body, []byte("\n")))
+	if string(snapshot) != want {
+		t.Fatalf("snapshot is not the GET's bytes:\n got %q\nwant %q", snapshot, want)
+	}
+
+	for _, v := range values {
+		livePut(t, ts, slug, id, url.PathEscape(v.name), string(v.bytes))
+		var put struct {
+			Key   string          `json:"key"`
+			Value json.RawMessage `json:"value"`
+		}
+		frame := liveReadRaw(t, ctx, c)
+		if err := json.Unmarshal(frame, &put); err != nil || put.Key != v.name {
+			t.Fatalf("put frame %q (%v), want key %q", frame, err, v.name)
+		}
+		if !bytes.Equal(put.Value, scan[v.name]) {
+			t.Errorf("%s: put frame carries %q, GET %q", v.name, put.Value, scan[v.name])
+		}
 	}
 }
 

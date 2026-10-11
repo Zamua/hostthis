@@ -30,7 +30,7 @@ import {
   upgradeRefusal,
 } from "./policy.js";
 import {
-  base64Bytes, bytesBase64, decodeFirstJSON, roomValueIsJSON, roomWireValue,
+  base64Bytes, bytesBase64, compareCodePoints, decodeFirstJSON, roomValueIsJSON, roomWireValue,
 } from "./wire.js";
 
 const NO_STORE = { "Cache-Control": "no-store" };
@@ -216,7 +216,8 @@ async function createRoom(request, env, app, client) {
   return internalError();
 }
 
-// Each value re-encoded from its stored bytes, keys sorted as Go sorts a map.
+// Each value as the text the cell holds for it, which the frames carry too,
+// keys sorted as Go sorts a map.
 async function scanRoom(room) {
   const res = await ask(room, "/room/scan");
   if (res.status === 404) {
@@ -225,9 +226,10 @@ async function scanRoom(room) {
   if (res.status !== 200 || !res.body?.values) {
     return internalError();
   }
-  const values = res.body.values;
-  const members = Object.keys(values).sort()
-    .map((key) => `${JSON.stringify(key)}:${roomWireValue(base64Bytes(values[key]))}`);
+  const { values, wire } = res.body;
+  const text = (key) => (typeof wire?.[key] === "string" && Object.hasOwn(wire, key)
+    ? wire[key] : roomWireValue(base64Bytes(values[key])));
+  const members = Object.keys(values).sort(compareCodePoints).map((key) => `${JSON.stringify(key)}:${text(key)}`);
   return goJSON(200, `{${members.join(",")}}`);
 }
 

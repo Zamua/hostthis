@@ -1,5 +1,5 @@
 {
-  "about": "Room value wire encoding, run by internal/domain (RoomWireValue, RoomValueIsJSON) and celld/test/room-wire.test.js. A vector's bytes are `in` as UTF-8, `hex`, or `nest` (open repeated depth times, then inner, then close repeated depth times). `json` is RoomValueIsJSON. A JSON value passes through: `wire` is exactly the text every surface emits, its bytes with each byte of an invalid UTF-8 sequence replaced by one U+FFFD (`wire` absent: the input itself). Anything else becomes a JSON string whose decoded `value` is given.",
+  "about": "Room value wire encoding, run by internal/domain (RoomWireValue, RoomValueIsJSON) and celld/test/room-wire.test.js, and as values written to a room by the live suites (internal/http TestLiveRoom, celld/test/rooms-live.test.js), which compare the whole-room GET with the frames. A vector's bytes are `in` as UTF-8, `hex`, or `nest` (open repeated depth times, then inner, then close repeated depth times). `json` is RoomValueIsJSON. A JSON value passes through: `wire` is exactly the text every surface emits, its bytes with each byte of an invalid UTF-8 sequence replaced by one U+FFFD (`wire` absent: the input itself). Anything else becomes a JSON string whose decoded `value` is given.",
   "vectors": [
     { "name": "object", "in": "{\"a\":1,\"b\":[true,null]}", "json": true, "wire": "{\"a\":1,\"b\":[true,null]}" },
     { "name": "object whitespace kept", "in": "{ \"a\" : 1 }", "json": true, "wire": "{ \"a\" : 1 }" },
@@ -14,6 +14,10 @@
     { "name": "true", "in": "true", "json": true, "wire": "true" },
     { "name": "array", "in": "[1,2,3]", "json": true, "wire": "[1,2,3]" },
     { "name": "duplicate names", "in": "{\"a\":1,\"a\":2}", "json": true, "wire": "{\"a\":1,\"a\":2}" },
+    { "name": "integer-like member name after another", "in": "{\"b\":1,\"1\":2}", "json": true, "wire": "{\"b\":1,\"1\":2}" },
+    { "name": "whitespace inside nested values", "in": "[ 1 , { \"x\" : null } ]", "json": true, "wire": "[ 1 , { \"x\" : null } ]" },
+    { "name": "exponent spelling", "in": "1E+2", "json": true, "wire": "1E+2" },
+    { "name": "fraction with trailing zeros", "in": "1.50", "json": true, "wire": "1.50" },
     { "name": "escaped lone surrogate", "in": "\"\\ud800\"", "json": true, "wire": "\"\\ud800\"" },
     { "name": "every escape", "in": "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\"", "json": true, "wire": "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\"" },
     { "name": "invalid byte inside a string", "hex": "22ff22", "json": true, "wire": "\"\ufffd\"" },
