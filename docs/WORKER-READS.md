@@ -297,10 +297,15 @@ is material.
   table, and copies the assets to `_hostthis/<name>` in the assets directory.
   While both servers exist they read the same versions, so a shell bump cannot
   make them disagree. Templates are never served at any path.
-- Cloudflare: Workers static assets with only `_hostthis/` in the directory,
-  `run_worker_first: ["/*", "!/_hostthis/*"]` so asset requests cost no Worker
-  invocation (static asset requests are free), and a `_headers` file giving
-  `public, max-age=31536000, immutable` and hostthisd's exact Content-Types.
+- Cloudflare: Workers static assets with only `_hostthis/` in the directory and
+  `run_worker_first` left at its default, so a matching asset is served without
+  running the Worker (static asset requests are free) while any other path,
+  including an unknown `/_hostthis/` name, reaches the Worker. An exclusion
+  rule (`"!/_hostthis/*"`) would make the asset layer answer unknown names
+  itself, with an empty 404 carrying the year-long `Cache-Control`. A
+  `_headers` file gives `public, max-age=31536000, immutable` and a
+  Content-Type rule for every asset type: a file whose extension has no rule
+  is served with no Content-Type at all.
 - `duckdb-eh.wasm` (35.7 MB) is over the 25 MiB per-asset limit. It goes in
   `PAYLOADS` under a reserved `static/<datashell version>/duckdb-eh.wasm` key,
   outside `uploads/` so no delete route can reach it, uploaded by the deploy
@@ -348,9 +353,14 @@ come from a cache does.
   did not change (a pin back to an older version). Only objects whose decoded
   size is under `HOSTTHIS_BLOB_CACHE_MAX_BYTES`, because teeing a stream into
   `cache.put` buffers the slower branch.
-- Pending verification in phase 0: that Cache API entries made by a Worker on
-  a route are purged globally by hostname (and by tag) on the zone's plan,
-  and how long a purge takes to reach every data center.
+- Cloudflare documents that Cache API entries are purged globally by the
+  standard purge options (purge everything, tags from a `Cache-Tag` header,
+  hostname, prefix); URL purge does not apply to custom cache keys. Each cached
+  response carries `Cache-Tag: <slug>`, so purge by tag and by hostname both
+  reach it. The Cache API is not tiered: each data center fills once.
+  `cache.match` answers `If-None-Match` and `If-Modified-Since` with a 304 by
+  itself. Phase 3 verifies purge on the canary routes, with purge-to-miss
+  timing, before the flip.
 - All caching is a decorator around the read path, wired at the entrypoint
   and off by default in the bundle; a deployment without a purger (celld
   self-host) leaves it off.
@@ -392,7 +402,9 @@ GET /api/rooms/<uuid>/ws on <slug>.<apex>
   global per-room cap at accept (`getWebSockets().length`); its value comes
   from data (8, Q2). The per-app cap is dropped; creation limits bound the
   room count.
-- No server ping exists in the Workers API or on celld. The Room cell sets
+- Neither runtime pings or times out an idle socket: on Cloudflare a frozen
+  client stayed counted for the whole 11-minute measurement, while a client
+  whose process exits is closed within milliseconds. The Room cell sets
   `setWebSocketAutoResponse` for a reserved `{"type":"ping"}` frame (answered
   `{"type":"pong"}` without waking the cell, on both runtimes); the room
   client sends it every 20 s. At accept time the cell evicts sockets whose
@@ -577,8 +589,10 @@ unexplained differences.
 **Phase 3, edge canary.** Staging gets the option chosen in 2.10. Production
 gets exact-host routes (`<slug>.<apex>/*`) for a few test slugs owned by an
 operator key: the real edge and real data, with nothing else affected. Run e2e
-and parity through the edge, plus 5.6. Exit: checks pass and latency is within
-the agreed bound.
+and parity through the edge, plus 5.6, plus a purge check per canary slug:
+update it over SSH and time the first fresh read from two regions. Exit:
+checks pass, an update is visible within a second, and latency is within the
+agreed bound.
 
 **Phase 4, flip.** Add `*.<apex>/*` in production (staging first under 2.10a
 or b). hostthisd's HTTP code, the origin record and the purger stay exactly as
