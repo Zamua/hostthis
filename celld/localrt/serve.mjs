@@ -8,6 +8,14 @@
 // HOSTTHIS_CELLD_TOKEN, when set, is the bearer token every route but /healthz
 // requires. PERSIST_DIR keeps cells and payloads across restarts; without it
 // cells live in memory and payloads in a temp dir removed on exit.
+//
+// HOSTTHIS_LOCALRT_<NAME> sets the Worker variable HOSTTHIS_<NAME> for the
+// public surface (docs/SPEC.md "Public and internal hosts"). The prefix keeps
+// a runtime started beside hostthisd from taking hostthisd's own
+// HOSTTHIS_APEX_DOMAIN. HOSTTHIS_LOCALRT_APEX_DOMAIN turns the surface on; it
+// needs the token, and brings what a Cloudflare deploy serves beside the
+// Worker: the static assets (dist/assets) and the assets too large for them,
+// stored in PAYLOADS.
 import { Miniflare } from "miniflare";
 import { fstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +45,34 @@ if (built < Math.max(mtime(join(celld, "package.json")), ...sources)) {
   process.exit(1);
 }
 
+const PUBLIC_VARS = [
+  "APEX_DOMAIN",
+  "URL_MODE",
+  "PUBLIC_SCHEME",
+  "CLIENT_IP_SOURCE",
+  "EDGE_CACHE_TTL_S",
+  "EDGE_CACHE_MAX_BYTES",
+  "BLOB_CACHE_MAX_BYTES",
+];
+const bindings = {};
+for (const [name, value] of Object.entries(process.env)) {
+  const suffix = name.match(/^HOSTTHIS_LOCALRT_(.+)$/)?.[1];
+  if (suffix === undefined) continue;
+  // A misspelt name would leave the surface silently configured otherwise.
+  if (!PUBLIC_VARS.includes(suffix)) {
+    process.stderr.write(`celld runtime: ${name} is not one of ${PUBLIC_VARS.map((v) => `HOSTTHIS_LOCALRT_${v}`).join(", ")}\n`);
+    process.exit(1);
+  }
+  if (value !== "") bindings[`HOSTTHIS_${suffix}`] = value;
+}
+const token = process.env.HOSTTHIS_CELLD_TOKEN;
+if (token) bindings.HOSTTHIS_CELLD_TOKEN = token;
+const publicSurface = bindings.HOSTTHIS_APEX_DOMAIN !== undefined;
+if (publicSurface && !token) {
+  process.stderr.write("celld runtime: HOSTTHIS_LOCALRT_APEX_DOMAIN needs HOSTTHIS_CELLD_TOKEN\n");
+  process.exit(1);
+}
+
 const persist = process.env.PERSIST_DIR;
 const tempDir = persist ? null : mkdtempSync(join(tmpdir(), "hostthis-localrt-"));
 if (persist) mkdirSync(persist, { recursive: true });
@@ -55,9 +91,10 @@ const mf = new Miniflare({
   // The Worker reads no request.cf, and fetching it would need the network.
   cf: false,
   port: Number(process.env.PORT ?? 0),
-  bindings: process.env.HOSTTHIS_CELLD_TOKEN
-    ? { HOSTTHIS_CELLD_TOKEN: process.env.HOSTTHIS_CELLD_TOKEN }
-    : {},
+  bindings,
+  ...(publicSurface && {
+    assets: { directory: join(celld, "dist", "assets"), binding: "ASSETS", routerConfig: { has_user_worker: true } },
+  }),
   r2Buckets: Object.fromEntries(config.r2_buckets.map((b) => [b.binding, b.bucket_name])),
   r2Persist: persist ? join(persist, "r2") : tempDir,
   durableObjectsPersist: persist ? join(persist, "cells") : false,
@@ -66,6 +103,13 @@ const mf = new Miniflare({
 });
 
 const url = await mf.ready;
+if (publicSurface) {
+  const payloads = await mf.getR2Bucket("PAYLOADS");
+  const repo = join(celld, "..");
+  for (const { key, source, size } of JSON.parse(readFileSync(join(celld, "dist", "static-r2.json"), "utf8"))) {
+    if ((await payloads.head(key))?.size !== size) await payloads.put(key, readFileSync(join(repo, source)));
+  }
+}
 process.stdout.write(`LISTENING ${url.origin}\n`);
 
 let stopping = false;
