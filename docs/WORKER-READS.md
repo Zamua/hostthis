@@ -274,13 +274,25 @@ never matches, so revalidations behind a compressing edge become full
 responses today. Deliberate difference.
 
 The zstd decoder is vendored: the Workers runtime's `DecompressionStream` does
-gzip, deflate and deflate-raw only. Candidates are a pure-JS streaming decoder
-(fzstd) and a WASM build of libzstd's streaming API, chosen by a spike that
-measures CPU per decoded MiB and peak memory on a golden corpus written by
-`internal/zstdenc` (empty, one byte, multi-block, incompressible 10 MiB, highly
-compressible 100 MiB). The window is 1 MiB, so decoder state is bounded;
-principle 1 is asserted by a test decoding a 100 MiB output under a memory
-ceiling.
+gzip, deflate and deflate-raw only. It is libzstd's decompression API compiled
+to WASM (decoder only, about 72 KB), built reproducibly from a pinned zstd
+release by a script in the repo, with the `.wasm` committed beside it and its
+hash checked in CI. Chosen over pure-JS fzstd on a golden corpus written by
+`internal/zstdenc`: about 2.5x less CPU per decoded MiB on text, and it
+verifies the frame checksum the encoder writes (fzstd served corrupted bytes
+silently). The stream wrapper is our own and pull-based: each call produces at
+most 128 KiB, so backpressure is exact and memory stays flat (0.1 MiB live
+through a 100 MiB decode); every packaged wrapper buffered whole outputs or
+accepted truncated streams. Input is batched to 64 KiB per call. Frames whose
+window exceeds 8 MiB are refused before allocation. A small pool of instances
+per isolate is reused. The WASM is imported as a module (runtimes refuse to
+compile code from bytes), so celld needs v0.6.1 or later for direct or
+forwarded serving.
+
+The checksum sits at the end of a frame, so corruption is detected after most
+bytes are sent: a decode error after the headers errors the body stream; a 500
+is only possible before the first byte. Principle 1 is asserted by a test
+decoding a 100 MiB output under a ceiling of a few MiB.
 
 Deferred: passing the stored stream through as `Content-Encoding: zstd` to
 clients that accept it (strip the magic, `encodeBody: "manual"`). Safari only
