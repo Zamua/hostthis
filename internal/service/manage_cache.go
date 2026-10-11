@@ -27,15 +27,14 @@ type PasteManager interface {
 var _ PasteManager = (*Manage)(nil)
 
 // CacheInvalidating decorates a PasteManager with CDN cache invalidation,
-// firing the purger after a SUCCESSFUL mutation that changes the bytes served
-// at a paste's public URL (Update / Delete / Pin / Unpin). Verbs that do not
-// change served bytes pass through the embedded interface untouched; that
-// includes DeleteVersion, which is refused outright for the served version.
-// The inner verb service holds no CachePurger.
+// firing the purger after a mutation that may have changed the bytes served at
+// a paste's public URL (Update / Delete / Pin / Unpin; see mayHaveMutated).
+// Verbs that do not change served bytes pass through the embedded interface
+// untouched; that includes DeleteVersion, which is refused outright for the
+// served version. The inner verb service holds no CachePurger.
 //
-// The purge is best-effort: errors are swallowed (the mutation already
-// succeeded on origin, and the impl logs), so a transient CDN issue never turns
-// a successful mutation into a failure.
+// The purge is best-effort: errors are swallowed (the impl logs), so a
+// transient CDN issue never turns a mutation into a failure.
 type CacheInvalidating struct {
 	PasteManager
 	purger CachePurger
@@ -53,52 +52,48 @@ func NewCacheInvalidating(inner PasteManager, purger CachePurger) PasteManager {
 
 func (c *CacheInvalidating) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
 	res, err := c.PasteManager.Update(slug, owner, body, typeHint)
-	if err == nil {
-		_ = c.purger.PurgePaste(slug)
-	}
+	purgeUnlessUntouched(c.purger, slug, err)
 	return res, err
 }
 
-// Delete purges even on error, unlike its siblings. A failed update leaves the
-// cached bytes correct; a failed delete may not, because the removal can land
-// and the call still report an error, and the edge would then serve deleted
-// content until max-age expires. Purging a paste that survived is harmless, so
-// the ambiguous case resolves toward purging.
-//
-// The pre-mutation rejections are excluded, and that exclusion is load-bearing:
-// without it, attempting to delete a slug you do not own would purge it, letting
-// any caller spend the CDN's finite purge budget on paste they have no rights to.
 func (c *CacheInvalidating) Delete(slug domain.Slug, owner string) error {
 	err := c.PasteManager.Delete(slug, owner)
-	if err == nil || mayHaveMutated(err) {
-		_ = c.purger.PurgePaste(slug)
-	}
+	purgeUnlessUntouched(c.purger, slug, err)
 	return err
-}
-
-// mayHaveMutated reports whether a delete error leaves it unknown that the paste
-// survived. Only the ownership pre-check's rejections prove no write was
-// attempted; every other failure is ambiguous by construction.
-func mayHaveMutated(err error) bool {
-	switch {
-	case errors.Is(err, ErrNotFound), errors.Is(err, ErrEmptyOwner):
-		return false
-	}
-	return true
 }
 
 func (c *CacheInvalidating) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
 	ver, err := c.PasteManager.Pin(slug, owner, verNum)
-	if err == nil {
-		_ = c.purger.PurgePaste(slug)
-	}
+	purgeUnlessUntouched(c.purger, slug, err)
 	return ver, err
 }
 
 func (c *CacheInvalidating) Unpin(slug domain.Slug, owner string) error {
 	err := c.PasteManager.Unpin(slug, owner)
-	if err == nil {
-		_ = c.purger.PurgePaste(slug)
-	}
+	purgeUnlessUntouched(c.purger, slug, err)
 	return err
+}
+
+// purgeUnlessUntouched purges after a mutation that succeeded or may have. A
+// write can commit and the call still fail (a lost response), leaving the edge
+// serving the old state until its TTL ends; purging a slug that did not change
+// is harmless, so the ambiguous case resolves toward purging.
+func purgeUnlessUntouched(purger CachePurger, slug domain.Slug, err error) {
+	if err == nil || mayHaveMutated(err) {
+		_ = purger.PurgePaste(slug)
+	}
+}
+
+// mayHaveMutated reports whether an error leaves it unknown that nothing was
+// written. Only rejections raised before any write prove that. Every error a
+// verb can raise before ownership is proven must be listed: otherwise any
+// caller could spend the CDN's finite purge budget on slugs they do not own.
+func mayHaveMutated(err error) bool {
+	switch {
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrEmptyOwner),
+		errors.Is(err, ErrRawTooLarge), errors.Is(err, ErrCompressedTooLarge),
+		errors.Is(err, ErrEmptyUpload), errors.Is(err, errStaging):
+		return false
+	}
+	return true
 }
