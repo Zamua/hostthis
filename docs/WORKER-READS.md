@@ -11,8 +11,8 @@ because SSH needs the apex to stay DNS-only. Every request to `<slug>.<apex>`
 moves to the Worker: paste shells, `?raw` bytes, HTML pastes, site files with
 SPA fallback, knowledge bases, the `/_hostthis/` renderer assets, the rooms
 HTTP API, room push, and the room WebSocket. The Worker answers from its own
-cells and its `PAYLOADS` binding, so no response depends on a CDN cache and
-purge-on-write goes away.
+cells and its `PAYLOADS` binding, caching whole responses at the edge until a
+write purges the slug (2.7).
 
 The public surface is off unless configured. A deployment that sets nothing,
 including a self-hosted celld, behaves exactly as today.
@@ -207,8 +207,8 @@ same; the URL-mode default differs on purpose):
 | `HOSTTHIS_URL_MODE` | `subdomain` | `path` also serves `/p/<slug>` on the apex host; dev and tests only |
 | `HOSTTHIS_PUBLIC_SCHEME` | `https` | http-to-https redirect target, VAPID `sub` |
 | `HOSTTHIS_CLIENT_IP_SOURCE` | unset | `cf-connecting-ip` or `xff-rightmost`; unset puts every client in one bucket |
-| `HOSTTHIS_RESOLVE_CACHE_MS` | `0` | optional resolve cache TTL (2.7) |
-| `HOSTTHIS_BLOB_CACHE_MAX_BYTES` | `0` | optional blob cache size ceiling (2.7) |
+| `HOSTTHIS_EDGE_CACHE_TTL_S` | `0` | response cache TTL at the edge; `0` is off (2.7) |
+| `HOSTTHIS_BLOB_CACHE_MAX_BYTES` | `0` | blob cache size ceiling; `0` is off (2.7) |
 | `ASSETS` binding | absent | static assets; absent means `/_hostthis/` comes from `PAYLOADS` under `static/` |
 
 ### 2.3 Public routes
@@ -322,26 +322,36 @@ comparison; no server heartbeat (2.9); `no-store` added to the
 
 ### 2.7 Caching
 
-- Browser-facing `Cache-Control` is unchanged.
-- Cloudflare does not cache responses a Worker generates, so the edge cache
-  and purge leave the read path. Writes still land in the cells through
-  hostthisd and the next read sees them: a read is fresh immediately, not after
-  a purge.
-- No Cache API for mutable URLs. The Cache API is per data center, so a write
-  could only invalidate the colo that saw it; a global purge is the thing
-  being removed.
-- Two layers, written as decorators around `resolve` and the blob read and
-  wired at the entrypoint. Both default to off in the bundle; the Cloudflare
-  deployment enables the blob cache from the flip, the resolve cache only on
-  measurement (phase 3):
-  - **resolve cache**: per colo, keyed by `(slug, path, raw, files)`, TTL
-    `HOSTTHIS_RESOLVE_CACHE_MS`. Staleness is bounded by the TTL, a spec'd
-    property once enabled. It sheds load from a hot Paste cell and removes the
-    round trip to the cell's region.
-  - **blob cache**: per colo, keyed by object key. A key never names different
-    bytes, so it needs no invalidation. Only entries whose decoded size is
-    under `HOSTTHIS_BLOB_CACHE_MAX_BYTES`, because teeing a stream into
-    `cache.put` buffers the slower branch.
+Goal: a reader always sees the latest served version, and every read that can
+come from a cache does.
+
+- **Browser**: paste and site responses carry `Cache-Control: no-cache` with
+  their ETag, so every load revalidates and an unchanged paste costs a 304.
+  Versioned `/_hostthis/` assets stay `max-age=31536000, immutable`.
+  (Today pastes are `max-age=3600`, so a reload after an update can show the
+  old version for up to an hour from the browser's own cache.)
+- **Edge**: the Worker caches whole responses in the data center's cache
+  (Cache API), keyed by the request URL, with an edge TTL of one day and a
+  `Cache-Tag` naming the slug. A hit answers GET, HEAD and conditional
+  requests without a cell call or an R2 read.
+- **Invalidation**: every write that changes what a slug serves (update, pin,
+  unpin, delete, site redeploy) purges that slug globally, by hostname
+  (`<slug>.<apex>`) so every file of a site goes at once. hostthisd's
+  existing `CacheInvalidating` decorator and `CachePurger` port do this; the
+  Cloudflare adapter moves from URL variants to hostname purge. A failed purge
+  is logged and bounded by the one-day edge TTL.
+- **Blob cache**: below the response cache, the decoded bytes of an object
+  key are cached per data center. A key never names different bytes, so it
+  needs no invalidation; it serves the miss right after a purge when the bytes
+  did not change (a pin back to an older version). Only objects whose decoded
+  size is under `HOSTTHIS_BLOB_CACHE_MAX_BYTES`, because teeing a stream into
+  `cache.put` buffers the slower branch.
+- Pending verification in phase 0: that Cache API entries made by a Worker on
+  a route are purged globally by hostname (and by tag) on the zone's plan,
+  and how long a purge takes to reach every data center.
+- All caching is a decorator around the read path, wired at the entrypoint
+  and off by default in the bundle; a deployment without a purger (celld
+  self-host) leaves it off.
 
 ### 2.8 Rooms in the Worker
 
@@ -417,7 +427,7 @@ GET /api/rooms/<uuid>/ws on <slug>.<apex>
 ### 2.11 hostthisd after cutover
 
 Stops: subdomain reads, `/_hostthis/`, rooms HTTP and push, the WebSocket
-proxy (admission, heartbeat), room rate-limit accounting, CDN purge. Keeps:
+proxy (admission, heartbeat), room rate-limit accounting. Keeps:
 SSH, uploads and every write, `get` over SSH (the Go blob read path stays),
 apex landing, health, metrics.
 
@@ -534,7 +544,7 @@ approves the numbers and section 8.
 
 **Phase 1, build behind the flag.** Public router, `resolve` and `exists`,
 `read.js`, `web/shells/`, the assets build, the rooms and push port, direct
-WebSocket, forwarded mode, the optional caches (off). Tests 5.1 to 5.5 green
+WebSocket, forwarded mode, the caches (off by default). Tests 5.1 to 5.5 green
 in CI. Release.
 
 **Phase 2, routeless deploy and parity.** Deploy to staging and production with
@@ -547,7 +557,7 @@ unexplained differences.
 gets exact-host routes (`<slug>.<apex>/*`) for a few test slugs owned by an
 operator key: the real edge and real data, with nothing else affected. Run e2e
 and parity through the edge, plus 5.6. Exit: checks pass and latency is within
-the agreed bound, or the optional caches are enabled and remeasured.
+the agreed bound.
 
 **Phase 4, flip.** Add `*.<apex>/*` in production (staging first under 2.10a
 or b). hostthisd's HTTP code, the origin record and the purger stay exactly as
@@ -558,14 +568,14 @@ the Room cell broadcasts to sockets on either path. Watch Worker exceptions and
 5xx, CPU per request, the request rate on hot Paste cells, room socket counts,
 and smoke. Bake at least a week.
 
-**Phase 5, slim hostthisd.** Spec first. Set the purger to noop, then delete
+**Phase 5, slim hostthisd.** Spec first. Delete
 the Go read handlers, shells and assets (`web/shells/` is then read only by the
 Worker build), rooms HTTP, push and WebSocket handlers,
 `internal/celld/roomproxy.go`, `internal/roomwire`, the rooms services and
 repos only HTTP used, and `/p/<slug>` serving on the apex in subdomain mode.
 Keep a small reverse proxy implementing forwarded mode for deployments that do
-not expose the Worker. Keep the `CachePurger` port only if a forwarded
-deployment behind a CDN needs it.
+not expose the Worker. The `CachePurger` port stays: it invalidates the
+Worker's edge cache.
 
 ## 7. Cost (Workers Paid)
 
@@ -582,7 +592,7 @@ Published prices at the time of writing, to recheck before purchase:
 | R2 Class B (reads) | 10M/month | $0.36 per million |
 | R2 storage, egress | unchanged; egress free | |
 
-Per read with the optional caches off: one Worker request, one Durable Object
+Per read that misses the edge cache: one Worker request, one Durable Object
 request, one R2 read (none for a 304, HEAD, shell or asset), and CPU for
 routing plus decoding. Decode CPU is unmeasured; the spike sets it.
 
@@ -595,7 +605,7 @@ measurement):
 | 10M | included | $1.35 | included | $0.40 | about $7 |
 | 50M | $12.00 | $7.35 | $14.40 | $4.40 | about $43 |
 
-The blob cache cuts the R2 and CPU columns on hot content.
+An edge hit costs one Worker request and no Durable Object, R2 or decode cost, so hot content stays near the Workers column alone.
 
 Limits that shape serving large files by streaming:
 
@@ -614,7 +624,7 @@ Limits that shape serving large files by streaming:
   read of one slug goes to its one Paste cell.
 
 What goes away: origin egress for subdomain traffic, hostthisd CPU and memory
-for reads and sockets, and purge API calls.
+for reads and sockets.
 
 ## 8. Risks and open questions
 
@@ -624,9 +634,9 @@ Risks:
    After, every read crosses to the Paste cell's region and to R2. Requests
    that miss the CDN today (every site file revalidation, every uncached
    paste) already make that trip through the origin, so they do not get worse.
-   Measured in phase 3; the resolve and blob caches are the mitigation.
+   Edge hits are local; misses are measured in phase 3.
 2. **One hot slug** can approach the per-object soft limit (a viral paste, a
-   site page loading many files). Resolve cache.
+   site page loading many files). The edge cache absorbs repeat reads.
 3. **Decode CPU on large files** is unmeasured until the spike.
 4. **Two implementations of the read rules** until phase 5. Shared vectors and
    the parity suite hold them together; phase 5 ends it.
@@ -653,14 +663,15 @@ Decisions:
    per-app cap is dropped.
 3. WebSocket origin stays `*.<apex>`; tightening it is a separate change.
 4. Reads answer GET and HEAD; other methods get 405.
-5. The blob cache is on from the flip: keys are immutable, so it never serves
-   stale bytes and keeps edge-local delivery of payloads. The resolve cache
-   stays off unless phase 3 latency calls for it.
+5. Caching per 2.7: browsers revalidate every load, the edge serves whole
+   responses until a write purges the slug, and a one-day edge TTL bounds a
+   missed purge.
 6. Phase 5 stops serving `/p/<slug>` on the apex in subdomain mode.
 7. Bake one week before phase 5.
 8. Self-hosting documents forwarded mode until direct mode is verified on
    celld.
-9. The Cloudflare purge adapter is deleted with the Go read path.
+9. The Cloudflare purge adapter stays (hostname purge) and fires on every
+   write, as today.
 
 ## 9. SPEC.md sections that change
 
@@ -675,7 +686,7 @@ Decisions:
 - "Blob storage backends": "On-disk format" (the Worker decodes for reads).
 - "Celld-backed metadata storage": "Blob and operational boundaries"
   (hostthisd is no longer the only public surface).
-- "Edge caching": purge-on-write removed, the optional caches, weak ETag
+- "Edge caching": the Worker response cache, hostname purge, `no-cache` for browsers, weak ETag
   comparison.
 - "HTML sandboxing": "Markdown and diff rendering".
 - "Health endpoints", "Self-hosting" (Worker variables and modes).
