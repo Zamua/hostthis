@@ -2812,8 +2812,20 @@ zstd-decode the rest. An object that does not start with the magic, an empty
 one included, is damaged, and so is one holding the magic and no zstd frame
 (the encoder writes a frame even for an empty file): its read fails before any
 byte is served (the HTTP read surface logs the slug and answers 500, `get`
-exits 1), while every other object stays readable. The Worker's read path decodes the same format (see
-"The public surface").
+exits 1), while every other object stays readable. The Worker's read path
+decodes the same format (see "The public surface").
+
+A read response that streams stored bytes (an HTML paste, `?raw` bytes, a site
+or knowledge base file) declares the entry's decoded size, the manifest's
+`Size`, as its `Content-Length`, on GET and HEAD alike; a negative size is
+unknown and declares none, while 0 is an empty file. The first chunk is
+decoded before the status is sent, so damage found there (a bad frame header)
+is a 500 like an unframed object. Damage found later aborts the response and
+logs one warning naming the slug, and the last byte is held back until the
+stream ends cleanly, so damage the frame checksum finds at the very end still
+leaves the client short of the declared length: a damaged object never reads
+as a complete body. A decoded size that disagrees with the recorded one is
+logged too, and the response ends short of its `Content-Length`.
 
 ### Entries without an object key
 
@@ -3639,8 +3651,6 @@ stricter or the runtime decides:
 - `If-None-Match` compares weakly (RFC 9110): an edge that compresses a
   response turns its ETag into `W/"..."`, which must still match.
 - A stored kind with no shell is a 500 even to a conditional request.
-- Damage found mid-body errors the body stream rather than ending it as
-  complete, and is logged.
 - Hosts compare lowercased, and `/p/` is served only on the apex host.
 - `.` and `..` segments are resolved by the URL parser rather than redirected.
 
