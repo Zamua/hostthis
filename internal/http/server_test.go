@@ -144,8 +144,8 @@ func TestPasteRead_CacheHeaders(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != string(body) {
 		t.Fatalf("status %d body %q, want 200 with the content", w.Code, w.Body.String())
 	}
-	if got := w.Header().Get("Cache-Control"); got != "public, max-age=3600" {
-		t.Errorf("Cache-Control: got %q, want public, max-age=3600", got)
+	if got := w.Header().Get("Cache-Control"); got != "public, no-cache" {
+		t.Errorf("Cache-Control: got %q, want public, no-cache", got)
 	}
 	if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
 		t.Errorf("ETag: got %q, want the object key", got)

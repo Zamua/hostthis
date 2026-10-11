@@ -179,14 +179,14 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 		switch {
 		case kind == domain.KindHTML:
 			header("Content-Type", "text/html; charset=utf-8")
-			header("Cache-Control", "public, max-age=3600")
+			header("Cache-Control", contentCacheControl)
 			return served("html", entry)
 		case !kind.IsDirectory():
 			header("Content-Type", rawContentType[kind])
-			header("Cache-Control", "public, max-age=3600")
+			header("Cache-Control", contentCacheControl)
 			return served("raw", entry)
 		case kind == domain.KindKnowledgeBase && h.Get("Content-Type") == rawContentType[kind]:
-			header("Cache-Control", kbCacheControl(path))
+			header("Cache-Control", contentCacheControl)
 			return served("kbraw", entry)
 		}
 		ct := read.ContentType
@@ -194,7 +194,7 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 			ct = "application/octet-stream"
 		}
 		header("Content-Type", ct)
-		header("Cache-Control", "public, no-cache")
+		header("Cache-Control", contentCacheControl)
 		return served("file", entry)
 	}
 
@@ -226,7 +226,7 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 			}
 			validated(`"` + sh.version + `"`)
 			header("Content-Type", "text/html; charset=utf-8")
-			header("Cache-Control", "public, max-age=3600")
+			header("Cache-Control", contentCacheControl)
 			header("Content-Security-Policy", sh.policy())
 			if k == domain.KindKnowledgeBase {
 				return served("kbshell", map[string]any{"shell": string(k)})
@@ -238,7 +238,7 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 		uploadID := strings.TrimSuffix(strings.TrimPrefix(h.Get("ETag"), `"files-`), `"`)
 		validated(`"files-` + uploadID + `"`)
 		header("Content-Type", "application/json; charset=utf-8")
-		header("Cache-Control", kbCacheControl(path))
+		header("Cache-Control", contentCacheControl)
 		var files []string
 		if err := json.Unmarshal([]byte(body), &files); err != nil {
 			t.Fatalf("file list: %v", err)

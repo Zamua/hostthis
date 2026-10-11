@@ -416,7 +416,7 @@
   "kb/document": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"kbshell-v4\"",
@@ -445,7 +445,7 @@
   "kb/root": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"kbshell-v4\"",
@@ -460,7 +460,7 @@
   "raw/csv": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -474,7 +474,7 @@
   "raw/diff": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -488,7 +488,7 @@
   "raw/flamegraph": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -502,7 +502,7 @@
   "raw/json": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "application/json; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -516,7 +516,7 @@
   "raw/knowledgebase": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -530,7 +530,7 @@
   "raw/log": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -544,7 +544,7 @@
   "raw/markdown": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -558,7 +558,7 @@
   "raw/mermaid": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -572,7 +572,7 @@
   "raw/pdf": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "application/pdf",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -586,7 +586,7 @@
   "raw/text": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -600,7 +600,7 @@
   "shell/csv": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"datashell-v7\"",
@@ -615,7 +615,7 @@
   "shell/diff": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"diffshell-v32\"",
@@ -630,7 +630,7 @@
   "shell/flamegraph": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"flameshell-v2\"",
@@ -645,7 +645,7 @@
   "shell/json": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"datashell-v7\"",
@@ -660,7 +660,7 @@
   "shell/knowledgebase": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"kbshell-v4\"",
@@ -675,7 +675,7 @@
   "shell/log": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"logshell-v4\"",
@@ -690,7 +690,7 @@
   "shell/markdown": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"mdshell-v7\"",
@@ -705,7 +705,7 @@
   "shell/mermaid": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"mermaidshell-v1\"",
@@ -720,7 +720,7 @@
   "shell/pdf": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"pdfshell-v4\"",
@@ -735,7 +735,7 @@
   "shell/text": {
     "status": 200,
     "header": {
-      "Cache-Control": "public, max-age=3600",
+      "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
       "Etag": "\"textshell-v1\"",
