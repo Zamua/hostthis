@@ -58,6 +58,29 @@ jobs:
       - name: test
         run: make test
 
+  # zd.wasm is committed; its pinned sources (zstd 1.5.7, zig 0.16 from a pinned
+  # nixpkgs) must rebuild it byte for byte, or the module is not what it claims.
+  zstd-wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: rebuild zd.wasm from source
+        run: celld/vendor/zstd/build.sh
+
+      - name: the committed module is the rebuilt one
+        run: |
+          if ! git diff --exit-code --stat -- celld/vendor/zstd/; then
+            echo "celld/vendor/zstd/zd.wasm does not match its source; run celld/vendor/zstd/build.sh and commit the result."
+            exit 1
+          fi
+
   # The celld suites run in the go job against the Worker under Miniflare, and
   # again here against a real celld node backed by MinIO, the production shape.
   # A separate operator gate qualifies object-store restore behavior.
