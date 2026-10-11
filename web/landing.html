@@ -192,9 +192,10 @@ stream: every durable PUT/DELETE is mirrored to all clients as
 <code>{"type":"put"|"delete", ...}</code>. Frames you send are broadcast verbatim
 to other clients and never stored, for ephemeral motion.</p>
 <p>Send <code>{"type":"ping"}</code> every 20 seconds: the server answers
-<code>{"type":"pong"}</code> and passes it to no one. A room holds 64 sockets, and a
-socket that has pinged but stays quiet for a minute is closed when another client
-joins. A frame you send over 32 KiB closes your socket.</p>
+<code>{"type":"pong"}</code> and passes it to no one. A room holds 64 sockets. When it
+is full, a joining client takes the place of any socket that has pinged but not in
+the last two minutes, which is closed with code 4001 (<code>stale</code>);
+reconnect when you see it. A frame you send over 32 KiB closes your socket.</p>
 <p>A value is opaque bytes. The whole-room read and the <code>snapshot</code>/<code>put</code>
 frames embed each value as JSON when it parses as JSON - a value you PUT as a JSON
 object comes back as a nested object, not a quoted string - and as a JSON string

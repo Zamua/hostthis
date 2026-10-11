@@ -194,20 +194,25 @@ test("a room holds 64 sockets and refuses the 65th with 429", { skip }, async ()
   for (const client of [...clients, again]) client.ws.close(1000);
 });
 
-test("a join evicts a stale pinger and keeps a socket that never pinged", { skip }, async () => {
+test("only a join at the cap evicts a stale pinger, with 4001, and never a socket that never pinged", { skip }, async () => {
   const id = await newRoom();
   const pinger = await connect(id);
   const silent = await connect(id);
   pinger.ws.send('{"type":"ping"}');
   assert.equal(await pinger.next(), '{"type":"pong"}');
   await delay(STALE_MS + 500);
+  const clients = [];
+  for (let n = 2; n < 64; n++) {
+    clients.push(await connect(id));
+  }
+  assert.equal(await pinger.closedWithin(300), null, "a join under the cap evicts nothing");
   const late = await connect(id);
-  assert.deepEqual(await pinger.closedWithin(), { code: 1000, reason: "stale" });
+  assert.equal(late.res.status, 101);
+  assert.deepEqual(await pinger.closedWithin(), { code: 4001, reason: "stale" });
   late.ws.send("hello");
   assert.equal(await silent.next(), "hello");
   assert.equal(silent.closed, null);
-  silent.ws.close(1000);
-  late.ws.close(1000);
+  for (const client of [silent, late, ...clients]) client.ws.close(1000);
 });
 
 test("hostthisd's internal join still answers with a socket and a snapshot", { skip }, async () => {

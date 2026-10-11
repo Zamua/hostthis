@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { Room } from "../src/index.js";
 import {
-  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP,
+  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
 } from "../src/rooms/policy.js";
 import { FakeStorage, state } from "./harness.js";
 
@@ -77,30 +77,37 @@ test("a closing socket does not hold a place", () => {
   assert.equal(room(sockets).cell.admit(NOW), null);
 });
 
-test("a socket whose last ping answer is stale is evicted at the join", () => {
-  assert.equal(ROOM_PING_STALE_MS, 60_000);
+test("a join at the cap evicts a stale pinger with 4001 and takes its place", () => {
+  assert.equal(ROOM_PING_STALE_MS, 120_000);
+  assert.equal(ROOM_STALE_CLOSE, 4001);
   const sockets = Array.from({ length: 64 }, () => new FakeSocket(NOW - 1000));
-  const stale = new FakeSocket(NOW - 60_001);
+  const stale = new FakeSocket(NOW - 120_001);
   sockets[10] = stale;
+  sockets[20] = new FakeSocket(NOW - 120_000);
   assert.equal(room(sockets).cell.admit(NOW), null);
-  assert.deepEqual(stale.closed, [1000, "stale"]);
+  assert.deepEqual(stale.closed, [4001, "stale"]);
   assert.ok(sockets.filter((ws) => ws !== stale).every((ws) => ws.closed === null));
 });
 
-test("eviction runs at every join, under the cap too", () => {
-  const fresh = new FakeSocket(NOW - 60_000);
-  const stale = new FakeSocket(NOW - 120_000);
+test("a join under the cap evicts nothing", () => {
+  const stale = new FakeSocket(NOW - 10 * 60_000);
   const silent = new FakeSocket();
-  assert.equal(room([fresh, stale, silent]).cell.admit(NOW), null);
-  assert.equal(fresh.closed, null);
-  assert.deepEqual(stale.closed, [1000, "stale"]);
-  assert.equal(silent.closed, null);
+  const sockets = [stale, silent, ...Array.from({ length: 61 }, () => new FakeSocket(NOW - 1000))];
+  assert.equal(room(sockets).cell.admit(NOW), null);
+  assert.ok(sockets.every((ws) => ws.closed === null));
+});
+
+test("a join still at the cap after eviction is refused", () => {
+  const stale = new FakeSocket(NOW - 10 * 60_000);
+  const sockets = [stale, ...Array.from({ length: 64 }, () => new FakeSocket(NOW - 1000))];
+  assert.equal(room(sockets).cell.admit(NOW).status, 429);
+  assert.deepEqual(stale.closed, [4001, "stale"]);
 });
 
 test("the stale window is a test hook in env", () => {
-  const ws = new FakeSocket(NOW - 2000);
-  room([ws], { ...ON, ROOM_PING_STALE_MS: "1500" }).cell.admit(NOW);
-  assert.deepEqual(ws.closed, [1000, "stale"]);
+  const sockets = Array.from({ length: 64 }, () => new FakeSocket(NOW - 1000));
+  room(sockets, { ...ON, ROOM_PING_STALE_MS: "500" }).cell.admit(NOW);
+  assert.ok(sockets.every((ws) => ws.closed?.[0] === 4001));
 });
 
 test("a client frame over 32 KiB closes its socket with 1009 and reaches no peer", async () => {
