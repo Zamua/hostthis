@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const SRC = fileURLToPath(new URL("../src", import.meta.url));
 
 // Every env binding the Worker reads is declared in wrangler.jsonc. A misspelt
 // binding is a TypeError at runtime, and a try/catch around a cell call turns
 // that into a silent retry loop.
 test("every binding the Worker reads is declared", () => {
-  const src = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+  const src = readdirSync(SRC, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name), "utf8"))
+    .join("\n");
   const cfg = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   const declared = new Set([...cfg.matchAll(/"(?:name|binding)":\s*"([A-Z_]+)"/g)].map((m) => m[1]));
   const used = new Set([
