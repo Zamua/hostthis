@@ -36,6 +36,9 @@ const pushMaxBodyBytes = 64 << 10
 
 // handlePushKey serves GET /api/push/key for appSlug.
 func (s *Server) handlePushKey(w http.ResponseWriter, r *http.Request, appSlug domain.Slug) {
+	// As under /api/rooms: without a directive a CDN caches the 404 by its own
+	// default, and the app may exist a moment later.
+	w.Header().Set("Cache-Control", "no-store")
 	if s.RoomPush == nil || !s.appExists(appSlug) {
 		http.NotFound(w, r)
 		return
