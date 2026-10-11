@@ -1503,8 +1503,21 @@ GET (Upgrade: websocket) /api/rooms/<uuid>/ws
 
 The app slug must name a live paste or site, and the UUID must name an existing
 room. A malformed UUID is refused before upgrade; an unknown app or room is a
-404. A request that is not a WebSocket upgrade is a 426 (a missing
-`websocket` token in `Upgrade`) or a 405 (not GET). The origin is checked
+404. A request that is not a valid WebSocket upgrade gets the answer
+`hostthisd`'s WebSocket library gives, from the first of these checks it
+fails: a 426 for a `Connection` header without the `Upgrade` token, a 426 for
+an `Upgrade` header without the `websocket` token, a 405 for a method other
+than GET, a 400 for a `Sec-WebSocket-Version` other than 13, and a 400 for a
+`Sec-WebSocket-Key` that is missing, repeated, or not 16 bytes of padded
+base64 (the Worker, which sees repeated header lines joined by commas, reads
+a key holding a comma as repeated). Two cases are the runtime's on the
+Worker. workerd hands the Worker any request carrying `Upgrade: websocket` as
+a GET, whatever its method, and fails a non-GET one with its own 500 once the
+Worker accepts it, so a handshake sent with another method is a 500 there
+rather than a 405. And workerd upgrades only a request whose `Upgrade` is
+`websocket` alone, so the Worker refuses one that lists other protocols
+beside it (`h2c, websocket`) with a 426, after the method check, where
+`hostthisd` accepts it. The origin is checked
 before the upgrade: a missing `Origin`, one whose host equals the request's
 host, and one whose host (port included, compared lowercase) matches
 `<apex>` or the glob `*.<apex>` are allowed; any other origin, or one that

@@ -186,16 +186,47 @@ test("origins are allowed as hostthisd's websocket.Accept allows them", () => {
   assert.equal(originRefusal("null", host, apex), 'request Origin "null" is not a valid URL with a host');
 });
 
-test("only a GET carrying the websocket upgrade token is passed on", () => {
+test("only a well-formed GET upgrade is passed on", () => {
+  const key = "dGhlIHNhbXBsZSBub25jZQ==";
+  const ok = { Connection: "Upgrade", Upgrade: "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": key };
   const h = (headers) => new Headers(headers);
-  assert.equal(upgradeRefusal("GET", h({ Upgrade: "websocket" })), null);
-  assert.equal(upgradeRefusal("GET", h({ Upgrade: "h2c, WebSocket" })), null);
+  assert.equal(upgradeRefusal("GET", h(ok)), null);
+  assert.equal(upgradeRefusal("GET", h({ ...ok, Connection: "keep-alive, upgrade", Upgrade: "WebSocket" })), null);
+  // The runtime upgrades only a request whose Upgrade is websocket alone.
+  const listed = upgradeRefusal("GET", h({ ...ok, Upgrade: "h2c, WebSocket" }));
+  assert.equal(listed.status, 426);
+  assert.equal(listed.message, 'WebSocket protocol violation: Upgrade header "h2c, WebSocket" is not websocket alone');
+  assert.equal(upgradeRefusal("GET", h({ ...ok, "Sec-WebSocket-Key": ` ${key}\t` })), null);
   const missing = upgradeRefusal("GET", h({}));
   assert.equal(missing.status, 426);
+  assert.equal(missing.message, 'WebSocket protocol violation: Connection header "" does not contain Upgrade');
   assert.deepEqual(missing.headers, { Connection: "Upgrade", Upgrade: "websocket" });
-  assert.equal(upgradeRefusal("GET", h({ Upgrade: "websockets" })).status, 426);
-  assert.equal(upgradeRefusal("POST", h({ Upgrade: "websocket" })).status, 405);
-  assert.equal(upgradeRefusal("HEAD", h({ Upgrade: "websocket" })).status, 405);
+  // coder/websocket's verifyClientRequest order: Connection, Upgrade, method,
+  // version, key.
+  const cases = [
+    [{ Connection: "keep-alive" }, "POST", 426, 'WebSocket protocol violation: Connection header "keep-alive" does not contain Upgrade'],
+    [{ Upgrade: "websockets" }, "POST", 426, 'WebSocket protocol violation: Upgrade header "websockets" does not contain websocket'],
+    [{ "Sec-WebSocket-Version": "12" }, "POST", 405, 'WebSocket protocol violation: handshake request method is not GET but "POST"'],
+    [{ "Sec-WebSocket-Version": "12" }, "HEAD", 405, 'WebSocket protocol violation: handshake request method is not GET but "HEAD"'],
+    [{ "Sec-WebSocket-Version": "12", "Sec-WebSocket-Key": "" }, "GET", 400, 'unsupported WebSocket protocol version (only 13 is supported): "12"'],
+    [{ "Sec-WebSocket-Version": null }, "GET", 400, 'unsupported WebSocket protocol version (only 13 is supported): ""'],
+    [{ "Sec-WebSocket-Key": null }, "GET", 400, "WebSocket protocol violation: missing Sec-WebSocket-Key"],
+    [{ "Sec-WebSocket-Key": `${key}, ${key}` }, "GET", 400, "WebSocket protocol violation: multiple Sec-WebSocket-Key headers"],
+    [{ "Sec-WebSocket-Key": "short" }, "GET", 400, 'WebSocket protocol violation: invalid Sec-WebSocket-Key "short", must be a 16 byte base64 encoded string'],
+    [{ "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ" }, "GET", 400, 'WebSocket protocol violation: invalid Sec-WebSocket-Key "dGhlIHNhbXBsZSBub25jZQ", must be a 16 byte base64 encoded string'],
+    [{ "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZSE=" }, "GET", 400, 'WebSocket protocol violation: invalid Sec-WebSocket-Key "dGhlIHNhbXBsZSBub25jZSE=", must be a 16 byte base64 encoded string'],
+  ];
+  for (const [changes, method, status, message] of cases) {
+    const headers = { ...ok };
+    for (const [name, value] of Object.entries(changes)) {
+      if (value === null) delete headers[name];
+      else headers[name] = value;
+    }
+    const refused = upgradeRefusal(method, h(headers));
+    assert.equal(refused?.status, status, JSON.stringify(changes));
+    assert.equal(refused.message, message);
+  }
+  assert.deepEqual(upgradeRefusal("GET", h({ ...ok, "Sec-WebSocket-Version": "8" })).headers, { "Sec-WebSocket-Version": "13" });
 });
 
 function body(text) {

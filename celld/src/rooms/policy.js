@@ -361,21 +361,64 @@ function headerHasToken(value, token) {
   return (value ?? "").split(",").some((part) => part.trim().toLowerCase() === token);
 }
 
-// The handshake checks the Worker can make before passing the upgrade on:
-// { status, message, headers } or null. The runtime completes the rest.
+const UPGRADE_REQUIRED = { Connection: "Upgrade", Upgrade: "websocket" };
+
+// coder/websocket's verifyClientRequest, the handshake check hostthisd makes,
+// in its order: { status, message, headers } or null. The Fetch API joins
+// repeated header lines with ", ", so a key holding a comma reads as repeated.
 export function upgradeRefusal(method, headers) {
+  const connection = headers.get("Connection");
+  if (!headerHasToken(connection, "upgrade")) {
+    return {
+      status: 426,
+      message: `WebSocket protocol violation: Connection header ${goQuote(connection ?? "")} does not contain Upgrade`,
+      headers: UPGRADE_REQUIRED,
+    };
+  }
   const upgrade = headers.get("Upgrade");
   if (!headerHasToken(upgrade, "websocket")) {
     return {
       status: 426,
       message: `WebSocket protocol violation: Upgrade header ${goQuote(upgrade ?? "")} does not contain websocket`,
-      headers: { Connection: "Upgrade", Upgrade: "websocket" },
+      headers: UPGRADE_REQUIRED,
     };
   }
   if (method !== "GET") {
     return {
       status: 405,
       message: `WebSocket protocol violation: handshake request method is not GET but ${goQuote(method)}`,
+      headers: {},
+    };
+  }
+  // The runtime upgrades nothing else, and fails a 101 to anything else.
+  if (upgrade.trim().toLowerCase() !== "websocket") {
+    return {
+      status: 426,
+      message: `WebSocket protocol violation: Upgrade header ${goQuote(upgrade)} is not websocket alone`,
+      headers: UPGRADE_REQUIRED,
+    };
+  }
+  const version = headers.get("Sec-WebSocket-Version") ?? "";
+  if (version !== "13") {
+    return {
+      status: 400,
+      message: `unsupported WebSocket protocol version (only 13 is supported): ${goQuote(version)}`,
+      headers: { "Sec-WebSocket-Version": "13" },
+    };
+  }
+  const key = headers.get("Sec-WebSocket-Key");
+  if (key === null) {
+    return { status: 400, message: "WebSocket protocol violation: missing Sec-WebSocket-Key", headers: {} };
+  }
+  if (key.includes(",")) {
+    return { status: 400, message: "WebSocket protocol violation: multiple Sec-WebSocket-Key headers", headers: {} };
+  }
+  // base64.StdEncoding of 16 bytes, which skips CR and LF.
+  const trimmed = key.trim();
+  if (!/^[A-Za-z0-9+/]{22}==$/.test(trimmed.replace(/[\r\n]/g, ""))) {
+    return {
+      status: 400,
+      message: `WebSocket protocol violation: invalid Sec-WebSocket-Key ${goQuote(trimmed)}, must be a 16 byte base64 encoded string`,
       headers: {},
     };
   }
