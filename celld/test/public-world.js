@@ -33,6 +33,7 @@ export function world(vars = {}) {
   const env = {
     HOSTTHIS_APEX_DOMAIN: APEX,
     HOSTTHIS_CELLD_TOKEN: TOKEN,
+    HOSTTHIS_CLIENT_IP_SOURCE: "cf-connecting-ip",
     ...vars,
     PAYLOADS: payloads,
     PASTES: {

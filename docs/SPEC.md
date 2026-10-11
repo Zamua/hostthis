@@ -3578,7 +3578,12 @@ path, the read flags from the parsed query, and a body it decoded, checked and
 encoded again. Neither the client's URL nor its query, headers or body reaches
 a cell, so no request can choose a cell op. Its other Worker settings are
 `HOSTTHIS_PUBLIC_SCHEME` (the push `sub`) and `HOSTTHIS_CLIENT_IP_SOURCE`
-(the room creation limit's client address, see "Quota and abuse").
+(the room creation limit's client address, see "Quota and abuse"). With it
+unset, or naming neither `cf-connecting-ip` nor `xff-rightmost`, every direct
+client shares one room creation bucket: requests are still served, and the
+first direct public request an isolate sees logs one warning naming the
+variable. A forwarded request carries its own client address, so it never
+warns.
 
 Every other request answers 404 with `404 page not found`,
 `Content-Type: text/plain; charset=utf-8` and `X-Content-Type-Options:
