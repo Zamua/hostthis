@@ -42,6 +42,9 @@ type world struct {
 	ssh  *sshClient
 	// slugs are the pastes the reads compare.
 	slugs []slugCase
+	// legacy are reads of entries without a decoded size, each also held to
+	// its file's bytes. Empty outside a local run.
+	legacy []legacyCase
 	// writable allows room and socket writes, confined to writeApp outside a
 	// local run.
 	writable bool

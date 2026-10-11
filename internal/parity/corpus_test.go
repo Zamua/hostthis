@@ -97,6 +97,7 @@ func (w *world) buildCorpus(t *testing.T) {
 		slugCase{slug: w.cell.damagedManifest(t), label: "damaged manifest"},
 		slugCase{slug: domain.NewRandomSlug().String(), label: "never uploaded"},
 	)
+	w.buildLegacy(t)
 
 	for _, demo := range []string{"react", "vue", "svelte", "plain-static"} {
 		files := readTree(t, filepath.Join(repoRoot(), "testdata", "sitefixtures", demo, "dist"))
