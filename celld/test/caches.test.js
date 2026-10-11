@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { BUILD } from "hostthis:build";
+
 import { lockstepTee, withEdgeCache } from "../src/public/caches.js";
 import { publicReads } from "../src/public/surface.js";
 import { decoderStats } from "../src/public/zstd.js";
@@ -216,6 +218,31 @@ test("the edge key is the slug, path and parsed flags: a client's query adds no 
     await settle(w);
     assert.equal(cache.entries.size, 4);
   });
+});
+
+test("every edge key names the build, so a deploy starts a fresh key space", async () => {
+  const cache = new FakeCache();
+  const w = htmlWorld(TTL);
+  await withCaches(cache, async () => {
+    await (await w.fetch(at("/"))).arrayBuffer();
+    await settle(w);
+  });
+  const [key] = cache.entries.keys();
+  assert.equal(new URL(key).searchParams.get("build"), BUILD);
+
+  let reads = 0;
+  const read = async () => {
+    reads++;
+    return new Response("shell", { headers: { "Cache-Control": "public, no-cache" } });
+  };
+  const target = { slug: SLUG, path: "/", host: `${SLUG}.paste.test`, mount: "", flags: { raw: false, files: false } };
+  for (const build of ["one", "one", "two", "two"]) {
+    const ctx = { waitUntil: (p) => w.waits.push(p) };
+    const res = await withEdgeCache(read, { cache, ttl: 60, build })(new Request(at("/")), {}, ctx, target);
+    assert.equal(await res.text(), "shell", build);
+    await settle(w);
+  }
+  assert.equal(reads, 2, "each build misses once, then hits");
 });
 
 test("a client that stops reading stops the edge fill, the decoder and the payload read", async () => {

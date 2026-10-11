@@ -8,6 +8,7 @@ import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { buildIdPlugin } from "./buildid.mjs";
 import { listAssets, MAX_ASSET_BYTES, REPO, shellsPlugin } from "./shells.mjs";
 
 const celld = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -41,7 +42,7 @@ await build({
   keepNames: true,
   logLevel: "warning",
   outfile: "dist/index.js",
-  plugins: [shellsPlugin, wasmPlugin],
+  plugins: [shellsPlugin, buildIdPlugin, wasmPlugin],
 });
 for (const [name, source] of wasm) copyFileSync(source, join(dist, name));
 

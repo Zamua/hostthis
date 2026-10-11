@@ -3686,10 +3686,13 @@ off unless configured, and used only where the runtime has a Cache API
 - `HOSTTHIS_EDGE_CACHE_TTL_S` (default `0`, off) caches whole read responses
   in the data center's cache. An entry's key is on the public host, so a
   hostname purge of the slug's host reaches it (in path mode, so does a prefix
-  purge of `<apex>/p/<slug>`), and names only what the read path answers
-  from: the decoded path and the `raw` and `files` flags as parsed. Any other
-  query shares the entry, so a client's random query neither adds an entry
-  nor misses. An unconditional GET that misses fills it: the stored copy carries
+  purge of `<apex>/p/<slug>`), and names only the build and what the read
+  path answers from: the decoded path and the `raw` and `files` flags as
+  parsed. Any other query shares the entry, so a client's random query
+  neither adds an entry nor misses. The build is a hash, made when the bundle
+  is built, of the Worker's code and the shells: a deploy starts a fresh key
+  space, so a deploy that changes shells, or how any read is answered, takes
+  effect at once, with no purge. An unconditional GET that misses fills it: the stored copy carries
   `Cache-Control: public, max-age=<ttl>` and `Cache-Tag: <slug>`, while the
   client gets the browser headers. A hit answers GET, HEAD and conditional
   requests (the cache answers `If-None-Match` and `If-Modified-Since` with a
@@ -3827,7 +3830,9 @@ URL, not on `Accept` (Cloudflare honors only `Vary: Accept-Encoding`, never
 `Vary: Accept`), but whichever client primes a cache, every later client gets
 the same shell. Like every content response it is `public, no-cache`, and a
 shell change (a version bump in `web/shells/shells.json`) changes its ETag, so
-it shows on the next revalidation after the deploy that ships it.
+it shows on the next revalidation after the deploy that ships it. The
+Worker's edge cache keys every entry on the build, so a deploy that changes
+shells takes effect there at once too (see "The public surface").
 
 ### Active invalidation: CachePurger interface
 

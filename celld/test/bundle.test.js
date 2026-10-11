@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { buildId, hashInputs } from "../build/buildid.mjs";
 import * as bundle from "../dist/index.js";
 import * as source from "../src/index.js";
 
@@ -17,6 +18,21 @@ test("the bundle imports only the WASM modules built beside it", () => {
   assert.doesNotMatch(text, /\bimport\s*\(/);
   const vendored = readFileSync(new URL("../vendor/zstd/zd.wasm", import.meta.url));
   assert.ok(readFileSync(new URL("../dist/zd.wasm", import.meta.url)).equals(vendored));
+});
+
+test("the bundle carries the build id of the sources it was built from", () => {
+  const id = buildId();
+  assert.match(id, /^[0-9a-f]{16}$/);
+  assert.ok(readFileSync(BUNDLE, "utf8").includes(JSON.stringify(id)), "a stale bundle, or the id is not built in");
+});
+
+test("the build id hashes the shells and every source and vendored file", () => {
+  const files = [{ path: "celld/src/a.js", bytes: Buffer.from("a") }];
+  const base = hashInputs("shells", files);
+  assert.equal(hashInputs("shells", files), base);
+  assert.notEqual(hashInputs("shells2", files), base);
+  assert.notEqual(hashInputs("shells", [{ ...files[0], bytes: Buffer.from("b") }]), base);
+  assert.notEqual(hashInputs("shells", [{ ...files[0], path: "celld/src/b.js" }]), base);
 });
 
 test("the bundle exports what the source entry exports", () => {
