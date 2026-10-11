@@ -101,8 +101,12 @@ a Worker reachable only inside its cluster.
 
 `HOSTTHIS_APEX_DOMAIN` gives the Worker a public surface. Requests for the apex
 and every host under it go to a separate public router (`src/public/`) that
-never reaches the routes above; it answers 404 to everything for now. The token
-then becomes mandatory: without it, every other request answers 503. A request
-carrying the token and `X-Hostthis-Forwarded-Host: <host under the apex>` is
-served by the public router as that host. Left unset, the Worker routes as
-above whatever the Host. See `docs/SPEC.md`, "Public and internal hosts".
+never reaches the routes above: it serves paste and site reads, the renderer
+assets, health, and the rooms API, push and socket, as `hostthisd` does. The
+token then becomes mandatory: without it, every other request answers 503. A
+request carrying the token and `X-Hostthis-Forwarded-Host: <host under the
+apex>` is served by the public router as that host. Left unset, the Worker
+routes as above whatever the Host. `HOSTTHIS_EDGE_CACHE_TTL_S` and
+`HOSTTHIS_BLOB_CACHE_MAX_BYTES` turn on the read caches where the runtime has a
+Cache API; leave them unset on celld, whose cache always misses. See
+`docs/SPEC.md`, "Public and internal hosts" and "The public surface".
