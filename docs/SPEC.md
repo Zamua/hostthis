@@ -1587,14 +1587,15 @@ With the public surface on, a room holds at most 64 sockets, counted by its
 Room cell across both front ends. The cell decides at each join, in the same
 turn that would accept the socket: it counts the open sockets it holds, and at
 the cap first evicts stale ones (below) and counts again; a room still full
-answers the join with 429 instead of a 101. On the Worker path that 429 is the client's own handshake
-response. `hostthisd` accepts its client before it dials the cell, so there a
-refused join closes the client with 1011. The Worker path has no per-app cap:
-the creation limits bound how many rooms an app has. `hostthisd`'s proxy also
-admits at most 64 connections per room and 1024 per app per process, answering
-429 before its own handshake; these bound that process, not the room, and go
-away with the proxy. In off mode they are the only caps. Each of its
-connections is released exactly once when dialing fails or either side closes.
+answers the join with 429 instead of a 101. On the Worker path that 429 is the
+client's own handshake response. `hostthisd` accepts its client before it
+dials the cell, so there a refused join closes the client with 1011. The
+Worker path has no per-app cap: the creation limits bound how many rooms an
+app has. `hostthisd`'s proxy also admits at most 64 connections per room and
+1024 per app per process, answering 429 before its own handshake; these bound
+that process, not the room, and go away with the proxy. In off mode they are
+the only caps. Each of its connections is released exactly once when dialing
+fails or either side closes.
 
 Neither runtime pings or times out a hibernatable socket, so a client that
 vanishes without closing stays counted until a write to it fails. Liveness is
@@ -2371,8 +2372,9 @@ rule. The Room cell checks a subscription or schedule again when it stores
 it, and is the last judge: a document a server passed but the cell refuses (a
 zone the runtime does not know, a `when` whose fraction follows a comma, a
 port out of range) is 400 too, `push: invalid: <the cell's rule>` (for
-example `push: invalid: invalid-tz`), never a 500. A missing room is 404; a 17th subscription is 413; a second test within
-the minute is 429 with `Retry-After` in whole seconds, rounded up. Bodies
+example `push: invalid: invalid-tz`), never a 500. A missing room is 404; a
+17th subscription is 413; a second test within the minute is 429 with
+`Retry-After` in whole seconds, rounded up. Bodies
 decode as Go's `encoding/json` decodes them into the documents above: the
 first JSON value counts and anything after it is ignored, field names match
 case-insensitively with the last match winning, unknown fields are ignored, a
@@ -3561,8 +3563,8 @@ decided from its host, before any path is looked at.
 `HOSTTHIS_APEX_DOMAIN` on the Worker turns the split on. Unset or empty, the
 Worker runs only the internal router, exactly as above, whatever the Host and
 headers, and its Room cells relay every frame as `hostthisd`'s proxy expects
-(see "Real-time room relay"); every existing deployment runs this way. Set, each request is
-classified in this order:
+(see "Real-time room relay"); every existing deployment runs this way. Set,
+each request is classified in this order:
 
 1. **Public host.** A request whose host is the apex or any name under it
    (`<apex>`, `<slug>.<apex>`, `www.<apex>`, `a.b.<apex>`) goes to the public
