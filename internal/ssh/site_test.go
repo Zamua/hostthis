@@ -2,9 +2,14 @@ package ssh_test
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/Zamua/hostthis/internal/celld"
+	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 )
 
@@ -124,6 +129,95 @@ func TestSite_DeployAndServe(t *testing.T) {
 			}
 		}
 	})
+}
+
+// slugPurger records the slugs purged through the decorators.
+type slugPurger struct {
+	mu    sync.Mutex
+	slugs []string
+}
+
+func (p *slugPurger) PurgePaste(slug domain.Slug) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.slugs = append(p.slugs, slug.String())
+	return nil
+}
+
+func (p *slugPurger) take() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := p.slugs
+	p.slugs = nil
+	return out
+}
+
+// Every write that changes what a site or knowledge base serves purges its
+// slug: an in-place redeploy and a delete.
+func TestSite_RedeployAndDeletePurge(t *testing.T) {
+	purger := &slugPurger{}
+	s := startStack(t, withSites(), withPurger(purger))
+	for name, files := range map[string]map[string]string{
+		"site":           {"index.html": siteIndex},
+		"knowledge base": {"README.md": "# notes\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stdout, stderr, exit := s.run("", makeSiteArchive(t, files))
+			if exit != 0 {
+				t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
+			}
+			slug := extractSlug(stdout)
+			purger.take()
+
+			if _, stderr, exit := s.run(slug, makeSiteArchive(t, files)); exit != 0 {
+				t.Fatalf("redeploy exit %d: stderr %q", exit, stderr)
+			}
+			if got := purger.take(); !slices.Equal(got, []string{slug}) {
+				t.Fatalf("redeploy purged %v, want [%s]", got, slug)
+			}
+			if _, stderr, exit := s.run("delete "+slug, nil); exit != 0 {
+				t.Fatalf("delete exit %d: stderr %q", exit, stderr)
+			}
+			if got := purger.take(); !slices.Contains(got, slug) {
+				t.Fatalf("delete purged %v, want %s", got, slug)
+			}
+		})
+	}
+}
+
+// directoryBlindRepo hides directory artifacts from the manage service, so a
+// site delete takes the site-delete fallback.
+type directoryBlindRepo struct{ *celld.PasteRepo }
+
+func (r directoryBlindRepo) Get(s domain.Slug) (domain.Paste, error) {
+	p, err := r.PasteRepo.Get(s)
+	if err == nil && p.Kind.IsDirectory() {
+		return domain.Paste{}, domain.ErrNotFound
+	}
+	return p, err
+}
+
+// The site-delete fallback, taken when the paste delete answers not found,
+// purges the slug too.
+func TestSite_FallbackDeletePurges(t *testing.T) {
+	purger := &slugPurger{}
+	s := startStack(t, withSites(), withPurger(purger),
+		withManageRepo(func(r *celld.PasteRepo) service.PasteAdmin { return directoryBlindRepo{r} }))
+	stdout, stderr, exit := s.run("", makeSiteArchive(t, map[string]string{"index.html": siteIndex}))
+	if exit != 0 {
+		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
+	}
+	slug := extractSlug(stdout)
+	purger.take()
+	if _, stderr, exit := s.run("delete "+slug, nil); exit != 0 {
+		t.Fatalf("delete exit %d: stderr %q", exit, stderr)
+	}
+	if got := purger.take(); !slices.Equal(got, []string{slug}) {
+		t.Fatalf("fallback delete purged %v, want [%s]", got, slug)
+	}
+	if code, _ := getBody(t, s.httpURL+"/p/"+slug); code != 404 {
+		t.Fatalf("site after delete: code %d, want 404", code)
+	}
 }
 
 // The update path's gzip-magic peek leaves a plain-HTML paste update alone:

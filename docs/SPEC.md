@@ -1069,6 +1069,9 @@ site-vs-paste, the slug decides new-vs-update.
   live version, so it receives no replacement credit. Admission evaluates the
   owner's existing all-live charge plus the final manifest's logical compressed
   size. Deleting a version later releases exactly that version's charge.
+- **Purges the slug.** Like a paste update, a re-deploy purges the slug's
+  cached responses (see "Active invalidation"), so the next load of any file
+  shows the new version.
 
 A re-deploy to an existing slug NEVER lands as a fresh slug: the slug is
 the explicit target. The fresh-random-slug path is only the no-slug
@@ -3800,16 +3803,23 @@ When the bytes served at a paste's URL change, the cached version at
 the CDN edge (and in browsers) becomes stale. hostthis fires a purge
 call so the next reader fetches fresh from origin.
 
-Operations that fire a purge:
+Every write that changes what a slug serves fires a purge:
 - `update` - content for the latest version changes.
-- `delete` - URL should return 404, not the cached body.
+- `delete` - URL should return 404, not the cached body. This covers a
+  site or knowledge base deleted through the site-delete fallback as well
+  as through the paste delete.
 - `pin` - the served version changes (e.g. pinning v1 hides v2 again).
 - `unpin` - when a pin was holding the URL on an older version,
   unpinning re-exposes the latest; without a purge, a cache that keeps
   responses for a TTL of its own holds the old pinned bytes.
+- a site or knowledge base deploy to an existing slug (re-deploy in
+  place) - every file of the slug may change, and the shape itself can
+  (adding a root `index.html` turns a knowledge base into a site).
 
 `rename` does NOT purge - the name is owner-only metadata, not part of
-the public response. Same with `versions`/`list`/`whoami`/`get`.
+the public response. Same with `versions`/`list`/`whoami`/`get`. A new
+upload or deploy mints a slug nothing has cached, so it does not purge
+either.
 
 **A write purges even when it reports failure.** A write can report an
 error *after* it committed - a transport error that loses the cell's
@@ -3845,7 +3855,9 @@ no `CachePurger` field and no purge calls. A thin `CacheInvalidating`
 decorator wraps the verb service at the composition root
 (`cmd/hostthisd`): it delegates every verb to the inner service and,
 after an `Update` / `Delete` / `Pin` / `Unpin` that succeeded or may have
-(see above), fires `PurgePaste(slug)`. The mutation use-cases stay pure; cache invalidation
+(see above), fires `PurgePaste(slug)`. A `SiteCacheInvalidating` decorator
+does the same around the site deploy service for `DeployToSlug` and its
+`Delete`, by the same rule. The mutation use-cases stay pure; cache invalidation
 is a cross-cutting concern layered on by composition, not woven into the
 domain logic. `rename` / `versions` / `list` / `whoami` / `get` /
 `deleteVersion` are delegated without a purge - they don't change the

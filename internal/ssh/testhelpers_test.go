@@ -70,7 +70,12 @@ type stackOpts struct {
 	rawBlobs   func(storage.InnerBlobStore) storage.InnerBlobStore
 	uploads    *hostssh.UploadAdmission
 	logOut     io.Writer
+	purger     service.CachePurger
 }
+
+// withPurger wraps the manage and deploy services in their cache-invalidating
+// decorators, as cmd/hostthisd does.
+func withPurger(p service.CachePurger) stackOpt { return func(o *stackOpts) { o.purger = p } }
 
 type stackOpt func(*stackOpts)
 
@@ -137,7 +142,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	sshSrv := &hostssh.Server{
 		ApexDomain: "paste.test",
 		Upload:     upload,
-		Manage:     manage,
+		Manage:     service.NewCacheInvalidating(manage, o.purger),
 		Pastes:     repo,
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
@@ -149,7 +154,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		sites := storage.NewSites(repo)
 		httpSrv.Sites = sites
 		httpSrv.ApexDomain = "paste.test"
-		sshSrv.Deploy = service.NewDeploySite(sites, repo, blobUnit)
+		sshSrv.Deploy = service.NewSiteCacheInvalidating(service.NewDeploySite(sites, repo, blobUnit), o.purger)
 	}
 	var keyGate *service.KeyGate
 	if o.keyGateCap > 0 {

@@ -56,7 +56,7 @@ type Server struct {
 	HostKeyPath string
 	ApexDomain  string // used in user-visible messages (help text, error hints).
 	Upload      *service.Upload
-	Deploy      *service.DeploySite // optional; nil disables static-site archive uploads
+	Deploy      service.SiteDeployer // optional; nil disables static-site archive uploads
 	Manage      service.PasteManager
 	Pastes      PasteReader      // by-slug read for the `versions` current-marker
 	Sites       SiteReader       // optional; by-slug site read for `url`/`qr` (nil = paste-only)

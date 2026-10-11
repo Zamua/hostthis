@@ -58,6 +58,17 @@ type DeploySite struct {
 	Logger *log.Logger
 }
 
+// SiteDeployer is the site surface the SSH layer consumes, an interface so
+// cache invalidation can be a decorator the composition root layers on.
+type SiteDeployer interface {
+	Deploy(body io.Reader, owner string) (SiteResult, error)
+	DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error)
+	Delete(slug domain.Slug, owner string) error
+	ListSites(owner string) ([]domain.Site, error)
+}
+
+var _ SiteDeployer = (*DeploySite)(nil)
+
 // NewDeploySite wires defaults.
 func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *DeploySite {
 	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now}
