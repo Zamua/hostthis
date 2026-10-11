@@ -190,7 +190,8 @@ test("a conditional request is answered before any payload is read, comparing we
     { "If-Modified-Since": "sun, 07 jun 2026 14:00:01 GMT" },
     { "If-Modified-Since": "Sunday, 07-Jun-26 14:00:00 EST" },
     { "If-Modified-Since": "Sun Jun  7 14:00:00 2026" },
-    { "If-None-Match": "\"other\"", "If-Modified-Since": lastModified },
+    // An empty If-None-Match is none, as Go's Header.Get reads it.
+    { "If-None-Match": "", "If-Modified-Since": lastModified },
   ];
   for (const headers of notModified) {
     w.payloadCalls.length = 0;
@@ -210,6 +211,9 @@ test("a conditional request is answered before any payload is read, comparing we
     { "If-Modified-Since": "Sun, 31 Jun 2026 14:00:00 GMT" },
     { "If-Modified-Since": "Sun, 07 Jun 2026 14:00:00 UTC" },
     { "If-Modified-Since": "Sun, 7 Jun 2026 14:00:00 GMT" },
+    // A present If-None-Match decides alone (RFC 9110 section 13.2.2).
+    { "If-None-Match": "\"other\"", "If-Modified-Since": lastModified },
+    { "If-None-Match": "W/\"other\", \"uploads/a/1\"", "If-Modified-Since": "Mon, 01 Jan 2035 00:00:00 GMT" },
   ];
   for (const headers of modified) {
     const res = await w.fetch(at("/"), { headers });

@@ -20,11 +20,14 @@ export function etagMatches(header, etag) {
   return header.split(",").some((candidate) => opaque(trim(candidate)) === opaque(etag));
 }
 
-// Whether to answer 304: If-None-Match matches, or else If-Modified-Since is
-// at or after updatedAt (ms) truncated to the second.
+// Whether to answer 304: If-None-Match matches when the request has one (RFC
+// 9110 section 13.2.2: it then decides alone), else If-Modified-Since is at or
+// after updatedAt (ms) truncated to the second. An empty header is none, as
+// Go's Header.Get reads it.
 export function notModified(headers, etag, updatedAt) {
-  if (etagMatches(headers.get("If-None-Match"), etag)) {
-    return true;
+  const inm = headers.get("If-None-Match");
+  if (inm) {
+    return etagMatches(inm, etag);
   }
   const since = headers.get("If-Modified-Since");
   if (!since) {

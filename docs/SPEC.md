@@ -3729,12 +3729,13 @@ would let a browser show its own stored copy, without asking, for the length
 of the window after an update; for a site it would keep serving cached js and
 css sub-resources after a redeploy until each expired.
 
-A request whose `If-None-Match` lists the ETag (or is `*`), or that sends no
-`If-None-Match` and whose `If-Modified-Since` is at or after `updatedAt` (to
-the second), is answered 304 before any payload byte is read. A present
-`If-None-Match` that lists no matching ETag means a full response whatever
-`If-Modified-Since` says (RFC 9110 13.2.2). The pending and failed pages are
-`no-store` (see "Paste lifecycle status").
+A request whose `If-None-Match` lists the ETag (or is `*`), or that has no
+`If-None-Match` and an `If-Modified-Since` at or after `updatedAt` (to the
+second), is answered 304 before any payload byte is read. A present
+`If-None-Match` decides alone (RFC 9110 section 13.2.2): one listing only other
+tags gets the full response whatever its `If-Modified-Since`. An empty header
+counts as absent. The pending and failed pages are `no-store` (see "Paste
+lifecycle status").
 
 The versioned renderer assets under `/_hostthis/` are
 `public, max-age=31536000, immutable`: their URLs carry the shell version.
