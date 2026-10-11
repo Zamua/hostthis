@@ -1523,6 +1523,14 @@ Two frame classes share the socket:
   continue to use the HTTP KV path so the byte caps and sequence exist in one
   place.
 
+The Room cell's own liveness and admission rules (the ping frame, its frame
+limit, its socket cap and stale eviction, below) hold only while the Worker
+serves the public surface, that is, has `HOSTTHIS_APEX_DOMAIN` set (see
+"Public and internal hosts"). Without an apex the Worker is in off mode and the
+cell relays every client frame to its peers exactly as `hostthisd`'s proxy
+expects: a ping is an ordinary ephemeral frame, no frame size closes a socket,
+and every join is accepted. The proxy's own bounds are then the only ones.
+
 One client frame is reserved for liveness: the text frame `{"type":"ping"}`,
 exactly those 15 bytes. The runtime answers it on the same socket with the text
 frame `{"type":"pong"}` without waking the cell, and it never reaches a peer.
@@ -1531,12 +1539,12 @@ Any other spelling of a ping is an ordinary ephemeral frame.
 A client-sent ephemeral frame may carry at most 32 KiB, bounding one sender's
 fan-out amplification explicitly rather than inheriting the WebSocket library's
 default. The Room cell enforces it for every socket: a larger frame closes the
-sender with 1009 and reaches no peer. Server-generated snapshot and mirror
-frames may carry up to 2 MiB so a full 256 KiB room still fits after
+sender with 1009 and reaches no peer. `hostthisd`'s proxy applies the same
+limit at its client read boundary in every mode. Server-generated snapshot and
+mirror frames may carry up to 2 MiB so a full 256 KiB room still fits after
 worst-case JSON escaping; the cell writes them, so only `hostthisd`'s proxy
-limits them, at its upstream read boundary, as it also applies the 32 KiB
-limit at its client read boundary. A dead or closing peer is skipped without
-blocking the remaining fan-out.
+limits them, at its upstream read boundary. A dead or closing peer is skipped
+without blocking the remaining fan-out.
 
 ### Snapshot and sequence contract
 
@@ -1563,18 +1571,18 @@ too; one that does has already closed it.
 
 ### Lifecycle and bounds
 
-A room holds at most 64 sockets, counted by its Room cell across both front
-ends. The cell decides at each join, in the same turn that would accept the
-socket: it first evicts stale sockets (below), then counts the open ones it
-holds, and past the cap answers the join with 429 instead of a 101. On the
-Worker path that 429 is the client's own handshake response. `hostthisd`
-accepts its client before it dials the cell, so there a refused join closes
-the client with 1011. The Worker path has no per-app cap: the creation limits
-bound how many rooms an app has. `hostthisd`'s proxy also admits at most 64
-connections per room and 1024 per app per process, answering 429 before its
-own handshake; these bound that process, not the room, and go away with the
-proxy. Each of its connections is released exactly once when dialing fails or
-either side closes.
+With the public surface on, a room holds at most 64 sockets, counted by its
+Room cell across both front ends. The cell decides at each join, in the same
+turn that would accept the socket: it first evicts stale sockets (below), then
+counts the open ones it holds, and past the cap answers the join with 429
+instead of a 101. On the Worker path that 429 is the client's own handshake
+response. `hostthisd` accepts its client before it dials the cell, so there a
+refused join closes the client with 1011. The Worker path has no per-app cap:
+the creation limits bound how many rooms an app has. `hostthisd`'s proxy also
+admits at most 64 connections per room and 1024 per app per process, answering
+429 before its own handshake; these bound that process, not the room, and go
+away with the proxy. In off mode they are the only caps. Each of its
+connections is released exactly once when dialing fails or either side closes.
 
 Neither runtime pings or times out a hibernatable socket, so a client that
 vanishes without closing stays counted until a write to it fails. Liveness is
@@ -3528,7 +3536,8 @@ decided from its host, before any path is looked at.
 
 `HOSTTHIS_APEX_DOMAIN` on the Worker turns the split on. Unset or empty, the
 Worker runs only the internal router, exactly as above, whatever the Host and
-headers; every existing deployment runs this way. Set, each request is
+headers, and its Room cells relay every frame as `hostthisd`'s proxy expects
+(see "Real-time room relay"); every existing deployment runs this way. Set, each request is
 classified in this order:
 
 1. **Public host.** A request whose host is the apex or any name under it

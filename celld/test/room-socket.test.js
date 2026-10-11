@@ -32,8 +32,11 @@ class FakeSocket {
   }
 }
 
+// The public surface is on: the Worker has an apex.
+const ON = { HOSTTHIS_APEX_DOMAIN: "example.com" };
+
 // A Room over hibernation state holding the given sockets.
-function room(sockets, env = {}) {
+function room(sockets, env = ON) {
   const pairs = [];
   const cell = new Room({
     ...state(new FakeStorage()),
@@ -96,7 +99,7 @@ test("eviction runs at every join, under the cap too", () => {
 
 test("the stale window is a test hook in env", () => {
   const ws = new FakeSocket(NOW - 2000);
-  room([ws], { ROOM_PING_STALE_MS: "1500" }).cell.admit(NOW);
+  room([ws], { ...ON, ROOM_PING_STALE_MS: "1500" }).cell.admit(NOW);
   assert.deepEqual(ws.closed, [1000, "stale"]);
 });
 
@@ -128,4 +131,29 @@ test("a reserved server frame still closes its sender with 1008", async () => {
   await room([sender, peer]).cell.webSocketMessage(sender, '{"type":"put","seq":1}');
   assert.deepEqual(sender.closed, [1008, "reserved control frame"]);
   assert.equal(peer.sent.length, 0);
+});
+
+// Off mode is the relay hostthisd's proxy fronts: every frame reaches the
+// peers, and admission is the proxy's.
+test("off mode registers no ping answer", () => {
+  for (const env of [{}, { HOSTTHIS_APEX_DOMAIN: "" }, { HOSTTHIS_APEX_DOMAIN: " " }]) {
+    assert.equal(room([], env).pairs.length, 0, JSON.stringify(env));
+  }
+});
+
+test("off mode admits past the cap and evicts nothing", () => {
+  const sockets = Array.from({ length: 64 }, () => new FakeSocket(NOW - 10 * 60_000));
+  assert.equal(room(sockets, {}).cell.admit(NOW), null);
+  assert.ok(sockets.every((ws) => ws.closed === null));
+});
+
+test("off mode relays a frame of any size and the ping frame", async () => {
+  for (const frame of ["x".repeat(64 * 1024), new ArrayBuffer(64 * 1024), PING_FRAME]) {
+    const sender = new FakeSocket();
+    const peer = new FakeSocket();
+    await room([sender, peer], {}).cell.webSocketMessage(sender, frame);
+    const what = typeof frame === "string" ? `string of ${frame.length}` : `buffer of ${frame.byteLength}`;
+    assert.ok(peer.sent.length === 1 && peer.sent[0] === frame, what);
+    assert.equal(sender.closed, null, what);
+  }
 });
