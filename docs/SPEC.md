@@ -3563,8 +3563,9 @@ kept) is redirected 307 to its cleaned form with the query kept; and the path
 is percent-decoded once. Cleaning works on the escaped path, as `ServeMux`'s
 does, and the `Location` is that cleaned escaped path: an escaped `/` or `\`
 stays escaped (`/%2Fevil.com//` redirects to `/%2Fevil.com/`), so the
-`Location` never starts with `//` or `/\` and never leaves the host. On every host it then answers the renderer assets
-under `/_hostthis/` and `/healthz` and `/readyz` (see "The public surface").
+`Location` never starts with `//` or `/\` and never leaves the host. On every
+host it then answers the renderer assets under `/_hostthis/` and `/healthz`
+and `/readyz` (see "The public surface").
 
 It serves an app on a slug host, `<slug>.<apex>` whose one label parses as a
 slug, and, with `HOSTTHIS_URL_MODE=path` (dev and tests only; `subdomain` is
@@ -3654,10 +3655,10 @@ chunk that would run past is not sent. The chunk that completes the size is
 sent only once the stream has ended cleanly (the decoder verifies the frame
 checksum after its last output), so damage found at the checksum also leaves
 the body short. A body that ends early either aborts the connection or ends
-short of its `Content-Length`, and no client takes it for whole. An answer with no size, or a negative one, streams without a
-`Content-Length` (a manifest entry that has no `Size` decodes as 0, as Go
-reads it). Shells and file lists are generated and carry none. A HEAD never
-opens the object.
+short of its `Content-Length`, and no client takes it for whole. An answer
+with no size, or a negative one, streams without a `Content-Length` (a
+manifest entry that has no `Size` decodes as 0, as Go reads it). Shells and
+file lists are generated and carry none. A HEAD never opens the object.
 
 **Renderer assets.** On Cloudflare, the build's static assets answer every
 known `/_hostthis/<name>` before the Worker runs. A request that reaches the
@@ -3694,8 +3695,9 @@ off unless configured, and used only where the runtime has a Cache API
   neither adds an entry nor misses. The build is a hash, made when the bundle
   is built, of the Worker's code and the shells: a deploy starts a fresh key
   space, so a deploy that changes shells, or how any read is answered, takes
-  effect at once, with no purge. An unconditional GET that misses fills it: the stored copy carries
-  `Cache-Control: public, max-age=<ttl>` and `Cache-Tag: <slug>`, while the
+  effect at once, with no purge. An unconditional GET that misses fills it:
+  the stored copy carries `Cache-Control: public, max-age=<ttl>` and
+  `Cache-Tag: <slug>`, while the
   client gets the browser headers. A hit answers GET, HEAD and conditional
   requests (the cache answers `If-None-Match` and `If-Modified-Since` with a
   304 itself, by RFC 9110's rules) without a cell call or a payload read, and
