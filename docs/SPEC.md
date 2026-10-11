@@ -3358,16 +3358,54 @@ The fleet bucket must never carry a storage quota. Payload growth shares it
 with celld's state and lease writes, and a quota that fills would refuse those
 as well.
 
-One fleet bucket serves one Worker application. `hostthisd` is the only public
-surface. The Worker's routes accept an optional shared token: when the Worker
+One fleet bucket serves one Worker application. `hostthisd` serves all public
+content. The Worker's internal routes accept an optional shared token: when the Worker
 has `HOSTTHIS_CELLD_TOKEN` set, every route except `/healthz` (the cell
 routes, `/blob`, and the room join) requires `Authorization: Bearer <token>`
 and answers 401 without it, compared in constant time. `hostthisd` sends the
 header when its own `HOSTTHIS_CELLD_TOKEN` is set. A deployment whose Worker is
 reachable only inside its cluster may leave both unset and rely on
-NetworkPolicy; a Worker reachable across the internet sets both. Worker health and runtime health are
+NetworkPolicy; a Worker reachable across the internet sets both, and a Worker
+with a public apex (below) must set the token. Worker health and runtime health are
 separate: `/healthz` checks the hostthis Worker, while
 `/.well-known/celld/health` is the node lifecycle probe.
+
+### Public and internal hosts
+
+The Worker has two routers. The internal router is everything above: the cell
+routes, `/blob` and the room join behind the optional token, and `/healthz`.
+The public router answers the public hostnames. Which router a request reaches is
+decided from its host, before any path is looked at.
+
+`HOSTTHIS_APEX_DOMAIN` on the Worker turns the split on. Unset or empty, the
+Worker runs only the internal router, exactly as above, whatever the Host and
+headers; every existing deployment runs this way. Set, each request is
+classified in this order:
+
+1. **Public host.** A request whose host is the apex or any name under it
+   (`<apex>`, `<slug>.<apex>`, `www.<apex>`, `a.b.<apex>`) goes to the public
+   router, whatever its path, query, method or headers, a valid token
+   included. Nothing a public request carries reaches the internal router, a
+   cell or the payload bucket.
+2. **No token, no internal router.** With `HOSTTHIS_CELLD_TOKEN` unset or
+   empty, every other request, `/healthz` included, answers 503: a Worker with
+   a public surface never runs an open internal router.
+3. **Forwarded.** A request carrying `X-Hostthis-Forwarded-Host` and a valid
+   token goes to the public router as if addressed to that host. The header is
+   read only after the token check, so it gives a caller nothing the token did
+   not already give. A forwarded host that is not a well-formed hostname
+   (dot-separated labels of letters, digits and hyphens) equal to or under the
+   apex answers 400. Without a valid token the header is ignored and the
+   request is internal (401, or `/healthz`).
+4. **Internal.** Everything else reaches the internal router, unchanged.
+
+Hosts compare after normalization: lowercase, no port, no trailing dot. The
+apex value is normalized the same way, so `Example.COM.:443` names
+`example.com`.
+
+The public router serves no routes yet. It answers every request 404 with
+`404 page not found`, `Content-Type: text/plain; charset=utf-8` and
+`X-Content-Type-Options: nosniff`, the 404 `hostthisd` gives an unknown slug.
 
 ## Edge caching
 
@@ -3810,8 +3848,17 @@ The runtime container reads the same env vars. The operator supplies
 a docker-compose (or equivalent) file out of band; this repo ships no
 sample production compose.
 
-A deployment runs the bundled celld Worker, `celld/dist/index.js`: run
-`make bundle` before `celld deploy` or `wrangler deploy`.
+The celld Worker reads its own variables (wrangler `vars` and secrets, or the
+runtime's equivalent), separate from `hostthisd`'s:
+
+```
+HOSTTHIS_APEX_DOMAIN   public apex; turns on the public/internal host split     (unset: off)
+HOSTTHIS_CELLD_TOKEN   bearer token for the internal routes; required with an apex   (unset)
+```
+
+See "Public and internal hosts". A deployment runs the bundled Worker,
+`celld/dist/index.js`: run `make bundle` before `celld deploy` or
+`wrangler deploy`.
 
 ### Process shutdown
 
