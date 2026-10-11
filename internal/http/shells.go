@@ -8,19 +8,16 @@ import (
 	"strings"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/web"
 )
 
 // A clientShell is one kind's fixed, content-independent render page: the
 // browser fetches the paste's raw bytes via ?raw and renders them, so server
-// memory stays constant regardless of paste size. Adding a kind is a table
-// entry. The asset namespace (/_hostthis/<name>) is FLAT and shared across
-// shells, which lets the markdown shell lazy-load the mermaid renderer.
+// memory stays constant regardless of paste size. Shells are declared in
+// web/shells/shells.json; adding a kind is a table entry there.
 type clientShell struct {
 	// version tags the response ETag and is substituted for __VER__ in the
-	// shell's asset URLs as a ?v= cache-buster. The assets are served
-	// immutable, so a same-path change is otherwise pinned in caches for a
-	// year. BUMP IT whenever a file under the shell's dir changes in a way
-	// visitors must re-fetch.
+	// shell's asset URLs as a ?v= cache-buster.
 	version string
 	fs      embed.FS
 	dir     string
@@ -28,33 +25,13 @@ type clientShell struct {
 	// their Content-Type. A name outside every shell's whitelist 404s, so no
 	// path traversal or arbitrary embedded-file disclosure is possible.
 	assets map[string]string
-	// csp overrides shellCSP for shells whose renderer needs a capability the
-	// baseline denies. Empty means the baseline. Per-shell rather than one
-	// widened global policy, which would hand every paste the union of what
-	// any renderer needs.
+	// csp is the page's Content-Security-Policy; empty for a directory with no
+	// page.
 	csp string
 }
 
 // policy returns the Content-Security-Policy for this shell.
-func (s *clientShell) policy() string {
-	if s.csp != "" {
-		return s.csp
-	}
-	return shellCSP
-}
-
-// wasmWorkerCSP is shellCSP plus the two capabilities a WebAssembly renderer
-// needs: compiling the module, and running it on a worker thread.
-//
-// 'wasm-unsafe-eval' permits WebAssembly compilation ONLY; it does not restore
-// eval() or inline script, so the baseline's protection against injected
-// JavaScript is intact. blob: is required on worker-src because the wasm
-// bootstraps its worker from a generated blob URL.
-const wasmWorkerCSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; " +
-	"worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; " +
-	"img-src 'self' data: http: https:; media-src 'self' data: http: https:; " +
-	"font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; " +
-	"form-action 'none'; frame-ancestors 'none'"
+func (s *clientShell) policy() string { return s.csp }
 
 // html returns the shell page with its version stamped into the asset URLs and
 // the kind stamped into the root element. The kind is passed rather than
@@ -62,107 +39,59 @@ const wasmWorkerCSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval';
 // re-derives the kind can disagree with the stored one on an ambiguous file (a
 // JSON array of arrays is also a table).
 func (s *clientShell) html(kind domain.ContentKind) []byte {
-	b, err := s.fs.ReadFile(s.dir + "/shell.html")
+	b, err := s.fs.ReadFile(s.dir + "/" + web.TemplateName)
 	if err != nil {
-		// The asset is compiled into the binary, so a read failure means the
-		// build is broken; that surfaces in tests.
+		// The template is compiled into the binary, so a read failure means
+		// the build is broken; that surfaces in tests.
 		return nil
 	}
 	out := strings.ReplaceAll(string(b), "__VER__", s.version)
 	return []byte(strings.ReplaceAll(out, "__KIND__", string(kind)))
 }
 
-// dataShell is ONE shell shared by csv and json, declared once so the two kinds
-// are the same pointer rather than two structs that can drift apart.
-var dataShell = &clientShell{
-	version: dataShellVersion, fs: dataShellFS, dir: "assets/datashell",
-	assets: dataShellAssets, csp: wasmWorkerCSP,
-}
+var (
+	// shellsByDir holds one clientShell per directory, so kinds sharing a
+	// shell (csv and json) share one pointer and cannot drift apart.
+	shellsByDir = map[string]*clientShell{}
+	// shells maps each client-rendered kind to its shell. A kind absent here
+	// is served directly (HTML) or is not a paste at all (site). The knowledge
+	// base is reached through the directory path, since its shell answers at
+	// many paths rather than at one.
+	shells = map[domain.ContentKind]*clientShell{}
+	// rawContentType is the Content-Type of each client-rendered kind's ?raw
+	// response, served from the blob verbatim.
+	rawContentType = map[domain.ContentKind]string{}
+	// assetSource resolves a flat asset name to the shell that owns it.
+	assetSource = map[string]*clientShell{}
+)
 
-// shells maps each client-rendered kind to its shell. A kind absent from this
-// map is served directly (HTML) or is not a paste at all (site).
-//
-// The knowledge base is here for the same reason the document kinds are - one
-// fixed page, one raw fetch - but it is reached through the directory path,
-// since its shell answers at many paths rather than at one.
-var shells = map[domain.ContentKind]*clientShell{
-	domain.KindMarkdown:   {version: mdShellVersion, fs: mdShellFS, dir: "assets/mdshell", assets: mdShellAssets},
-	domain.KindDiff:       {version: diffShellVersion, fs: diffShellFS, dir: "assets/diffshell", assets: diffShellAssets},
-	domain.KindMermaid:    {version: mermaidShellVersion, fs: mermaidShellFS, dir: "assets/mermaidshell", assets: mermaidShellAssets},
-	domain.KindPDF:        {version: pdfShellVersion, fs: pdfShellFS, dir: "assets/pdfshell", assets: pdfShellAssets, csp: wasmWorkerCSP},
-	domain.KindCSV:        dataShell,
-	domain.KindJSON:       dataShell,
-	domain.KindFlamegraph: {version: flameShellVersion, fs: flameShellFS, dir: "assets/flameshell", assets: flameShellAssets},
-	domain.KindText:       {version: textShellVersion, fs: textShellFS, dir: "assets/textshell", assets: textShellAssets},
-	domain.KindLog:        {version: logShellVersion, fs: logShellFS, dir: "assets/logshell", assets: logShellAssets},
-
-	domain.KindKnowledgeBase: {version: kbShellVersion, fs: kbShellFS, dir: "assets/kbshell", assets: kbShellAssets},
-}
-
-// rawContentType is the Content-Type each client-rendered kind's ?raw response
-// carries. A kind here is served from the blob verbatim; the shell fetches it.
-//
-// PDF is the one kind whose "raw" IS the representation a browser can use
-// directly, so its type has to be right for the viewer and for a plain curl.
-var rawContentType = map[domain.ContentKind]string{
-	domain.KindMarkdown:   "text/markdown; charset=utf-8",
-	domain.KindDiff:       "text/plain; charset=utf-8",
-	domain.KindMermaid:    "text/plain; charset=utf-8",
-	domain.KindCSV:        "text/plain; charset=utf-8",
-	domain.KindJSON:       "application/json; charset=utf-8",
-	domain.KindPDF:        "application/pdf",
-	domain.KindFlamegraph: "text/plain; charset=utf-8",
-	domain.KindText:       "text/plain; charset=utf-8",
-	domain.KindLog:        "application/x-ndjson; charset=utf-8",
-	// A knowledge base's raw representation is the markdown document the path
-	// resolves to; its other files serve under their own extension's type.
-	domain.KindKnowledgeBase: "text/markdown; charset=utf-8",
+func init() {
+	table, err := web.LoadShellTable()
+	if err != nil {
+		// Embedded at build time: a bad table is a broken build.
+		panic(err)
+	}
+	for dir, sh := range table.Shells {
+		cs := &clientShell{
+			version: sh.Version,
+			fs:      web.Files,
+			dir:     web.ShellsDir + "/" + dir,
+			assets:  sh.Assets,
+			csp:     table.CSP[sh.CSP],
+		}
+		shellsByDir[dir] = cs
+		for name := range sh.Assets {
+			assetSource[name] = cs
+		}
+	}
+	for kind, k := range table.Kinds {
+		shells[domain.ContentKind(kind)] = shellsByDir[k.Shell]
+		rawContentType[domain.ContentKind(kind)] = k.Raw
+	}
 }
 
 // shellFor returns the shell for kind, or nil when the kind renders without one.
 func shellFor(kind domain.ContentKind) *clientShell { return shells[kind] }
-
-// commonShell is not a kind's shell: it holds assets EVERY shell loads. Deep
-// link resolution lives here because it is a property of the client-render
-// architecture (see docs/SPEC.md "The load order rule") rather than of any one
-// viewer, and copying it per shell is how one of them ends up subtly different.
-//
-//go:embed assets/common/*
-var commonShellFS embed.FS
-
-var commonShell = &clientShell{
-	version: commonVersion,
-	fs:      commonShellFS,
-	dir:     "assets/common",
-	assets: map[string]string{
-		"deeplink.js":    "text/javascript; charset=utf-8",
-		"linegutter.js":  "text/javascript; charset=utf-8",
-		"linegutter.css": "text/css; charset=utf-8",
-	},
-}
-
-// commonVersion busts the cache for the shared assets. Every shell stamps its
-// OWN version into its asset URLs, so bumping this alone is not enough: bump
-// the shells that must re-fetch too.
-const commonVersion = "common-v6"
-
-// assetSource resolves a flat asset name to the shell that owns it. Built once
-// from the shell table so a new shell needs no change here.
-//
-// Kinds sharing ONE shell (csv and json) are the same pointer, so they
-// contribute identical entries and cannot conflict.
-var assetSource = func() map[string]*clientShell {
-	m := map[string]*clientShell{}
-	for _, sh := range shells {
-		for name := range sh.assets {
-			m[name] = sh
-		}
-	}
-	for name := range commonShell.assets {
-		m[name] = commonShell
-	}
-	return m
-}()
 
 // serveAsset serves a single whitelisted client-render asset under
 // /_hostthis/<name>. The assets are immutable (pinned by the shell version in

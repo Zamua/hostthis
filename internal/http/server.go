@@ -285,7 +285,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	}
 
 	// Every other kind is client-rendered: raw bytes under ?raw, else the shell
-	// that fetches them same-origin under shellCSP.
+	// that fetches them same-origin under its CSP.
 	if shell == nil {
 		s.logf("warn: paste read 500: slug=%s unsupported stored kind %q", slug, p.Kind)
 		http.Error(w, "unsupported kind", http.StatusInternalServerError)
@@ -494,14 +494,6 @@ func notModified(w http.ResponseWriter, r *http.Request, etag string, updatedAt 
 	}
 	return false
 }
-
-// shellCSP locks down every client-render shell response: no default sources,
-// scripts/styles/connects same-origin only, no inline script, no framing, no
-// form submission. Images and media are unrestricted because markdown can
-// embed remote images. 'unsafe-inline' covers styles only, so the markdown's
-// own inline styles (which DOMPurify keeps) and the diff renderer's injected
-// styles render; scripts get no such escape hatch.
-const shellCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 // wantsRaw reports whether the client asked for the raw paste bytes rather
 // than the client-render shell. True ONLY for an explicit ?raw query: there is

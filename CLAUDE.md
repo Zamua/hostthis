@@ -129,6 +129,8 @@ internal/
   http/              apex landing + paste read surface
 e2e/                 Playwright browser suite (Chromium + WebKit)
 web/landing.html     embedded apex landing page
+web/shells/          render shells, their assets and shells.json; read by Go
+                     (package web) and the celld Worker build
 docs/SPEC.md         product spec; source of truth for behavior
 Dockerfile           multi-stage build; distroless static image
 Makefile             build / test / run / docker-up / smoke targets
