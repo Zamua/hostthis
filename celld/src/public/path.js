@@ -67,6 +67,15 @@ export function escapePath(path) {
   return out;
 }
 
+// url.URL.EscapedPath of a request whose path arrived as pathname: the path as
+// sent when Go accepts it as an encoding, else escaped from its decoded form.
+function escapedPath(pathname) {
+  if (/^[A-Za-z0-9\-_.~$&+,/:;=@!'()*[\]%]*$/.test(pathname)) {
+    return pathname;
+  }
+  return escapePath(decodePath(pathname) ?? pathname);
+}
+
 const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&#34;", "'": "&#39;" };
 
 // http.Redirect with 307: for GET and HEAD a Content-Type, and for GET the
@@ -84,14 +93,17 @@ function temporaryRedirect(method, location) {
   return new Response(`<a href="${href}">Temporary Redirect</a>.\n\n`, { status: 307, headers });
 }
 
-// ServeMux's redirect of a path that is not clean: 307, query kept. Null for a
-// clean path.
+// ServeMux's redirect of a path that is not clean: 307 to the cleaned escaped
+// path, query kept. Null for a clean path. The Location is never decoded: an
+// escaped "/" or "\" decoded there would make "//host" or "/\host", which a
+// browser follows to another host.
 export function cleanRedirect(method, pathname, search) {
-  const cleaned = cleanPath(pathname);
-  if (cleaned === pathname) {
+  const escaped = escapedPath(pathname);
+  const cleaned = cleanPath(escaped);
+  if (cleaned === escaped) {
     return null;
   }
-  return temporaryRedirect(method, escapePath(decodePath(cleaned) ?? cleaned) + search);
+  return temporaryRedirect(method, cleaned + search);
 }
 
 // The one subtree hostthisd registers, /_hostthis/, which ServeMux answers
