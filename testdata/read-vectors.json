@@ -1,0 +1,1850 @@
+{
+  "about": [
+    "Read rules shared by the Go read path (internal/http) and the Worker's celld/src/read.js.",
+    "Each vector runs request (path already percent-decoded; raw and files flags) against rows[row] as the Paste cell holds it; null is no row.",
+    "extensions is the known-extension table's asset flag: a miss on an asset extension is a 404, any other a route."
+  ],
+  "extensions": {
+    ".html": false,
+    ".htm": false,
+    ".md": false,
+    ".markdown": false,
+    ".css": true,
+    ".js": true,
+    ".mjs": true,
+    ".cjs": true,
+    ".json": true,
+    ".map": true,
+    ".xml": true,
+    ".txt": true,
+    ".csv": true,
+    ".pdf": true,
+    ".wasm": true,
+    ".webmanifest": true,
+    ".png": true,
+    ".jpg": true,
+    ".jpeg": true,
+    ".gif": true,
+    ".webp": true,
+    ".avif": true,
+    ".svg": true,
+    ".ico": true,
+    ".bmp": true,
+    ".woff": true,
+    ".woff2": true,
+    ".ttf": true,
+    ".otf": true,
+    ".eot": true,
+    ".mp4": true,
+    ".webm": true,
+    ".mov": true,
+    ".m4v": true,
+    ".ogv": true,
+    ".mp3": true,
+    ".wav": true,
+    ".ogg": true,
+    ".flac": true,
+    ".m4a": true,
+    ".aac": true,
+    ".gz": true,
+    ".br": true,
+    ".zip": true,
+    ".bin": true,
+    ".dat": true
+  },
+  "rows": {
+    "html": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760003600130,
+      "uploadId": "uhtml",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtml/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+    },
+    "markdown": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760007200137,
+      "uploadId": "umarkdown",
+      "manifest": {"Files": {"/": {"Key": "uploads/umarkdown/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+    },
+    "diff": {
+      "kind": "diff",
+      "status": "ready",
+      "updatedAt": 1760010800144,
+      "uploadId": "udiff",
+      "manifest": {"Files": {"/": {"Key": "uploads/udiff/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "diff"}}}
+    },
+    "mermaid": {
+      "kind": "mermaid",
+      "status": "ready",
+      "updatedAt": 1760014400151,
+      "uploadId": "umermaid",
+      "manifest": {"Files": {"/": {"Key": "uploads/umermaid/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "mermaid"}}}
+    },
+    "pdf": {
+      "kind": "pdf",
+      "status": "ready",
+      "updatedAt": 1760018000158,
+      "uploadId": "updf",
+      "manifest": {"Files": {"/": {"Key": "uploads/updf/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "pdf"}}}
+    },
+    "csv": {
+      "kind": "csv",
+      "status": "ready",
+      "updatedAt": 1760021600165,
+      "uploadId": "ucsv",
+      "manifest": {"Files": {"/": {"Key": "uploads/ucsv/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "csv"}}}
+    },
+    "json": {
+      "kind": "json",
+      "status": "ready",
+      "updatedAt": 1760025200172,
+      "uploadId": "ujson",
+      "manifest": {"Files": {"/": {"Key": "uploads/ujson/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "json"}}}
+    },
+    "flamegraph": {
+      "kind": "flamegraph",
+      "status": "ready",
+      "updatedAt": 1760028800179,
+      "uploadId": "uflamegraph",
+      "manifest": {"Files": {"/": {"Key": "uploads/uflamegraph/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "flamegraph"}}}
+    },
+    "text": {
+      "kind": "text",
+      "status": "ready",
+      "updatedAt": 1760032400186,
+      "uploadId": "utext",
+      "manifest": {"Files": {"/": {"Key": "uploads/utext/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "text"}}}
+    },
+    "log": {
+      "kind": "log",
+      "status": "ready",
+      "updatedAt": 1760036000193,
+      "uploadId": "ulog",
+      "manifest": {"Files": {"/": {"Key": "uploads/ulog/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "log"}}}
+    },
+    "htmlWithoutUploadId": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760039600200,
+      "manifest": {"Files": {"/": {"Key": "uploads/ulegacy/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+    },
+    "markdownPending": {
+      "kind": "markdown",
+      "status": "pending",
+      "updatedAt": 1760043200207,
+      "uploadId": "umdpending",
+      "manifest": {"Files": {"/": {"Key": "uploads/umdpending/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+    },
+    "markdownFailed": {
+      "kind": "markdown",
+      "status": "failed",
+      "updatedAt": 1760046800214,
+      "uploadId": "umdfailed",
+      "manifest": {"Files": {"/": {"Key": "uploads/umdfailed/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+    },
+    "htmlPending": {
+      "kind": "html",
+      "status": "pending",
+      "updatedAt": 1760050400221,
+      "uploadId": "uhtmlpending",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlpending/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+    },
+    "htmlFailed": {
+      "kind": "html",
+      "status": "failed",
+      "updatedAt": 1760054000228,
+      "uploadId": "uhtmlfailed",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlfailed/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+    },
+    "markdownPendingWithoutManifest": {"kind": "markdown", "status": "pending", "updatedAt": 1760057600235, "uploadId": "umdpendnone", "manifest": null},
+    "markdownEmptyStatus": {
+      "kind": "markdown",
+      "status": "",
+      "updatedAt": 1760061200242,
+      "uploadId": "umdnostatus",
+      "manifest": {"Files": {"/": {"Key": "uploads/umdnostatus/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+    },
+    "markdownEmptyKey": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760064800249,
+      "uploadId": "umdemptykey",
+      "manifest": {"Files": {"/": {"Key": "", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+    },
+    "htmlKeyAbsent": {"kind": "html", "status": "ready", "updatedAt": 1760068400256, "uploadId": "uhtmlnokey", "manifest": {"Files": {"/": {"Size": 27}}}},
+    "markdownNullEntry": {"kind": "markdown", "status": "ready", "updatedAt": 1760072000263, "uploadId": "umdnullentry", "manifest": {"Files": {"/": null}}},
+    "markdownNullManifest": {"kind": "markdown", "status": "ready", "updatedAt": 1760075600270, "uploadId": "umdnull", "manifest": null},
+    "htmlManifestAbsent": {"kind": "html", "status": "ready", "updatedAt": 1760079200277, "uploadId": "uhtmlabsent"},
+    "htmlEmptyManifest": {"kind": "html", "status": "ready", "updatedAt": 1760082800284, "uploadId": "uhtmlempty", "manifest": {}},
+    "htmlNullFiles": {"kind": "html", "status": "ready", "updatedAt": 1760086400291, "uploadId": "uhtmlnullfiles", "manifest": {"Files": null}},
+    "htmlUndecodableString": {"kind": "html", "status": "ready", "updatedAt": 1760090000298, "uploadId": "uhtmlbad", "manifest": "oops"},
+    "htmlUndecodableNumber": {"kind": "html", "status": "ready", "updatedAt": 1760093600305, "uploadId": "uhtmlbad", "manifest": 42},
+    "htmlUndecodableBoolean": {"kind": "html", "status": "ready", "updatedAt": 1760097200312, "uploadId": "uhtmlbad", "manifest": true},
+    "htmlUndecodableArray": {"kind": "html", "status": "ready", "updatedAt": 1760100800319, "uploadId": "uhtmlbad", "manifest": [{"Key": "uploads/uhtmlbad/0"}]},
+    "htmlUndecodableFilesString": {"kind": "html", "status": "ready", "updatedAt": 1760104400326, "uploadId": "uhtmlbad", "manifest": {"Files": "x"}},
+    "htmlUndecodableFilesArray": {"kind": "html", "status": "ready", "updatedAt": 1760108000333, "uploadId": "uhtmlbad", "manifest": {"Files": []}},
+    "htmlUndecodableEntryString": {"kind": "html", "status": "ready", "updatedAt": 1760111600340, "uploadId": "uhtmlbad", "manifest": {"Files": {"/": "uploads/uhtmlbad/0"}}},
+    "htmlUndecodableSizeString": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760115200347,
+      "uploadId": "uhtmlbad",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlbad/0", "Size": "3"}}}
+    },
+    "htmlUndecodableSizeFraction": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760118800354,
+      "uploadId": "uhtmlbad",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlbad/0", "Size": 2.5}}}
+    },
+    "htmlUndecodableKindNumber": {"kind": "html", "status": "ready", "updatedAt": 1760122400361, "uploadId": "uhtmlbad", "manifest": {"Files": {"/": {"Key": "uploads/uhtmlbad/0", "Kind": 5}}}},
+    "htmlUndecodableSiblingEntryNumber": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760126000368,
+      "uploadId": "uhtmlbad",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlbad/0"}, "other.txt": 5}}
+    },
+    "markdownUndecodable": {"kind": "markdown", "status": "ready", "updatedAt": 1760129600375, "uploadId": "umdbad", "manifest": "oops"},
+    "markdownIndexOnly": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760133200382,
+      "uploadId": "umdindex",
+      "manifest": {"Files": {"index.html": {"Key": "uploads/umdindex/0", "Size": 27, "CompressedSize": 13, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
+    },
+    "unknownKind": {
+      "kind": "weird",
+      "status": "ready",
+      "updatedAt": 1760136800389,
+      "uploadId": "uweird",
+      "manifest": {"Files": {"/": {"Key": "uploads/uweird/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "weird"}}}
+    },
+    "markdownLowercaseFields": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760140400396,
+      "uploadId": "ufold",
+      "manifest": {"files": {"/": {"key": "uploads/ufold/0", "size": 27, "compressedsize": 13, "contenttype": "", "kind": "markdown"}}}
+    },
+    "markdownUnicodeFoldedFields": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760144000403,
+      "uploadId": "ukelvin",
+      "manifest": {"File\u017f": {"/": {"\u212aey": "uploads/ukelvin/0", "\u017fize": 27}}}
+    },
+    "markdownDotlessIFiles": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760147600410,
+      "uploadId": "udotless",
+      "manifest": {"F\u0131les": {"/": {"Key": "uploads/udotless/0", "Size": 27}}}
+    },
+    "markdownDuplicateFieldLastWins": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760151200417,
+      "uploadId": "udup",
+      "manifest": {"Files": {"/": {"Key": "uploads/udup/0", "key": "uploads/udup/1", "Size": 27}}}
+    },
+    "markdownNullFieldKeepsEarlier": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760154800424,
+      "uploadId": "unullfield",
+      "manifest": {"Files": {"/": {"Key": "uploads/unullfield/0", "key": null, "Size": 27}}}
+    },
+    "site": {
+      "kind": "site",
+      "status": "ready",
+      "updatedAt": 1760158400431,
+      "uploadId": "usite",
+      "manifest": {
+        "Files": {
+          "index.html": {"Key": "uploads/usite/0", "Size": 512, "CompressedSize": 256, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "about.html": {"Key": "uploads/usite/1", "Size": 300, "CompressedSize": 150, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "blog/index.html": {"Key": "uploads/usite/2", "Size": 410, "CompressedSize": 205, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "assets/app.js": {"Key": "uploads/usite/3", "Size": 9000, "CompressedSize": 4500, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
+          "assets/logo.png": {"Key": "uploads/usite/4", "Size": 2048, "CompressedSize": 1024, "ContentType": "image/png", "Kind": ""},
+          "docs/a b.txt": {"Key": "uploads/usite/5", "Size": 12, "CompressedSize": 6, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "caf\u00e9/men\u00fc.html": {"Key": "uploads/usite/6", "Size": 99, "CompressedSize": 49, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "notes.xyz": {"Key": "uploads/usite/7", "Size": 5, "CompressedSize": 2, "ContentType": "application/octet-stream", "Kind": ""},
+          "raw/untyped": {"Key": "uploads/usite/8", "Size": 6, "CompressedSize": 3, "ContentType": "", "Kind": ""},
+          "keyless.css": {"Key": "", "Size": 7, "CompressedSize": 3, "ContentType": "text/css; charset=utf-8", "Kind": ""},
+          "v1.2/index.html": {"Key": "uploads/usite/10", "Size": 8, "CompressedSize": 4, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+        }
+      }
+    },
+    "siteWithoutIndex": {
+      "kind": "site",
+      "status": "ready",
+      "updatedAt": 1760162000438,
+      "uploadId": "unoindex",
+      "manifest": {
+        "Files": {
+          "app.js": {"Key": "uploads/unoindex/0", "Size": 10, "CompressedSize": 5, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
+          "page.html": {"Key": "uploads/unoindex/1", "Size": 11, "CompressedSize": 5, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+        }
+      }
+    },
+    "sitePending": {
+      "kind": "site",
+      "status": "pending",
+      "updatedAt": 1760165600445,
+      "uploadId": "usitepending",
+      "manifest": {"Files": {"index.html": {"Key": "uploads/usitepending/0", "Size": 20, "CompressedSize": 10, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
+    },
+    "siteFailed": {
+      "kind": "site",
+      "status": "failed",
+      "updatedAt": 1760169200452,
+      "uploadId": "usitefailed",
+      "manifest": {"Files": {"index.html": {"Key": "uploads/usitefailed/0", "Size": 21, "CompressedSize": 10, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
+    },
+    "siteUndecodable": {"kind": "site", "status": "ready", "updatedAt": 1760172800459, "uploadId": "usitebad", "manifest": "oops"},
+    "siteRootKeyed": {
+      "kind": "site",
+      "status": "ready",
+      "updatedAt": 1760176400466,
+      "uploadId": "usiteroot",
+      "manifest": {
+        "Files": {
+          "/": {"Key": "uploads/usiteroot/0", "Size": 30, "CompressedSize": 15, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "index.html": {"Key": "uploads/usiteroot/1", "Size": 31, "CompressedSize": 15, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+        }
+      }
+    },
+    "kb": {
+      "kind": "knowledgebase",
+      "status": "ready",
+      "updatedAt": 1760180000473,
+      "uploadId": "ukb",
+      "manifest": {
+        "Files": {
+          "README.md": {"Key": "uploads/ukb/0", "Size": 100, "CompressedSize": 50, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "guide/intro.md": {"Key": "uploads/ukb/1", "Size": 101, "CompressedSize": 50, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "guide/index.html": {"Key": "uploads/ukb/2", "Size": 102, "CompressedSize": 51, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "notes.MARKDOWN": {"Key": "uploads/ukb/3", "Size": 103, "CompressedSize": 51, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "img/diagram.png": {"Key": "uploads/ukb/4", "Size": 104, "CompressedSize": 52, "ContentType": "image/png", "Kind": ""},
+          "files.json": {"Key": "uploads/ukb/5", "Size": 105, "CompressedSize": 52, "ContentType": "application/json; charset=utf-8", "Kind": ""},
+          "a b/\u00fcn\u00ef.md": {"Key": "uploads/ukb/6", "Size": 106, "CompressedSize": 53, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "x\ud83d\ude00.md": {"Key": "uploads/ukb/7", "Size": 107, "CompressedSize": 53, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "x\uff41.md": {"Key": "uploads/ukb/8", "Size": 108, "CompressedSize": 54, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "keyless.png": {"Key": "", "Size": 109, "CompressedSize": 54, "ContentType": "image/png", "Kind": ""},
+          "keyless.md": {"Key": "", "Size": 110, "CompressedSize": 55, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "Zeta.md": {"Key": "uploads/ukb/11", "Size": 111, "CompressedSize": 55, "ContentType": "text/plain; charset=utf-8", "Kind": ""}
+        }
+      }
+    },
+    "knowledgeBasePending": {
+      "kind": "knowledgebase",
+      "status": "pending",
+      "updatedAt": 1760183600480,
+      "uploadId": "ukbpending",
+      "manifest": {"Files": {"README.md": {"Key": "uploads/ukbpending/0", "Size": 40, "CompressedSize": 20, "ContentType": "text/plain; charset=utf-8", "Kind": ""}}}
+    },
+    "knowledgeBaseUndecodable": {"kind": "knowledgebase", "status": "ready", "updatedAt": 1760187200487, "uploadId": "ukbbad", "manifest": "oops"}
+  },
+  "vectors": [
+    {"name": "unknown slug", "row": null, "request": {"path": "/", "raw": false, "files": false}, "want": {"found": false}},
+    {"name": "unknown slug ?raw", "row": null, "request": {"path": "/", "raw": true, "files": false}, "want": {"found": false}},
+    {"name": "unknown slug ?files", "row": null, "request": {"path": "/", "raw": false, "files": true}, "want": {"found": false}},
+    {"name": "unknown slug deep path", "row": null, "request": {"path": "/assets/app.js", "raw": false, "files": false}, "want": {"found": false}},
+    {
+      "name": "html at root",
+      "row": "html",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "html ignores ?raw",
+      "row": "html",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "html ignores ?files",
+      "row": "html",
+      "request": {"path": "/", "raw": false, "files": true},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "html deeper path",
+      "row": "html",
+      "request": {"path": "/x", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml"}
+    },
+    {
+      "name": "html index.html path",
+      "row": "html",
+      "request": {"path": "/index.html", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml"}
+    },
+    {
+      "name": "html without an upload id",
+      "row": "htmlWithoutUploadId",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760039600200, "uploadId": "", "entry": {"key": "uploads/ulegacy/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "markdown bare URL serves the shell",
+      "row": "markdown",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "shell": "markdown"}
+    },
+    {
+      "name": "markdown ?raw serves the bytes",
+      "row": "markdown",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "entry": {"key": "uploads/umarkdown/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "diff bare URL serves the shell",
+      "row": "diff",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "diff", "updatedAt": 1760010800144, "uploadId": "udiff", "shell": "diff"}
+    },
+    {
+      "name": "diff ?raw serves the bytes",
+      "row": "diff",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "diff", "updatedAt": 1760010800144, "uploadId": "udiff", "entry": {"key": "uploads/udiff/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "mermaid bare URL serves the shell",
+      "row": "mermaid",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "mermaid", "updatedAt": 1760014400151, "uploadId": "umermaid", "shell": "mermaid"}
+    },
+    {
+      "name": "mermaid ?raw serves the bytes",
+      "row": "mermaid",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "mermaid", "updatedAt": 1760014400151, "uploadId": "umermaid", "entry": {"key": "uploads/umermaid/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "pdf bare URL serves the shell",
+      "row": "pdf",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "pdf", "updatedAt": 1760018000158, "uploadId": "updf", "shell": "pdf"}
+    },
+    {
+      "name": "pdf ?raw serves the bytes",
+      "row": "pdf",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "pdf", "updatedAt": 1760018000158, "uploadId": "updf", "entry": {"key": "uploads/updf/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "csv bare URL serves the shell",
+      "row": "csv",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "csv", "updatedAt": 1760021600165, "uploadId": "ucsv", "shell": "csv"}
+    },
+    {
+      "name": "csv ?raw serves the bytes",
+      "row": "csv",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "csv", "updatedAt": 1760021600165, "uploadId": "ucsv", "entry": {"key": "uploads/ucsv/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "json bare URL serves the shell",
+      "row": "json",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "json", "updatedAt": 1760025200172, "uploadId": "ujson", "shell": "json"}
+    },
+    {
+      "name": "json ?raw serves the bytes",
+      "row": "json",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "json", "updatedAt": 1760025200172, "uploadId": "ujson", "entry": {"key": "uploads/ujson/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "flamegraph bare URL serves the shell",
+      "row": "flamegraph",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "flamegraph", "updatedAt": 1760028800179, "uploadId": "uflamegraph", "shell": "flamegraph"}
+    },
+    {
+      "name": "flamegraph ?raw serves the bytes",
+      "row": "flamegraph",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "flamegraph", "updatedAt": 1760028800179, "uploadId": "uflamegraph", "entry": {"key": "uploads/uflamegraph/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "text bare URL serves the shell",
+      "row": "text",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "text", "updatedAt": 1760032400186, "uploadId": "utext", "shell": "text"}
+    },
+    {
+      "name": "text ?raw serves the bytes",
+      "row": "text",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "text", "updatedAt": 1760032400186, "uploadId": "utext", "entry": {"key": "uploads/utext/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "log bare URL serves the shell",
+      "row": "log",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "log", "updatedAt": 1760036000193, "uploadId": "ulog", "shell": "log"}
+    },
+    {
+      "name": "log ?raw serves the bytes",
+      "row": "log",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "log", "updatedAt": 1760036000193, "uploadId": "ulog", "entry": {"key": "uploads/ulog/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "markdown ignores ?files",
+      "row": "markdown",
+      "request": {"path": "/", "raw": false, "files": true},
+      "want": {"action": "shell", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "shell": "markdown"}
+    },
+    {
+      "name": "markdown ?raw with ?files",
+      "row": "markdown",
+      "request": {"path": "/", "raw": true, "files": true},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "entry": {"key": "uploads/umarkdown/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "markdown deeper path",
+      "row": "markdown",
+      "request": {"path": "/x", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown"}
+    },
+    {
+      "name": "markdown deeper path ?raw",
+      "row": "markdown",
+      "request": {"path": "/x", "raw": true, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown"}
+    },
+    {
+      "name": "markdown README.md path",
+      "row": "markdown",
+      "request": {"path": "/README.md", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown"}
+    },
+    {
+      "name": "markdown root keyed at index.html",
+      "row": "markdownIndexOnly",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "markdown", "updatedAt": 1760133200382, "uploadId": "umdindex", "shell": "markdown"}
+    },
+    {
+      "name": "markdown root keyed at index.html ?raw",
+      "row": "markdownIndexOnly",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {
+        "action": "raw",
+        "kind": "markdown",
+        "updatedAt": 1760133200382,
+        "uploadId": "umdindex",
+        "entry": {"key": "uploads/umdindex/0", "contentType": "text/html; charset=utf-8", "size": 27}
+      }
+    },
+    {
+      "name": "unknown kind takes the shell path",
+      "row": "unknownKind",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "weird", "updatedAt": 1760136800389, "uploadId": "uweird", "shell": "weird"}
+    },
+    {
+      "name": "unknown kind ignores ?raw",
+      "row": "unknownKind",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "shell", "kind": "weird", "updatedAt": 1760136800389, "uploadId": "uweird", "shell": "weird"}
+    },
+    {"name": "pending markdown", "row": "markdownPending", "request": {"path": "/", "raw": false, "files": false}, "want": {"status": "pending"}},
+    {"name": "pending markdown ?raw", "row": "markdownPending", "request": {"path": "/", "raw": true, "files": false}, "want": {"status": "pending"}},
+    {
+      "name": "pending markdown deeper path",
+      "row": "markdownPending",
+      "request": {"path": "/x", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760043200207, "uploadId": "umdpending"}
+    },
+    {"name": "failed markdown", "row": "markdownFailed", "request": {"path": "/", "raw": false, "files": false}, "want": {"status": "failed"}},
+    {"name": "failed markdown ?raw", "row": "markdownFailed", "request": {"path": "/", "raw": true, "files": false}, "want": {"status": "failed"}},
+    {"name": "pending html", "row": "htmlPending", "request": {"path": "/", "raw": false, "files": false}, "want": {"status": "pending"}},
+    {"name": "failed html", "row": "htmlFailed", "request": {"path": "/", "raw": false, "files": false}, "want": {"status": "failed"}},
+    {"name": "pending before the root entry check", "row": "markdownPendingWithoutManifest", "request": {"path": "/", "raw": false, "files": false}, "want": {"status": "pending"}},
+    {
+      "name": "empty status serves",
+      "row": "markdownEmptyStatus",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "markdown", "updatedAt": 1760061200242, "uploadId": "umdnostatus", "shell": "markdown"}
+    },
+    {
+      "name": "root entry with an empty key",
+      "row": "markdownEmptyKey",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760064800249, "uploadId": "umdemptykey"}
+    },
+    {
+      "name": "root entry with an empty key ?raw",
+      "row": "markdownEmptyKey",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760064800249, "uploadId": "umdemptykey"}
+    },
+    {
+      "name": "root entry without a key field",
+      "row": "htmlKeyAbsent",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760068400256, "uploadId": "uhtmlnokey"}
+    },
+    {
+      "name": "null root entry",
+      "row": "markdownNullEntry",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760072000263, "uploadId": "umdnullentry"}
+    },
+    {
+      "name": "null manifest",
+      "row": "markdownNullManifest",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760075600270, "uploadId": "umdnull"}
+    },
+    {
+      "name": "null manifest ?raw",
+      "row": "markdownNullManifest",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760075600270, "uploadId": "umdnull"}
+    },
+    {
+      "name": "manifest absent",
+      "row": "htmlManifestAbsent",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760079200277, "uploadId": "uhtmlabsent"}
+    },
+    {
+      "name": "empty manifest object",
+      "row": "htmlEmptyManifest",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760082800284, "uploadId": "uhtmlempty"}
+    },
+    {
+      "name": "null Files",
+      "row": "htmlNullFiles",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760086400291, "uploadId": "uhtmlnullfiles"}
+    },
+    {
+      "name": "undecodable manifest: String",
+      "row": "htmlUndecodableString",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760090000298, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: Number",
+      "row": "htmlUndecodableNumber",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760093600305, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: Boolean",
+      "row": "htmlUndecodableBoolean",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760097200312, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: Array",
+      "row": "htmlUndecodableArray",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760100800319, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: FilesString",
+      "row": "htmlUndecodableFilesString",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760104400326, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: FilesArray",
+      "row": "htmlUndecodableFilesArray",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760108000333, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: EntryString",
+      "row": "htmlUndecodableEntryString",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760111600340, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: SizeString",
+      "row": "htmlUndecodableSizeString",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760115200347, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: SizeFraction",
+      "row": "htmlUndecodableSizeFraction",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760118800354, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: KindNumber",
+      "row": "htmlUndecodableKindNumber",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760122400361, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest: SiblingEntryNumber",
+      "row": "htmlUndecodableSiblingEntryNumber",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760126000368, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "undecodable manifest ?raw",
+      "row": "markdownUndecodable",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760129600375, "uploadId": "umdbad"}
+    },
+    {
+      "name": "lowercase field names decode",
+      "row": "markdownLowercaseFields",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760140400396, "uploadId": "ufold", "entry": {"key": "uploads/ufold/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "unicode-folded field names decode",
+      "row": "markdownUnicodeFoldedFields",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760144000403, "uploadId": "ukelvin", "entry": {"key": "uploads/ukelvin/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "a dotless i does not fold to I",
+      "row": "markdownDotlessIFiles",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "notfound", "kind": "markdown", "updatedAt": 1760147600410, "uploadId": "udotless"}
+    },
+    {
+      "name": "duplicate field: the last wins",
+      "row": "markdownDuplicateFieldLastWins",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760151200417, "uploadId": "udup", "entry": {"key": "uploads/udup/1", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "null field keeps the earlier value",
+      "row": "markdownNullFieldKeepsEarlier",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760154800424, "uploadId": "unullfield", "entry": {"key": "uploads/unullfield/0", "contentType": "", "size": 27}}
+    },
+    {
+      "name": "site root",
+      "row": "site",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site root ignores ?raw",
+      "row": "site",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site root ignores ?files",
+      "row": "site",
+      "request": {"path": "/", "raw": false, "files": true},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site index.html",
+      "row": "site",
+      "request": {"path": "/index.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site exact html file",
+      "row": "site",
+      "request": {"path": "/about.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/1", "contentType": "text/html; charset=utf-8", "size": 300}
+      }
+    },
+    {
+      "name": "site directory without slash",
+      "row": "site",
+      "request": {"path": "/blog", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "size": 410}
+      }
+    },
+    {
+      "name": "site directory with slash",
+      "row": "site",
+      "request": {"path": "/blog/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "size": 410}
+      }
+    },
+    {
+      "name": "site directory index by name",
+      "row": "site",
+      "request": {"path": "/blog/index.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "size": 410}
+      }
+    },
+    {
+      "name": "site dotted directory without slash",
+      "row": "site",
+      "request": {"path": "/v1.2", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/10", "contentType": "text/html; charset=utf-8", "size": 8}}
+    },
+    {
+      "name": "site dotted directory with slash",
+      "row": "site",
+      "request": {"path": "/v1.2/", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/10", "contentType": "text/html; charset=utf-8", "size": 8}}
+    },
+    {
+      "name": "site asset",
+      "row": "site",
+      "request": {"path": "/assets/app.js", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/3", "contentType": "text/javascript; charset=utf-8", "size": 9000}
+      }
+    },
+    {
+      "name": "site asset ignores ?raw",
+      "row": "site",
+      "request": {"path": "/assets/app.js", "raw": true, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/3", "contentType": "text/javascript; charset=utf-8", "size": 9000}
+      }
+    },
+    {
+      "name": "site image",
+      "row": "site",
+      "request": {"path": "/assets/logo.png", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/4", "contentType": "image/png", "size": 2048}}
+    },
+    {
+      "name": "site name with a space",
+      "row": "site",
+      "request": {"path": "/docs/a b.txt", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/5", "contentType": "text/plain; charset=utf-8", "size": 12}
+      }
+    },
+    {
+      "name": "site path decoded once",
+      "row": "site",
+      "request": {"path": "/docs/a%20b.txt", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site non-ASCII name",
+      "row": "site",
+      "request": {"path": "/caf\u00e9/men\u00fc.html", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/6", "contentType": "text/html; charset=utf-8", "size": 99}}
+    },
+    {
+      "name": "site paths are case-sensitive",
+      "row": "site",
+      "request": {"path": "/CAF\u00c9/men\u00fc.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site non-ASCII route",
+      "row": "site",
+      "request": {"path": "/caf\u00e9/nope", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site unknown extension file",
+      "row": "site",
+      "request": {"path": "/notes.xyz", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/7", "contentType": "application/octet-stream", "size": 5}}
+    },
+    {
+      "name": "site entry without a content type",
+      "row": "site",
+      "request": {"path": "/raw/untyped", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/8", "contentType": "", "size": 6}}
+    },
+    {
+      "name": "site entry without a key",
+      "row": "site",
+      "request": {"path": "/keyless.css", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site SPA route",
+      "row": "site",
+      "request": {"path": "/users/123/edit", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA .html route",
+      "row": "site",
+      "request": {"path": "/missing.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA .htm route",
+      "row": "site",
+      "request": {"path": "/missing.htm", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA .md route",
+      "row": "site",
+      "request": {"path": "/missing.md", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA unknown extension route",
+      "row": "site",
+      "request": {"path": "/missing.xyz", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA route through a dotted directory",
+      "row": "site",
+      "request": {"path": "/v2.0", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA directory without index",
+      "row": "site",
+      "request": {"path": "/assets", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA directory without index, slash",
+      "row": "site",
+      "request": {"path": "/assets/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA prototype name constructor",
+      "row": "site",
+      "request": {"path": "/constructor", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA prototype name __proto__",
+      "row": "site",
+      "request": {"path": "/__proto__", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site SPA prototype name hasOwnProperty",
+      "row": "site",
+      "request": {"path": "/hasOwnProperty", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site missing asset",
+      "row": "site",
+      "request": {"path": "/assets/missing.js", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site missing asset, uppercase extension",
+      "row": "site",
+      "request": {"path": "/assets/Missing.PNG", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site missing asset, last extension counts",
+      "row": "site",
+      "request": {"path": "/archive.tar.gz", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site missing dotfile asset",
+      "row": "site",
+      "request": {"path": "/.js", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site asset path with a trailing slash",
+      "row": "site",
+      "request": {"path": "/assets/app.js/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site asset extension with dotted capital I",
+      "row": "site",
+      "request": {"path": "/logo.\u0130CO", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site without index: root",
+      "row": "siteWithoutIndex",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760162000438, "uploadId": "unoindex"}
+    },
+    {
+      "name": "site without index: route",
+      "row": "siteWithoutIndex",
+      "request": {"path": "/route", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760162000438, "uploadId": "unoindex"}
+    },
+    {
+      "name": "site without index: file",
+      "row": "siteWithoutIndex",
+      "request": {"path": "/page.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760162000438,
+        "uploadId": "unoindex",
+        "entry": {"key": "uploads/unoindex/1", "contentType": "text/html; charset=utf-8", "size": 11}
+      }
+    },
+    {
+      "name": "pending site serves",
+      "row": "sitePending",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760165600445,
+        "uploadId": "usitepending",
+        "entry": {"key": "uploads/usitepending/0", "contentType": "text/html; charset=utf-8", "size": 20}
+      }
+    },
+    {
+      "name": "failed site serves",
+      "row": "siteFailed",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760169200452,
+        "uploadId": "usitefailed",
+        "entry": {"key": "uploads/usitefailed/0", "contentType": "text/html; charset=utf-8", "size": 21}
+      }
+    },
+    {
+      "name": "undecodable site manifest: root",
+      "row": "siteUndecodable",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760172800459, "uploadId": "usitebad"}
+    },
+    {
+      "name": "undecodable site manifest: route",
+      "row": "siteUndecodable",
+      "request": {"path": "/route", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760172800459, "uploadId": "usitebad"}
+    },
+    {
+      "name": "site root key wins at root",
+      "row": "siteRootKeyed",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760176400466,
+        "uploadId": "usiteroot",
+        "entry": {"key": "uploads/usiteroot/0", "contentType": "text/html; charset=utf-8", "size": 30}
+      }
+    },
+    {
+      "name": "site SPA fallback uses index.html",
+      "row": "siteRootKeyed",
+      "request": {"path": "/route", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760176400466,
+        "uploadId": "usiteroot",
+        "entry": {"key": "uploads/usiteroot/1", "contentType": "text/html; charset=utf-8", "size": 31}
+      }
+    },
+    {
+      "name": "kb root",
+      "row": "kb",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb root ?raw",
+      "row": "kb",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb markdown",
+      "row": "kb",
+      "request": {"path": "/README.md", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb markdown ?raw",
+      "row": "kb",
+      "request": {"path": "/README.md", "raw": true, "files": false},
+      "want": {
+        "action": "kbraw",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/0", "contentType": "text/plain; charset=utf-8", "size": 100}
+      }
+    },
+    {
+      "name": "kb markdown ?raw is case-sensitive",
+      "row": "kb",
+      "request": {"path": "/readme.md", "raw": true, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb missing markdown ?raw",
+      "row": "kb",
+      "request": {"path": "/missing.md", "raw": true, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb nested markdown ?raw",
+      "row": "kb",
+      "request": {"path": "/guide/intro.md", "raw": true, "files": false},
+      "want": {
+        "action": "kbraw",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/1", "contentType": "text/plain; charset=utf-8", "size": 101}
+      }
+    },
+    {
+      "name": "kb uppercase .MARKDOWN",
+      "row": "kb",
+      "request": {"path": "/notes.MARKDOWN", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb uppercase .MARKDOWN ?raw",
+      "row": "kb",
+      "request": {"path": "/notes.MARKDOWN", "raw": true, "files": false},
+      "want": {
+        "action": "kbraw",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/3", "contentType": "text/plain; charset=utf-8", "size": 103}
+      }
+    },
+    {
+      "name": "kb markdown with space and non-ASCII ?raw",
+      "row": "kb",
+      "request": {"path": "/a b/\u00fcn\u00ef.md", "raw": true, "files": false},
+      "want": {
+        "action": "kbraw",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/6", "contentType": "text/plain; charset=utf-8", "size": 106}
+      }
+    },
+    {
+      "name": "kb astral name ?raw",
+      "row": "kb",
+      "request": {"path": "/x\ud83d\ude00.md", "raw": true, "files": false},
+      "want": {
+        "action": "kbraw",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/7", "contentType": "text/plain; charset=utf-8", "size": 107}
+      }
+    },
+    {
+      "name": "kb directory",
+      "row": "kb",
+      "request": {"path": "/guide", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb directory with slash",
+      "row": "kb",
+      "request": {"path": "/guide/", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb directory with slash ?raw",
+      "row": "kb",
+      "request": {"path": "/guide/", "raw": true, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb html file serves raw",
+      "row": "kb",
+      "request": {"path": "/guide/index.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/2", "contentType": "text/html; charset=utf-8", "size": 102}
+      }
+    },
+    {
+      "name": "kb html file ignores ?raw",
+      "row": "kb",
+      "request": {"path": "/guide/index.html", "raw": true, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/2", "contentType": "text/html; charset=utf-8", "size": 102}
+      }
+    },
+    {
+      "name": "kb image",
+      "row": "kb",
+      "request": {"path": "/img/diagram.png", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "entry": {"key": "uploads/ukb/4", "contentType": "image/png", "size": 104}}
+    },
+    {
+      "name": "kb image ignores ?raw",
+      "row": "kb",
+      "request": {"path": "/img/diagram.png", "raw": true, "files": false},
+      "want": {"action": "file", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "entry": {"key": "uploads/ukb/4", "contentType": "image/png", "size": 104}}
+    },
+    {
+      "name": "kb files.json is a file",
+      "row": "kb",
+      "request": {"path": "/files.json", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "entry": {"key": "uploads/ukb/5", "contentType": "application/json; charset=utf-8", "size": 105}
+      }
+    },
+    {
+      "name": "kb missing asset",
+      "row": "kb",
+      "request": {"path": "/img/missing.png", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb"}
+    },
+    {
+      "name": "kb asset path with a trailing slash",
+      "row": "kb",
+      "request": {"path": "/img/diagram.png/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb"}
+    },
+    {
+      "name": "kb markdown path with a trailing slash",
+      "row": "kb",
+      "request": {"path": "/README.md/", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb missing .html route",
+      "row": "kb",
+      "request": {"path": "/missing.html", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb index.html route",
+      "row": "kb",
+      "request": {"path": "/index.html", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb route",
+      "row": "kb",
+      "request": {"path": "/some/route", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb prototype name",
+      "row": "kb",
+      "request": {"path": "/constructor", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb file without a key",
+      "row": "kb",
+      "request": {"path": "/keyless.png", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb"}
+    },
+    {
+      "name": "kb markdown without a key",
+      "row": "kb",
+      "request": {"path": "/keyless.md", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
+    },
+    {
+      "name": "kb ?files at root",
+      "row": "kb",
+      "request": {"path": "/", "raw": false, "files": true},
+      "want": {
+        "action": "files",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "files": [
+          "README.md",
+          "Zeta.md",
+          "a b/\u00fcn\u00ef.md",
+          "files.json",
+          "guide/index.html",
+          "guide/intro.md",
+          "img/diagram.png",
+          "keyless.md",
+          "keyless.png",
+          "notes.MARKDOWN",
+          "x\uff41.md",
+          "x\ud83d\ude00.md"
+        ]
+      }
+    },
+    {
+      "name": "kb ?files at a document",
+      "row": "kb",
+      "request": {"path": "/guide/intro.md", "raw": false, "files": true},
+      "want": {
+        "action": "files",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "files": [
+          "README.md",
+          "Zeta.md",
+          "a b/\u00fcn\u00ef.md",
+          "files.json",
+          "guide/index.html",
+          "guide/intro.md",
+          "img/diagram.png",
+          "keyless.md",
+          "keyless.png",
+          "notes.MARKDOWN",
+          "x\uff41.md",
+          "x\ud83d\ude00.md"
+        ]
+      }
+    },
+    {
+      "name": "kb ?files at a missing asset",
+      "row": "kb",
+      "request": {"path": "/img/missing.png", "raw": false, "files": true},
+      "want": {
+        "action": "files",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "files": [
+          "README.md",
+          "Zeta.md",
+          "a b/\u00fcn\u00ef.md",
+          "files.json",
+          "guide/index.html",
+          "guide/intro.md",
+          "img/diagram.png",
+          "keyless.md",
+          "keyless.png",
+          "notes.MARKDOWN",
+          "x\uff41.md",
+          "x\ud83d\ude00.md"
+        ]
+      }
+    },
+    {
+      "name": "kb ?files wins over ?raw",
+      "row": "kb",
+      "request": {"path": "/README.md", "raw": true, "files": true},
+      "want": {
+        "action": "files",
+        "kind": "knowledgebase",
+        "updatedAt": 1760180000473,
+        "uploadId": "ukb",
+        "files": [
+          "README.md",
+          "Zeta.md",
+          "a b/\u00fcn\u00ef.md",
+          "files.json",
+          "guide/index.html",
+          "guide/intro.md",
+          "img/diagram.png",
+          "keyless.md",
+          "keyless.png",
+          "notes.MARKDOWN",
+          "x\uff41.md",
+          "x\ud83d\ude00.md"
+        ]
+      }
+    },
+    {
+      "name": "pending kb serves the shell",
+      "row": "knowledgeBasePending",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760183600480, "uploadId": "ukbpending", "shell": "knowledgebase"}
+    },
+    {
+      "name": "pending kb serves documents",
+      "row": "knowledgeBasePending",
+      "request": {"path": "/README.md", "raw": true, "files": false},
+      "want": {
+        "action": "kbraw",
+        "kind": "knowledgebase",
+        "updatedAt": 1760183600480,
+        "uploadId": "ukbpending",
+        "entry": {"key": "uploads/ukbpending/0", "contentType": "text/plain; charset=utf-8", "size": 40}
+      }
+    },
+    {
+      "name": "undecodable kb manifest: root",
+      "row": "knowledgeBaseUndecodable",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760187200487, "uploadId": "ukbbad", "shell": "knowledgebase"}
+    },
+    {
+      "name": "undecodable kb manifest: ?files",
+      "row": "knowledgeBaseUndecodable",
+      "request": {"path": "/", "raw": false, "files": true},
+      "want": {"action": "files", "kind": "knowledgebase", "updatedAt": 1760187200487, "uploadId": "ukbbad", "files": []}
+    },
+    {
+      "name": "undecodable kb manifest: asset",
+      "row": "knowledgeBaseUndecodable",
+      "request": {"path": "/x.png", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "knowledgebase", "updatedAt": 1760187200487, "uploadId": "ukbbad"}
+    },
+    {
+      "name": "undecodable kb manifest: markdown ?raw",
+      "row": "knowledgeBaseUndecodable",
+      "request": {"path": "/a.md", "raw": true, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760187200487, "uploadId": "ukbbad", "shell": "knowledgebase"}
+    },
+    {
+      "name": "site miss .html",
+      "row": "site",
+      "request": {"path": "/missing/file.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site miss .htm",
+      "row": "site",
+      "request": {"path": "/missing/file.htm", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site miss .md",
+      "row": "site",
+      "request": {"path": "/missing/file.md", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site miss .markdown",
+      "row": "site",
+      "request": {"path": "/missing/file.markdown", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760158400431,
+        "uploadId": "usite",
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+      }
+    },
+    {
+      "name": "site miss .css",
+      "row": "site",
+      "request": {"path": "/missing/file.css", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .js",
+      "row": "site",
+      "request": {"path": "/missing/file.js", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .mjs",
+      "row": "site",
+      "request": {"path": "/missing/file.mjs", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .cjs",
+      "row": "site",
+      "request": {"path": "/missing/file.cjs", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .json",
+      "row": "site",
+      "request": {"path": "/missing/file.json", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .map",
+      "row": "site",
+      "request": {"path": "/missing/file.map", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .xml",
+      "row": "site",
+      "request": {"path": "/missing/file.xml", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .txt",
+      "row": "site",
+      "request": {"path": "/missing/file.txt", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .csv",
+      "row": "site",
+      "request": {"path": "/missing/file.csv", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .pdf",
+      "row": "site",
+      "request": {"path": "/missing/file.pdf", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .wasm",
+      "row": "site",
+      "request": {"path": "/missing/file.wasm", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .webmanifest",
+      "row": "site",
+      "request": {"path": "/missing/file.webmanifest", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .png",
+      "row": "site",
+      "request": {"path": "/missing/file.png", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .jpg",
+      "row": "site",
+      "request": {"path": "/missing/file.jpg", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .jpeg",
+      "row": "site",
+      "request": {"path": "/missing/file.jpeg", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .gif",
+      "row": "site",
+      "request": {"path": "/missing/file.gif", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .webp",
+      "row": "site",
+      "request": {"path": "/missing/file.webp", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .avif",
+      "row": "site",
+      "request": {"path": "/missing/file.avif", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .svg",
+      "row": "site",
+      "request": {"path": "/missing/file.svg", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .ico",
+      "row": "site",
+      "request": {"path": "/missing/file.ico", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .bmp",
+      "row": "site",
+      "request": {"path": "/missing/file.bmp", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .woff",
+      "row": "site",
+      "request": {"path": "/missing/file.woff", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .woff2",
+      "row": "site",
+      "request": {"path": "/missing/file.woff2", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .ttf",
+      "row": "site",
+      "request": {"path": "/missing/file.ttf", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .otf",
+      "row": "site",
+      "request": {"path": "/missing/file.otf", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .eot",
+      "row": "site",
+      "request": {"path": "/missing/file.eot", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .mp4",
+      "row": "site",
+      "request": {"path": "/missing/file.mp4", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .webm",
+      "row": "site",
+      "request": {"path": "/missing/file.webm", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .mov",
+      "row": "site",
+      "request": {"path": "/missing/file.mov", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .m4v",
+      "row": "site",
+      "request": {"path": "/missing/file.m4v", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .ogv",
+      "row": "site",
+      "request": {"path": "/missing/file.ogv", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .mp3",
+      "row": "site",
+      "request": {"path": "/missing/file.mp3", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .wav",
+      "row": "site",
+      "request": {"path": "/missing/file.wav", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .ogg",
+      "row": "site",
+      "request": {"path": "/missing/file.ogg", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .flac",
+      "row": "site",
+      "request": {"path": "/missing/file.flac", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .m4a",
+      "row": "site",
+      "request": {"path": "/missing/file.m4a", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .aac",
+      "row": "site",
+      "request": {"path": "/missing/file.aac", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .gz",
+      "row": "site",
+      "request": {"path": "/missing/file.gz", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .br",
+      "row": "site",
+      "request": {"path": "/missing/file.br", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .zip",
+      "row": "site",
+      "request": {"path": "/missing/file.zip", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .bin",
+      "row": "site",
+      "request": {"path": "/missing/file.bin", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "site miss .dat",
+      "row": "site",
+      "request": {"path": "/missing/file.dat", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    }
+  ]
+}
