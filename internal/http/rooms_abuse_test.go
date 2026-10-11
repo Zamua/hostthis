@@ -1,8 +1,11 @@
 package http
 
 import (
+	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -60,6 +63,64 @@ func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
 	}
 	if w := create(t, srv, slug, proxyAddr, "198.51.100.7"); w.Code != http.StatusCreated {
 		t.Fatalf("client Y create: code %d, want 201 (its own bucket)", w.Code)
+	}
+}
+
+type clientIPVectors struct {
+	XFF []struct {
+		Name    string   `json:"name"`
+		Lines   []string `json:"lines"`
+		Address string   `json:"address"`
+	} `json:"xff"`
+	Subnets [][2]string `json:"subnets"`
+}
+
+// The vectors in testdata/client-ip-vectors.json, which the Worker's
+// rooms-policy.test.js runs too.
+func loadClientIPVectors(t *testing.T) clientIPVectors {
+	t.Helper()
+	raw, err := os.ReadFile("../../testdata/client-ip-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v clientIPVectors
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	if len(v.XFF) == 0 || len(v.Subnets) == 0 {
+		t.Fatal("no vectors")
+	}
+	return v
+}
+
+// With X-Forwarded-For trusted, the creation limit counts the right-most value
+// across every header line; without one, the TCP peer.
+func TestXFFVectors(t *testing.T) {
+	t.Setenv("HOSTTHIS_HTTP_TRUST_XFF", "true")
+	const peer = "192.0.2.1:40000"
+	for _, v := range loadClientIPVectors(t).XFF {
+		t.Run(v.Name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "http://appz2345.hostthis.test/api/rooms", nil)
+			r.RemoteAddr = peer
+			for _, line := range v.Lines {
+				r.Header.Add("X-Forwarded-For", line)
+			}
+			want := "192.0.2.0/24"
+			if v.Address != "" {
+				want = ipSubnet(net.ParseIP(v.Address))
+			}
+			if got := clientSubnet(r); got != want {
+				t.Fatalf("lines %q: subnet %q, want %q (address %q)", v.Lines, got, want, v.Address)
+			}
+		})
+	}
+}
+
+func TestSubnetVectors(t *testing.T) {
+	for _, v := range loadClientIPVectors(t).Subnets {
+		if got := ipSubnet(net.ParseIP(v[0])); got != v[1] {
+			t.Errorf("%q: subnet %q, want %q", v[0], got, v[1])
+		}
 	}
 }
 

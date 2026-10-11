@@ -1403,7 +1403,10 @@ informs them):
   behind a reverse proxy that appends the real client IP), the gate reads
   the **right-most** value of the `X-Forwarded-For` list - the hop the
   trusted proxy itself recorded, which the client cannot forge past the
-  proxy - not the left-most value, which is fully attacker-controlled. An
+  proxy - not the left-most value, which is fully attacker-controlled. The
+  list is every `X-Forwarded-For` header line, in order, read as one, since a
+  client may send lines of its own ahead of the proxy's. An empty right-most
+  value names no address, and the TCP peer counts instead. An
   operator who terminates TLS at a proxy MUST set this flag (otherwise
   every request's `RemoteAddr` is the proxy's own IP and the per-IP gate
   collapses to a single global bucket); an operator with hostthis directly
@@ -1413,8 +1416,9 @@ informs them):
   on the Worker names where the address comes from: `cf-connecting-ip` reads
   the `CF-Connecting-IP` header Cloudflare's edge sets (a client cannot forge
   it through the edge); `xff-rightmost` reads the right-most
-  `X-Forwarded-For` value, for a Worker behind a trusted proxy that appends
-  it. Unset, or any other value, puts every client in one bucket. A
+  `X-Forwarded-For` value across every line, as `hostthisd` does, for a
+  Worker behind a trusted proxy that appends it. Unset, or any other value,
+  or no address found, puts every client in one bucket. A
   forwarded request (see "Public and internal hosts") takes the address from
   `X-Hostthis-Client-IP`, which only a token holder can send. An address
   that does not parse is the `unknown` bucket. The subnet strings are the
