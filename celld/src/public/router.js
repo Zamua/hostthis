@@ -44,10 +44,28 @@ function appOf(host, apex, urlMode, path) {
   return pathSlug && { slug: pathSlug, path: `/${slash < 0 ? "" : after.slice(slash + 1)}` };
 }
 
+const CLIENT_IP_SOURCES = ["cf-connecting-ip", "xff-rightmost"];
+let clientIPSourceWarned = false;
+
+// A direct request's client address comes from HOSTTHIS_CLIENT_IP_SOURCE;
+// without it the room creation limit puts every client in one bucket. Logged
+// once per isolate, never refused.
+function warnClientIPSource(env) {
+  if (clientIPSourceWarned || CLIENT_IP_SOURCES.includes(env.HOSTTHIS_CLIENT_IP_SOURCE)) {
+    return;
+  }
+  clientIPSourceWarned = true;
+  console.warn(`warn: HOSTTHIS_CLIENT_IP_SOURCE is ${JSON.stringify(env.HOSTTHIS_CLIENT_IP_SOURCE ?? null)}, `
+    + `not one of ${CLIENT_IP_SOURCES.join(", ")}: every direct client shares one room creation bucket`);
+}
+
 // host is the normalized public host: the request's own, or the forwarded one.
 // surface.reads serves an app's read path (src/public/surface.js), and
 // surface.ctx is the request's execution context.
 export async function publicRouter(request, env, host, forwarded = false, surface = {}) {
+  if (!forwarded) {
+    warnClientIPSource(env);
+  }
   const res = await route(request, env, host, forwarded, surface);
   // As Go's server does, a HEAD gets the GET's status and headers, no body.
   if (request.method !== "HEAD" || res.body === null || res.status < 200 || res.webSocket) {
