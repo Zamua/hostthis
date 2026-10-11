@@ -128,6 +128,29 @@ test("room creation needs a live app and a POST", async () => {
   }
 });
 
+test("an id the cell already holds is never handed out: creation retries a fresh one", async () => {
+  const w = world();
+  w.app();
+  const ids = Array.from({ length: 7 }, (_, n) => `${n}1111111-1111-4111-8111-111111111111`);
+  const taken = (id) => w.storageOf("ROOMS", `${APP}|${id}`).data.set("state", {
+    meta: { appSlug: APP, id, createdAt: 1, updatedAt: 1 }, kv: {}, wire: {}, bytes: 0, seq: 0, budgetVersion: 0,
+  });
+  const mint = crypto.randomUUID;
+  let next = 0;
+  crypto.randomUUID = () => ids[next++];
+  try {
+    taken(ids[0]);
+    let res = await w.fetch(url("/api/rooms"), { method: "POST" });
+    assert.equal(res.status, 201);
+    assert.deepEqual(await res.json(), { id: ids[1] });
+    for (const id of ids.slice(2)) taken(id);
+    await goError(await w.fetch(url("/api/rooms"), { method: "POST" }), 500, "internal error\n\n");
+    assert.equal(next, 7, "five tries, then a fault");
+  } finally {
+    crypto.randomUUID = mint;
+  }
+});
+
 function seedLedger(w, entries) {
   w.storageOf("PASTES", APP).data.set("roomLedger", entries);
 }
