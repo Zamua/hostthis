@@ -147,7 +147,7 @@ The Go tests and `make run` run the celld Worker locally under Miniflare, from
 from the modules under `celld/src` and which is not committed. `make test`,
 `make run` and `make e2e` build it and install the runtime on first use; a bare
 `go test ./...` needs both done first, and the bundle rebuilt after every change
-under `celld/src` (the runtime refuses a stale one):
+under `celld/src` or `web/shells` (the runtime refuses a stale one):
 
 ```
 make bundle

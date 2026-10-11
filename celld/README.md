@@ -10,7 +10,8 @@ and HTTP remain owned by `hostthisd`.
 The source is split into modules under `src/`, entry `src/index.js`. celld
 loads a single module, so every runtime runs one bundle, `dist/index.js`, which
 `wrangler.jsonc` names as `main` with `no_bundle`. Build it before running or
-deploying the Worker, and again after every change under `src/`:
+deploying the Worker, and again after every change under `src/` or
+`../web/shells`:
 
 ```sh
 npm ci && npm run build    # from this directory; `make bundle` from the root
@@ -19,12 +20,21 @@ npm ci && npm run build    # from this directory; `make bundle` from the root
 esbuild is pinned in `package.json`. `dist/` is a build output and is not
 committed. `npm test` builds it first.
 
+The build (`build/build.mjs`) also reads `../web/shells`, the render shells
+hostthisd embeds. The bundle imports their templates and `shells.json` as the
+module `hostthis:shells` (tests that import `src/` resolve it through
+`test/hooks.mjs`). Beside the bundle it writes `dist/assets/`, every renderer
+asset at `_hostthis/<name>` with a `_headers` rule giving its Content-Type and
+immutable caching, and `dist/static-r2.json`, the assets over the 25 MiB static
+asset limit with the `PAYLOADS` key each is uploaded to,
+`static/<shell version>/<name>`.
+
 ## Local development
 
 `localrt/` runs the bundle under Miniflare (workerd) with the bindings
 `wrangler.jsonc` declares. The Go tests (`internal/celldtest`), `make run` and
 the browser suite all use it; `npm ci --prefix localrt` installs it. It refuses
-to start when the bundle is missing or older than `src/`.
+to start when the bundle is missing or older than its sources.
 
 To run the Worker on celld itself, install celld v0.6.1 and use its local
 runtime:
