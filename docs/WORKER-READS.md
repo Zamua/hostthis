@@ -607,11 +607,14 @@ approves the numbers and section 8.
 WebSocket, forwarded mode, the caches (off by default). Tests 5.1 to 5.5 green
 in CI. Release.
 
-**Phase 2, routeless deploy and parity.** Deploy to staging and production with
-`HOSTTHIS_APEX_DOMAIN` set and no route: no public request changes. Run the
-parity suite in forwarded mode against both (production read-only, plus writes
-on a test paste), and over a sample of existing pastes and sites. Exit: zero
-unexplained differences.
+**Phase 2, routeless deploy and parity.** Deploy the Worker to staging and
+production with `HOSTTHIS_APEX_DOMAIN` set and no route: no public request
+changes. hostthisd stays on the previous release, which is the reference: it
+sends no `Content-Length`, so the parity run over EVERY live slug (not a
+sample) proves each stored entry's `size` equals its decoded bytes before any
+server declares it. Run the suite in forwarded mode against both environments
+(production read-only, plus writes on a test paste). Only then release the new
+hostthisd. Exit: zero unexplained differences.
 
 **Phase 3, edge canary.** Staging gets the option chosen in 2.10. Production
 gets exact-host routes (`<slug>.<apex>/*`) for a few test slugs owned by an
