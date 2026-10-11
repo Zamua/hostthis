@@ -29,6 +29,8 @@ type externalConfig struct {
 	token     string
 	slugs     []string
 	writeSlug string
+	// pin, when set, is the address every hostthisd request dials.
+	pin string
 }
 
 func readExternalConfig(t *testing.T) (externalConfig, bool) {
@@ -91,7 +93,7 @@ func externalWorld(t *testing.T, cfg externalConfig) *world {
 	w := &world{
 		apex: strings.ToLower(cfg.hostthisd.Hostname()),
 		hostthisd: &server{
-			name: "hostthisd", via: viaHostthisd, port: port(cfg.hostthisd), tls: cfg.hostthisd.Scheme == "https",
+			name: "hostthisd", via: viaHostthisd, addr: cfg.pin, port: port(cfg.hostthisd), tls: cfg.hostthisd.Scheme == "https",
 		},
 		workers: []*server{{
 			name: "worker (forwarded)", via: viaForwarded, token: cfg.token,
