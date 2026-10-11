@@ -1323,8 +1323,8 @@ The remaining rules, shared by every route above:
   the raw bytes. Only the single-key GET returns the stored bytes as they are.
 - Every response under `/api/rooms` carries `Cache-Control: no-store`, errors
   included, since values change under fixed URLs and a CDN caches an
-  undirected 404 by its own default. The Worker also sets it on every
-  `/api/push/key` response; `hostthisd` sets it there only on a success.
+  undirected 404 by its own default. So does every `/api/push/key`
+  response, its 404 and 405 included.
 
 ### Storage: a room-namespaced KV over the metadata backend
 

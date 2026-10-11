@@ -42,3 +42,26 @@ func TestRoomsHTTP_EveryResponseIsNoStore(t *testing.T) {
 		}
 	}
 }
+
+// Every /api/push/key response, error or success, is no-store.
+func TestPushHTTP_EveryKeyResponseIsNoStore(t *testing.T) {
+	const slug = "appz2345"
+	srv := buildRoomServer(t)
+	check := func(name, method string, code int) {
+		t.Helper()
+		w := req(t, srv, method, slug, "/api/push/key", nil)
+		if w.Code != code {
+			t.Fatalf("%s: code %d, want %d", name, w.Code, code)
+		}
+		if got := w.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s (%d): Cache-Control %q, want no-store", name, w.Code, got)
+		}
+	}
+	check("the key", http.MethodGet, http.StatusOK)
+	check("wrong method", http.MethodPost, http.StatusMethodNotAllowed)
+	srv.Sites = nil
+	check("unknown app", http.MethodGet, http.StatusNotFound)
+	srv.Sites = liveAppSiteReader{}
+	srv.RoomPush = nil
+	check("push not served", http.MethodGet, http.StatusNotFound)
+}
