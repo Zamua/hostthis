@@ -131,11 +131,12 @@ func main() {
 
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
 
-	// A decorator, so a mutation invalidates the edge cache for its slug while
-	// the verb service stays cache-unaware (SPEC "Active invalidation:
+	// Decorators, so a write invalidates the edge cache for its slug while the
+	// verb and deploy services stay cache-unaware (SPEC "Active invalidation:
 	// CachePurger"). Noop unless a CDN is configured.
 	cachePurger := buildCachePurger(logger, *apexDomain, *urlMode)
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
+	siteDeployer := service.NewSiteCacheInvalidating(deploySvc, cachePurger)
 
 	// Own registry rather than the default one, so no collector arrives via a
 	// dependency's init().
@@ -148,7 +149,7 @@ func main() {
 		HostKeyPath: filepath.Join(*dataDir, "ssh_host_ed25519_key"),
 		ApexDomain:  *apexDomain,
 		Upload:      uploadSvc,
-		Deploy:      deploySvc,
+		Deploy:      siteDeployer,
 		Sites:       siteRepo,
 		Manage:      pasteMgr,
 		Pastes:      pasteRepo,
