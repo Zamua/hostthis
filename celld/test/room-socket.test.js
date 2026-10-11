@@ -5,7 +5,7 @@ import { Room } from "../src/index.js";
 import {
   PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
 } from "../src/rooms/policy.js";
-import { FakeStorage, state } from "./harness.js";
+import { FakeStorage, roomDoc, state } from "./harness.js";
 
 globalThis.WebSocketRequestResponsePair ??= class {
   constructor(request, response) {
@@ -138,6 +138,64 @@ test("a reserved server frame still closes its sender with 1008", async () => {
   await room([sender, peer]).cell.webSocketMessage(sender, '{"type":"put","seq":1}');
   assert.deepEqual(sender.closed, [1008, "reserved control frame"]);
   assert.equal(peer.sent.length, 0);
+});
+
+const b64 = (text) => Buffer.from(text).toString("base64");
+
+// A Room holding doc, with one connected peer.
+function roomWith(doc, env = ON) {
+  const peer = new FakeSocket();
+  const cell = new Room({
+    ...state(new FakeStorage(new Map([["state", doc]]))),
+    getWebSockets: () => [peer],
+    getWebSocketAutoResponseTimestamp: () => null,
+    setWebSocketAutoResponse: () => {},
+  }, env);
+  return { cell, peer };
+}
+
+test("a put frame carries the value's stored text byte for byte, in both modes", async () => {
+  for (const env of [ON, {}]) {
+    for (const [key, text] of [
+      ["k", "1e400"], ["k", "-0"], ["k", "12345678901234567890"], ["k", '{ "b" : 1, "1" : [ 2 ] }'],
+      ["k", '"\\u003cx\\u003e"'], ['q"\u2028', " 1 \n"],
+    ]) {
+      // The prior value has the new one's size, so the put commits in place.
+      const doc = roomDoc({ kv: { [key]: b64("x".repeat(Buffer.byteLength(text))) } });
+      doc.bytes = Buffer.byteLength(text);
+      const { cell, peer } = roomWith(doc, env);
+      const res = await cell.put({
+        key, value: b64(text), wire: text, roomCap: 256 * 1024, keyCap: 256, appCap: 0, now: 2,
+      });
+      assert.equal(res.status, 200, text);
+      assert.deepEqual(peer.sent, [`{"type":"put","seq":1,"key":${JSON.stringify(key)},"value":${text}}`], text);
+    }
+  }
+});
+
+test("a snapshot carries each stored text, keys in Go's order, as the whole-room GET does", () => {
+  const doc = roomDoc({ kv: {} });
+  doc.seq = 9;
+  for (const [key, text] of [["\u{1f600}", "1e400"], ["\ufffd", "[ -0 ]"], ["b", '"\\u003c"'], ["1", "{}"]]) {
+    doc.kv[key] = b64(text);
+    doc.wire[key] = text;
+  }
+  const { cell } = roomWith(doc);
+  assert.equal(cell.snapshotFrame(doc),
+    '{"type":"snapshot","seq":9,"state":{"1":{},"b":"\\u003c","\ufffd":[ -0 ],"\u{1f600}":1e400}}');
+  assert.equal(cell.snapshotFrame(undefined), '{"type":"snapshot","seq":0,"state":{}}');
+});
+
+test("the scan answers each stored text, and encodes the bytes where none is stored or it is not JSON", async () => {
+  const doc = roomDoc({ kv: { a: b64("1e400"), b: b64("<x>"), c: b64("[1]") } });
+  doc.wire = { a: "1e400", c: "not json" };
+  const { cell } = roomWith(doc);
+  const res = await cell.fetch(new Request("https://cell/room/scan?room=x"));
+  const body = await res.json();
+  assert.deepEqual(body.wire, { a: "1e400", b: '"<x>"', c: "[1]" });
+  assert.deepEqual(body.values, doc.kv);
+  // A frame never carries text that is not JSON either.
+  assert.equal(cell.snapshotFrame(doc), '{"type":"snapshot","seq":0,"state":{"a":1e400,"b":"<x>","c":[1]}}');
 });
 
 // Off mode is the relay hostthisd's proxy fronts: every frame reaches the

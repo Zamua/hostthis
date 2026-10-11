@@ -5,6 +5,7 @@ import { resolveRead } from "./read.js";
 import {
   PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
 } from "./rooms/policy.js";
+import { base64Bytes, compareCodePoints, roomWireValue } from "./rooms/wire.js";
 
 // The owner identity scopes intents, quota reservations, and the paste index.
 // Paste rows use slug-scoped cells, so cross-cell creates recover through the
@@ -1363,7 +1364,7 @@ const ROOM_OPS = {
   count: read((self) => Response.json({ sockets: self.state.getWebSockets().length })),
   meta: read((self, _body, _url, doc) => Response.json(doc.meta), { room: true }),
   get: read((self, _body, url, doc) => self.getValue(doc, url.searchParams.get("key")), { room: true }),
-  scan: read((self, _body, _url, doc) => Response.json({ values: doc.kv, seq: doc.seq }), { room: true }),
+  scan: read((self, _body, _url, doc) => Response.json({ values: doc.kv, seq: doc.seq, wire: wireTexts(doc) }), { room: true }),
   create: mutation((self, body) => self.createBlocked(body)),
   put: mutation((self, body, _url, doc) => self.putBlocked(doc, body), { room: true }),
   del: mutation((self, body, _url, doc) => self.delBlocked(doc, body), { room: true }),
@@ -1426,7 +1427,10 @@ export class Room {
   // a closing socket throws, and one dead client must not cost the rest their
   // frame.
   broadcast(frame) {
-    const data = JSON.stringify(frame);
+    this.broadcastText(JSON.stringify(frame));
+  }
+
+  broadcastText(data) {
     for (const ws of this.state.getWebSockets()) {
       try {
         ws.send(data);
@@ -1462,17 +1466,16 @@ export class Room {
     // The snapshot goes out in the SAME event that attaches the socket, so no
     // mutation can land between the state read and the attach - the atomicity
     // the multi-pod design had to buy with the seq splice contract.
-    {
-      const doc = await this.loadRoom();
-      const state = {};
-      if (doc) {
-        for (const k of Object.keys(doc.kv)) {
-          setOwn(state, k, Object.hasOwn(doc.wire, k) ? JSON.parse(doc.wire[k]) : null);
-        }
-      }
-      server.send(JSON.stringify({ type: "snapshot", seq: doc ? doc.seq : 0, state }));
-    }
+    server.send(this.snapshotFrame(await this.loadRoom()));
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // The state is the whole-room GET's object byte for byte: each value's
+  // stored text spliced in, keys in Go's order.
+  snapshotFrame(doc) {
+    const members = doc ? Object.keys(doc.kv).sort(compareCodePoints)
+      .map((key) => `${JSON.stringify(key)}:${wireOf(doc, key)}`) : [];
+    return `{"type":"snapshot","seq":${doc ? doc.seq : 0},"state":{${members.join(",")}}}`;
   }
 
   // A join at the cap first closes the sockets whose last ping answer is
@@ -1605,8 +1608,11 @@ export class Room {
 
   applyPut(doc, body, next) {
     setOwn(doc.kv, body.key, body.value);
-    if (body.wire !== undefined && body.wire !== null) {
+    // A put without its text must not leave the prior value's behind.
+    if (typeof body.wire === "string") {
       setOwn(doc.wire, body.key, body.wire);
+    } else {
+      delete doc.wire[body.key];
     }
     doc.bytes = next;
     doc.seq++;
@@ -1757,10 +1763,7 @@ export class Room {
   }
 
   broadcastPut(doc, key) {
-    this.broadcast({
-      type: "put", seq: doc.seq, key,
-      value: Object.hasOwn(doc.wire, key) ? JSON.parse(doc.wire[key]) : null,
-    });
+    this.broadcastText(`{"type":"put","seq":${doc.seq},"key":${JSON.stringify(key)},"value":${wireOf(doc, key)}}`);
   }
 
   // info.now is a test hook; the runtime passes retry metadata only.
@@ -2114,6 +2117,31 @@ function answerClose(ws, code, reason) {
   } catch {
     // closed already
   }
+}
+
+// The JSON text every reader gets for a value: the text stored with it, so
+// the frames and both servers' whole-room GET carry the same bytes. A value
+// stored without text, or with text that is not JSON, is encoded from its
+// bytes rather than breaking the room for every reader.
+function wireOf(doc, key) {
+  const text = Object.hasOwn(doc.wire, key) ? doc.wire[key] : undefined;
+  if (typeof text === "string") {
+    try {
+      JSON.parse(text);
+      return text;
+    } catch {
+      // not JSON: encoded below
+    }
+  }
+  return roomWireValue(base64Bytes(doc.kv[key]));
+}
+
+function wireTexts(doc) {
+  const texts = {};
+  for (const key of Object.keys(doc.kv)) {
+    setOwn(texts, key, wireOf(doc, key));
+  }
+  return texts;
 }
 
 // Decoded length of a base64 payload, without decoding it. Room values are

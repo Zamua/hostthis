@@ -1275,8 +1275,9 @@ Behavior, endpoint by endpoint:
   request on join. Each value is embedded as raw JSON when the stored bytes
   parse as JSON - so a value the app PUT as a JSON object comes back as a
   NESTED object, not a JSON-string of escaped text - and as a JSON string of
-  the verbatim bytes otherwise. (The WebSocket `snapshot` and `put` frames
-  encode values identically; the single-key GET below instead returns the raw
+  the verbatim bytes otherwise. Keys are listed in the order of their UTF-8
+  bytes. (The WebSocket `snapshot` and `put` frames carry each value byte for
+  byte as this GET does; the single-key GET below instead returns the raw
   bytes.) A well-formed UUID that names no room returns **404**, on both
   servers also when the room goes away while the request is reading it.
 - **GET /api/rooms/<uuid>/<key>** returns the stored value verbatim with a
@@ -1319,11 +1320,21 @@ The remaining rules, shared by every route above:
   inside a string. Every surface that embeds a value, the whole-room GET and
   the WebSocket frames, emits only UTF-8: each byte of an invalid UTF-8
   sequence becomes one U+FFFD, as Go decodes it, whether the value is embedded
-  as JSON or becomes a JSON string. The frames carry the encoding computed
-  when the value was written; the whole-room GET re-encodes every value from
-  its stored bytes by the same rule, on both servers. Both therefore carry the
-  same value, and no client decoder (whose replacement rules differ) ever sees
-  the raw bytes. Only the single-key GET returns the stored bytes as they are.
+  as JSON or becomes a JSON string, so no client decoder (whose replacement
+  rules differ) ever sees the raw bytes. Only the single-key GET returns the
+  stored bytes as they are.
+- The text a value is encoded to is computed when it is written and stored
+  with it. The whole-room GET on both servers, the `snapshot` frame and the
+  `put` frame all carry that stored text byte for byte, in every mode, off
+  mode included: no reader parses and re-serializes it, so `1e400`, `-0`,
+  `12345678901234567890`, `1.50`, whitespace and the order of an object's
+  names reach every client exactly as the value holds them. Text stored by
+  either server keeps its own spelling (`hostthisd` writes `<` in a string as
+  `<`). A value stored without text, or with text that is not JSON, is
+  encoded from its bytes by the rule above wherever it is read. A key's own
+  spelling may still differ between the servers' GETs (`hostthisd` escapes
+  `<`, `>`, `&`, U+2028 and U+2029 in it); the `snapshot` frame's `state` is
+  the Worker's whole-room GET object, byte for byte.
 - Every response under `/api/rooms` carries `Cache-Control: no-store`, errors
   included, since values change under fixed URLs and a CDN caches an
   undirected 404 by its own default. So does every `/api/push/key`
@@ -1362,8 +1373,9 @@ names no live site or paste.
 The Worker's public router reaches the same cell ops through its bindings:
 `exists`, `roomcounts` and `pushkey` on the app's Paste cell, and on the
 Room cell (`<slug>|<uuid>`) `create`, `meta`, `scan`, `get`, `put`, `del`,
-the push ops and the join. It computes the value's wire encoding itself and
-sends it with each PUT, as `hostthisd` does.
+the push ops and the join; `scan` answers each value's stored text beside its
+bytes. It computes the value's wire encoding itself and sends it with each
+PUT, as `hostthisd` does, and the Room cell stores it with the value.
 
 ### Quota and abuse
 
@@ -1565,6 +1577,13 @@ The first server frame is:
 ```json
 { "type": "snapshot", "seq": 17, "state": { "key": "value" } }
 ```
+
+In every mode, `state` is the room's whole-room GET object (keys in the order
+of their UTF-8 bytes) and a `put` frame's `value` is the value's stored text,
+each spliced in byte for byte rather than parsed and re-serialized (see "The
+HTTP API"). The frames are written as `{"type":"snapshot","seq":<n>,"state":<object>}`
+and `{"type":"put","seq":<n>,"key":<key>,"value":<text>}`, the key a JSON
+string.
 
 The Room attaches the hibernatable socket and reads the local Room document in
 one input turn, so no local mutation can splice between attachment and snapshot.
@@ -3344,9 +3363,10 @@ version reads as version zero, and its first growth charges the room's full
 absolute target through the normal decide path, so the coordinator's aggregate
 converges toward exactness as rooms are touched; until then the app ceiling is
 enforced against the touched subset, which can only under-count, never block
-retained data. Missing wire entries on pre-relay rooms serve as `null` in
-snapshots, exactly as they did before the relay existed. There is no offline
-Room reconciliation pass.
+retained data. A value with no stored text (a room written before the relay
+kept one) is encoded from its bytes wherever it is read, so its snapshot,
+frames and whole-room GET still agree. There is no offline Room
+reconciliation pass.
 
 The conformance cases cover round-trip, reserved
 object-property keys, cross-room and cross-app isolation, nonexistent-room

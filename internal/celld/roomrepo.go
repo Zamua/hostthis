@@ -3,6 +3,7 @@ package celld
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -99,6 +100,8 @@ func (r *RoomRepo) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, e
 	var wire struct {
 		Values map[string][]byte `json:"values"`
 		Seq    uint64            `json:"seq"`
+		// The text the cell holds per value, which its frames carry.
+		Wire map[string]string `json:"wire"`
 	}
 	status, err := r.call(context.Background(), http.MethodGet, "/room/scan", "room",
 		roomKey(app, id), nil, &wire)
@@ -108,12 +111,20 @@ func (r *RoomRepo) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, e
 	if status == http.StatusNotFound {
 		return domain.RoomKV{}, domain.ErrNotFound
 	}
-	out := domain.RoomKV{Values: make(map[string][]byte, len(wire.Values)), Seq: wire.Seq}
+	out := domain.RoomKV{
+		Values: make(map[string][]byte, len(wire.Values)), Seq: wire.Seq,
+		Wire: make(map[string]json.RawMessage, len(wire.Wire)),
+	}
 	for k, v := range wire.Values {
 		if v == nil {
 			v = []byte{}
 		}
 		out.Values[k] = v
+		// Text that is not JSON is left out, to be encoded from the bytes,
+		// rather than spliced into every reader's document.
+		if text, ok := wire.Wire[k]; ok && json.Valid([]byte(text)) {
+			out.Wire[k] = json.RawMessage(text)
+		}
 	}
 	return out, nil
 }

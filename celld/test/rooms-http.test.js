@@ -221,16 +221,29 @@ test("a scan re-encodes every value from its bytes", async () => {
   const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   assert.ok(text.endsWith("}\n"));
   assert.ok(text.includes('"big":1e400'), "a JSON value is embedded as stored");
+  assert.ok(text.includes('"obj":{ "a" : [1, true] }'), "whitespace and all");
   const scanned = JSON.parse(text);
   assert.deepEqual(scanned, {
     obj: { a: [1, true] }, text: "hello", big: Infinity, bad: "a\ufffd\ufffd", badjson: "a\ufffd\ufffd\ufffd",
     empty: "",
   });
-  // The frames carry the encoding computed at write time: the same values.
+  // The text stored at write time, which the frames carry too.
   const { wire } = w.doc(APP, id);
-  for (const key of ["obj", "text", "bad", "badjson", "empty"]) {
-    assert.deepEqual(JSON.parse(wire[key]), scanned[key], key);
+  const members = Object.keys(wire).sort().map((key) => `${JSON.stringify(key)}:${wire[key]}`);
+  assert.equal(text, `{${members.join(",")}}\n`);
+});
+
+test("a scan serves each value's stored text, keys in Go's order", async () => {
+  const w = world();
+  w.app();
+  const id = await w.room();
+  for (const key of ["%F0%9F%98%80", "%EF%BF%BD", "b", "1"]) {
+    assert.equal((await put(w, id, key, key === "b" ? "<" : "1")).status, 204);
   }
+  // Text hostthisd stored keeps its spelling.
+  w.doc(APP, id).wire.b = '"\\u003c"';
+  const res = await w.fetch(url(`/api/rooms/${id}`));
+  assert.equal(await res.text(), '{"1":1,"b":"\\u003c","\ufffd":1,"\u{1f600}":1}\n');
 });
 
 test("an empty room scans to {} and a missing one to 404", async () => {

@@ -7,6 +7,8 @@ import { createRequire } from "node:module";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { bytesBase64, roomWireValue } from "../src/rooms/wire.js";
+
 const celld = fileURLToPath(new URL("..", import.meta.url));
 const APEX = "example.test";
 const APP = "abcdefgh";
@@ -115,10 +117,25 @@ async function accepted(res) {
     while (!client.closed && Date.now() < deadline) await delay(20);
     return client.closed;
   };
-  const snapshot = JSON.parse(await client.next());
-  assert.equal(snapshot.type, "snapshot");
+  client.snapshot = await client.next();
+  assert.equal(JSON.parse(client.snapshot).type, "snapshot");
   return client;
 }
+
+// The shared room value vectors, but those nested 10000 deep, plus two keys
+// whose UTF-8 order differs from their UTF-16 order.
+const VALUES = [
+  ...JSON.parse(readFileSync(new URL("../../testdata/room-wire-vectors.json", import.meta.url), "utf8")).vectors
+    .filter((v) => !v.nest)
+    .map((v) => [v.name, v.hex !== undefined ? new Uint8Array(Buffer.from(v.hex, "hex")) : new TextEncoder().encode(v.in)]),
+  ["\u{1f600}", new TextEncoder().encode("1")],
+  ["�", new TextEncoder().encode("2")],
+];
+
+// The keys as Go sorts a map's: by their UTF-8 bytes.
+const goOrder = (entries) => [...entries].sort(([a], [b]) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+
+const room = (wire) => `{${goOrder(Object.entries(wire)).map(([key, text]) => `${JSON.stringify(key)}:${text}`).join(",")}}`;
 
 test("a join answers 101 from the cell, no-store, snapshot first", { skip }, async () => {
   const id = await newRoom();
@@ -245,4 +262,62 @@ test("off mode relays the ping frame and frames over 32 KiB, and admits a 65th s
     more.push(client);
   }
   for (const client of [a, b, ...more]) client.ws.close(1000);
+});
+
+test("the snapshot and put frames carry each value byte for byte as the whole-room GET serves it", { skip }, async () => {
+  const id = await newRoom();
+  const put = (key, bytes) => mf.dispatchFetch(`http://${APP}.${APEX}/api/rooms/${id}/${encodeURIComponent(key)}`,
+    { method: "PUT", body: bytes });
+  for (const [key, bytes] of VALUES) {
+    assert.equal((await put(key, bytes)).status, 204, key);
+  }
+  const body = await (await mf.dispatchFetch(`http://${APP}.${APEX}/api/rooms/${id}`)).text();
+  const wire = Object.fromEntries(VALUES.map(([key, bytes]) => [key, roomWireValue(bytes)]));
+  assert.equal(body, `${room(wire)}\n`);
+  const client = await connect(id);
+  assert.equal(client.snapshot, `{"type":"snapshot","seq":${VALUES.length},"state":${body.slice(0, -1)}}`);
+  let seq = VALUES.length;
+  for (const [key, bytes] of VALUES) {
+    assert.equal((await put(key, bytes)).status, 204, key);
+    seq++;
+    assert.equal(await client.next(), `{"type":"put","seq":${seq},"key":${JSON.stringify(key)},"value":${wire[key]}}`, key);
+  }
+  client.ws.close(1000);
+});
+
+test("off mode: the frames carry each value's stored text byte for byte, as the scan answers it", { skip }, async () => {
+  const id = crypto.randomUUID();
+  const op = (name, init = {}) => mfOff.dispatchFetch(
+    `http://celld.internal/room/${name}?room=${encodeURIComponent(`${APP}|${id}`)}`,
+    { ...init, headers: { Authorization: `Bearer ${TOKEN}` } },
+  );
+  const created = await op("create", {
+    method: "POST",
+    body: JSON.stringify({ appSlug: APP, id, createdAt: 1, updatedAt: 1, subnet: "unknown", at: Date.now(), appCap: 0 }),
+  });
+  assert.equal(created.status, 200, await created.text());
+  // hostthisd spells a string as Go's encoder does, escaping <, > and &:
+  // whatever text a writer stored is the text every reader gets.
+  const wire = Object.fromEntries(VALUES.map(([key, bytes]) => [key, roomWireValue(bytes).replace(/[<>&]/g,
+    (c) => `\\u00${c.charCodeAt(0).toString(16)}`)]));
+  const put = (key, bytes) => op("put", {
+    method: "POST",
+    body: JSON.stringify({
+      key, value: bytesBase64(bytes), wire: wire[key], roomCap: 256 * 1024, keyCap: 256, appCap: 0, now: Date.now(),
+    }),
+  });
+  for (const [key, bytes] of VALUES) {
+    assert.equal((await put(key, bytes)).status, 200, key);
+  }
+  const scan = await (await op("scan")).json();
+  assert.deepEqual(scan.wire, wire);
+  const client = await connectOff(id);
+  assert.equal(client.snapshot, `{"type":"snapshot","seq":${VALUES.length},"state":${room(wire)}}`);
+  let seq = VALUES.length;
+  for (const [key, bytes] of VALUES) {
+    assert.equal((await put(key, bytes)).status, 200, key);
+    seq++;
+    assert.equal(await client.next(), `{"type":"put","seq":${seq},"key":${JSON.stringify(key)},"value":${wire[key]}}`, key);
+  }
+  client.ws.close(1000);
 });
