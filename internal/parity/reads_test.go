@@ -105,6 +105,10 @@ func testReads(t *testing.T, w *world) {
 			}
 		}
 	})
+	t.Run("legacy sizes", func(t *testing.T) {
+		t.Parallel()
+		testLegacy(t, w)
+	})
 	t.Run("assets", func(t *testing.T) {
 		t.Parallel()
 		for _, name := range assetNames(t) {

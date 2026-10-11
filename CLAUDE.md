@@ -190,11 +190,13 @@ hostthisd, and the Worker with an apex set. `internal/parity` holds them to one
 answer. It builds hostthisd, starts it beside a Worker whose public surface is
 on (`celldtest.StartPublic`), uploads a corpus over SSH (every kind, forced
 pending and failed rows, versions, the site fixtures, a knowledge base, damaged
-data), and sends every request to both, the Worker directly and in forwarded
+data, and rows forced in the shape written before entries recorded a decoded
+size), and sends every request to both, the Worker directly and in forwarded
 mode. It diffs the status, the header set `docs/SPEC.md` "The public surface"
 holds equal, and the body. A difference fails the run unless an entry in
 `allowances_test.go` explains it by a SPEC section, and an entry no request
-needs fails it too.
+needs fails it too. The legacy rows are also held to their files' own bytes,
+since two servers that trusted the same wrong size would agree.
 
 ```
 make parity     # local; part of make test
