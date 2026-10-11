@@ -17,6 +17,11 @@ export const INPUT_BATCH = 64 * 1024;
 
 const POOL_MAX = 4;
 
+// An instance's heap never shrinks, so one grown past this (an 8 MiB window
+// takes about 19 MiB; hostthisd's 1 MiB windows about 5) is dropped rather
+// than kept idle in the pool.
+const POOL_MAX_MEMORY = 16 * 1024 * 1024;
+
 export class DecodeError extends Error {}
 
 const imports = {
@@ -78,17 +83,26 @@ class Instance {
 }
 
 const pool = [];
+let busy = 0;
 
 function acquire() {
   const instance = pool.pop() ?? new Instance();
   instance.reset();
+  busy++;
   return instance;
 }
 
-function release(instance) {
-  if (pool.length < POOL_MAX) {
+// keep is false for an instance in an unknown state.
+function release(instance, keep) {
+  busy--;
+  if (keep && pool.length < POOL_MAX && instance.x.memory.buffer.byteLength <= POOL_MAX_MEMORY) {
     pool.push(instance);
   }
+}
+
+// Instances idle in the pool and in use by a decode.
+export function decoderStats() {
+  return { idle: pool.length, busy };
 }
 
 // Input chunks waiting for the decoder, consumed front to back without copying
@@ -157,8 +171,8 @@ export function zstdDecoder() {
   let frameEnd = false;
 
   const drop = (keep) => {
-    if (instance && keep) {
-      release(instance);
+    if (instance) {
+      release(instance, keep);
     }
     instance = null;
   };

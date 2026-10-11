@@ -3633,6 +3633,9 @@ zstd decoder (see "On-disk format"), never held whole: libzstd's decompressor
 compiled to WASM, vendored with its build in `celld/vendor/zstd`. It decodes
 only as the client reads, at most 128 KiB per step, refuses a frame whose
 window exceeds 8 MiB before allocating it, and verifies the frame checksum.
+Each isolate reuses up to four idle decoder instances; WASM memory never
+shrinks, so an instance whose memory grew past 16 MiB (a frame with a window
+of several MiB) is dropped when its decode ends instead of kept idle.
 The first chunk is decoded before the response starts, so a missing object, a
 missing magic or a damaged frame header is a 500. Damage found later (the
 checksum sits at the end of the frame) errors the response's body stream and
