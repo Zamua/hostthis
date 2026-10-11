@@ -3637,9 +3637,7 @@ stricter or the runtime decides:
   GET.
 - `If-None-Match` compares weakly (RFC 9110): an edge that compresses a
   response turns its ETag into `W/"..."`, which must still match.
-- A 500 carries only its text: no validators or cache headers, which
-  `hostthisd` leaves on a 500 raised after it set them. A stored kind with no
-  shell is a 500 even to a conditional request.
+- A stored kind with no shell is a 500 even to a conditional request.
 - Damage found mid-body errors the body stream rather than ending it as
   complete, and is logged; an object holding the magic and no zstd frame is
   damaged.
@@ -3744,10 +3742,14 @@ after the PUT that creates it.
 Every 5xx returned by the paste/site read path (a metadata read failure,
 a blob read failure, an unsupported stored kind) logs one warn-level line
 carrying the slug and the underlying error before the generic
-"internal error" body is written. The response body stays generic (no
-internal detail leaks to clients), but the operator can always attribute
-a read 500 from the logs - a read canary failure with no matching log
-line means the request never reached this process. The slug is the only
+"internal error" body is written. The response carries that text and
+`Cache-Control: no-store` and nothing else from the content response it
+replaced: no `ETag`, `Last-Modified`, cacheable `Cache-Control` or sandbox
+headers, whether the failure came before or after they were chosen, so no
+cache stores the error or revalidates it against the content. The body stays
+generic (no internal detail leaks to clients), but the operator can always
+attribute a read 500 from the logs - a read canary failure with no matching
+log line means the request never reached this process. The slug is the only
 request-derived value logged (slugs are public identifiers; no client
 IPs, no headers, no payload).
 

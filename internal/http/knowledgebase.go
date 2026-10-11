@@ -72,7 +72,7 @@ func (s *Server) streamDocument(w http.ResponseWriter, r *http.Request, slug dom
 	rc, _, err := s.Blobs.Read(r.Context(), entry)
 	if err != nil {
 		s.logf("warn: knowledge base read 500: slug=%s document blob read: %v", slug, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		serveReadError(w, "internal error")
 		return
 	}
 	defer rc.Close() //nolint:errcheck

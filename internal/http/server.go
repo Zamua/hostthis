@@ -196,7 +196,7 @@ func (s *Server) serveSlug(w http.ResponseWriter, r *http.Request, slug domain.S
 			return
 		}
 		s.logf("warn: paste read 500: slug=%s metadata get: %v", slug, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		serveReadError(w, "internal error")
 		return
 	}
 	// The SHAPE is declared by the paste's kind, never inferred from how
@@ -268,7 +268,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		rc, _, err := s.Blobs.Read(r.Context(), root)
 		if err != nil {
 			s.logf("warn: paste read 500: slug=%s %s blob read: %v", slug, what, err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			serveReadError(w, "internal error")
 			return
 		}
 		defer func() { _ = rc.Close() }()
@@ -286,7 +286,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	// that fetches them same-origin under its CSP.
 	if shell == nil {
 		s.logf("warn: paste read 500: slug=%s unsupported stored kind %q", slug, p.Kind)
-		http.Error(w, "unsupported kind", http.StatusInternalServerError)
+		serveReadError(w, "unsupported kind")
 		return
 	}
 	if rawWanted {
@@ -445,7 +445,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	rc, _, err := s.Blobs.Read(r.Context(), entry)
 	if err != nil {
 		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		serveReadError(w, "internal error")
 		return
 	}
 	defer rc.Close() //nolint:errcheck
@@ -471,6 +471,25 @@ const contentCacheControl = "public, no-cache"
 func setSandboxHeaders(h http.Header) {
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
+}
+
+// contentHeaders are the headers a content response sets before it can still
+// fail.
+var contentHeaders = []string{
+	"Cache-Control", "Content-Length", "Content-Security-Policy", "ETag",
+	"Last-Modified", "Permissions-Policy", "Referrer-Policy", "X-Frame-Options",
+}
+
+// serveReadError answers a read-path 5xx with its text alone. Validators or a
+// cacheable posture left on a 500 would let a cache store the error, or
+// revalidate it against the content it replaced.
+func serveReadError(w http.ResponseWriter, text string) {
+	h := w.Header()
+	for _, k := range contentHeaders {
+		h.Del(k)
+	}
+	h.Set("Cache-Control", "no-store")
+	http.Error(w, text, http.StatusInternalServerError)
 }
 
 // notModified sets the response validators (ETag, Last-Modified) and answers

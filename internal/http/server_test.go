@@ -328,3 +328,54 @@ func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 }
 
 func sprintf(format string, a ...any) string { return fmt.Sprintf(format, a...) }
+
+// Every read-path 5xx is the same bare response: its text and no-store, never
+// the validators or cache posture of the content response it replaced.
+func TestRead5xxCarriesNoContentHeaders(t *testing.T) {
+	now := time.Now().UTC()
+	doc := func(kind domain.ContentKind) stubPasteReader {
+		return stubPasteReader{p: domain.Paste{
+			Slug: "abc23456", Kind: kind, Status: domain.PasteStatusReady, UpdatedAt: now,
+			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0", Size: 4}),
+		}}
+	}
+	kb := domain.NewManifest()
+	kb.Add("README.md", domain.ManifestEntry{Key: "uploads/kb/0", Size: 4})
+	site := domain.NewManifest()
+	site.Add("index.html", domain.ManifestEntry{Key: "uploads/site/0", Size: 4})
+	broken := failingBlobReader{err: context.DeadlineExceeded}
+	cases := []struct {
+		name, target string
+		srv          *Server
+	}{
+		{"metadata", "/p/abc23456", &Server{Pastes: failingPasteReader{err: context.DeadlineExceeded}, Blobs: broken}},
+		{"html blob", "/p/abc23456", &Server{Pastes: doc(domain.KindHTML), Blobs: broken}},
+		{"raw blob", "/p/abc23456?raw=1", &Server{Pastes: doc(domain.KindMarkdown), Blobs: broken}},
+		{"unsupported kind", "/p/abc23456", &Server{Pastes: doc(domain.ContentKind("nope")), Blobs: broken}},
+		{"site file blob", "/p/abc23456/", &Server{Sites: stubSiteReader{s: domain.Site{
+			Slug: "abc23456", Kind: domain.KindSite, Manifest: site, UpdatedAt: now,
+		}}, Blobs: broken}},
+		{"knowledge base document blob", "/p/abc23456/README.md?raw=1", &Server{Pastes: stubPasteReader{p: domain.Paste{
+			Slug: "abc23456", Kind: domain.KindKnowledgeBase, Status: domain.PasteStatusReady, UpdatedAt: now, Manifest: kb,
+		}}, Blobs: broken}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c.srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", c.target, nil))
+			if w.Code != 500 {
+				t.Fatalf("status = %d, want 500", w.Code)
+			}
+			if got := w.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control = %q, want no-store", got)
+			}
+			for name := range w.Header() {
+				switch name {
+				case "Cache-Control", "Content-Type", "X-Content-Type-Options":
+				default:
+					t.Errorf("500 carries %s: %q", name, w.Header().Get(name))
+				}
+			}
+		})
+	}
+}
