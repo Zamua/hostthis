@@ -72,6 +72,10 @@ before(async () => {
   const text = readFileSync(join(dir, "text.hz"));
   await internal("/blob/uploads/live/truncated", { method: "PUT", body: text.subarray(0, text.length - 2) });
   files["truncated.txt"] = { Key: "uploads/live/truncated", Size: manifest.text.size, ContentType: "text/plain" };
+  const flipped = Buffer.from(text);
+  flipped[flipped.length - 1] ^= 0x01;
+  await internal("/blob/uploads/live/flipped", { method: "PUT", body: flipped });
+  files["flipped.txt"] = { Key: "uploads/live/flipped", Size: manifest.text.size, ContentType: "text/plain" };
   // Whole bytes, one short of the size the manifest gives them.
   files["oversized.txt"] = { Key: "uploads/live/text", Size: manifest.text.size + 1, ContentType: "text/plain" };
   await internal("/blob/uploads/live/unframed", { method: "PUT", body: Buffer.from("not at rest") });
@@ -139,8 +143,11 @@ test("every corpus blob decodes in workerd to its bytes, with its size as Conten
 test("damage before the first byte is a 500, and after it the body ends short of its Content-Length", { skip }, async () => {
   const unframed = await mf.dispatchFetch(`https://${SLUG}.${APEX}/unframed.txt`);
   assert.equal(unframed.status, 500);
+  assert.equal(unframed.headers.get("Cache-Control"), "no-store");
   assert.equal(await unframed.text(), "internal error\n");
-  for (const [name, length] of [["truncated", manifest.text.size], ["oversized", manifest.text.size + 1]]) {
+  // A flipped checksum byte fails only after the decoder's last output.
+  const ends = [["truncated", manifest.text.size], ["flipped", manifest.text.size], ["oversized", manifest.text.size + 1]];
+  for (const [name, length] of ends) {
     const wire = await wireGet(`/${name}.txt`);
     assert.equal(wire.status, 200, name);
     assert.equal(wire.headers["content-length"], String(length), name);
