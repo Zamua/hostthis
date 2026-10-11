@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -64,14 +65,17 @@ func TestRoomWireVectors(t *testing.T) {
 				t.Fatalf("RoomValueIsJSON = %v, want %v", got, v.JSON)
 			}
 			wire := domain.RoomWireValue(in)
+			// Every surface emits exactly this text, so no surface can hand a
+			// decoder bytes it would replace differently.
+			if !utf8.Valid(wire) {
+				t.Fatalf("wire %q is not valid UTF-8", wire)
+			}
 			if v.JSON {
-				// The cell receives the wire as a JSON string, which reads
-				// each byte of an invalid sequence as one U+FFFD.
-				want := string([]rune(string(in)))
+				want := string(in)
 				if v.Wire != nil {
 					want = *v.Wire
 				}
-				if got := string([]rune(string(wire))); got != want {
+				if got := string(wire); got != want {
 					t.Fatalf("wire = %q, want %q", got, want)
 				}
 				return
