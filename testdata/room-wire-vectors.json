@@ -1,5 +1,5 @@
 {
-  "about": "Room value wire encoding, run by internal/domain (RoomWireValue, RoomValueIsJSON) and celld/test/room-wire.test.js. A vector's bytes are `in` as UTF-8, `hex`, or `nest` (open repeated depth times, then inner, then close repeated depth times). `json` is RoomValueIsJSON. A JSON value passes through: `wire` is its text with each byte of an invalid UTF-8 sequence read as one U+FFFD, as the wire string reaches the cell. Anything else becomes a JSON string whose decoded `value` is given.",
+  "about": "Room value wire encoding, run by internal/domain (RoomWireValue, RoomValueIsJSON) and celld/test/room-wire.test.js. A vector's bytes are `in` as UTF-8, `hex`, or `nest` (open repeated depth times, then inner, then close repeated depth times). `json` is RoomValueIsJSON. A JSON value passes through: `wire` is exactly the text every surface emits, its bytes with each byte of an invalid UTF-8 sequence replaced by one U+FFFD (`wire` absent: the input itself). Anything else becomes a JSON string whose decoded `value` is given.",
   "vectors": [
     { "name": "object", "in": "{\"a\":1,\"b\":[true,null]}", "json": true, "wire": "{\"a\":1,\"b\":[true,null]}" },
     { "name": "object whitespace kept", "in": "{ \"a\" : 1 }", "json": true, "wire": "{ \"a\" : 1 }" },
@@ -18,6 +18,9 @@
     { "name": "every escape", "in": "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\"", "json": true, "wire": "\"\\\"\\\\\\/\\b\\f\\n\\r\\t\\u00e9\"" },
     { "name": "invalid byte inside a string", "hex": "22ff22", "json": true, "wire": "\"\ufffd\"" },
     { "name": "truncated sequence inside a string", "hex": "22e28222", "json": true, "wire": "\"\ufffd\ufffd\"" },
+    { "name": "invalid bytes between letters inside a string", "hex": "2261e282ff6222", "json": true, "wire": "\"a\ufffd\ufffd\ufffdb\"" },
+    { "name": "invalid byte inside a member name", "hex": "7b22ff223a317d", "json": true, "wire": "{\"\ufffd\":1}" },
+    { "name": "encoded surrogate inside a string", "hex": "22eda08022", "json": true, "wire": "\"\ufffd\ufffd\ufffd\"" },
     { "name": "arrays nested 10000 deep", "nest": { "open": "[", "inner": "", "close": "]", "depth": 10000 }, "json": true },
     { "name": "objects nested 10000 deep", "nest": { "open": "{\"a\":", "inner": "1", "close": "}", "depth": 10000 }, "json": true },
     { "name": "arrays nested 10001 deep", "nest": { "open": "[", "inner": "", "close": "]", "depth": 10001 }, "json": false },

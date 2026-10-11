@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Zamua/hostthis/internal/celldtest"
 
@@ -262,5 +263,47 @@ func TestLiveRoom_DeleteFrameArrives(t *testing.T) {
 	}
 	if f := liveRead(t, ctx, c); f.Type != "delete" || f.Key != "gone" || f.Seq != 2 {
 		t.Fatalf("frame 2 = %+v; want delete \"gone\" at seq 2", f)
+	}
+}
+
+// A JSON value holding bytes that are not UTF-8 reads back as the same valid
+// UTF-8 from the whole-room GET, the snapshot and the put frame, so no client
+// decoder is left to replace the bytes its own way.
+func TestLiveRoom_ScanAndFramesCarryOneWireValue(t *testing.T) {
+	ts, slug := liveCelldServer(t)
+	id := liveCreateRoom(t, ts, slug)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const value = "\"a\xe2\x82\xffb\""
+	const want = "a���b"
+	livePut(t, ts, slug, id, "before", value)
+	c := liveDialRoom(t, ctx, ts, slug, id)
+	defer c.Close(websocket.StatusNormalClosure, "") //nolint:errcheck
+	snap := liveRead(t, ctx, c)
+	livePut(t, ts, slug, id, "after", value)
+	put := liveRead(t, ctx, c)
+
+	resp, err := nethttp.Get(ts.URL + "/p/" + slug + "/api/rooms/" + id)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !utf8.Valid(body) {
+		t.Fatalf("scan body %q is not valid UTF-8", body)
+	}
+	var scan map[string]json.RawMessage
+	if err := json.Unmarshal(body, &scan); err != nil {
+		t.Fatalf("scan %q: %v", body, err)
+	}
+	for name, raw := range map[string]json.RawMessage{
+		"scan before": scan["before"], "scan after": scan["after"],
+		"snapshot": snap.State["before"], "put frame": put.Value,
+	} {
+		var got string
+		if err := json.Unmarshal(raw, &got); err != nil || got != want {
+			t.Errorf("%s value %q (%v), want %q", name, raw, err, want)
+		}
 	}
 }

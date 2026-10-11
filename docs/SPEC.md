@@ -1309,13 +1309,14 @@ The remaining rules, shared by every route above:
   **413**; the per-app aggregate is **507**.
 - "Parses as JSON" means Go's `json.Valid`: nesting at most 10000 deep, a
   byte-order mark is not whitespace, and bytes that are not UTF-8 are allowed
-  inside a string. Where a value becomes a JSON string, each byte of an
-  invalid UTF-8 sequence becomes one U+FFFD, as Go decodes it. The WebSocket
-  frames carry the encoding computed when the value was written, with the
-  same per-byte replacement inside an embedded JSON value. The whole-room GET
-  re-encodes every value from its stored bytes: the Worker replaces per byte
-  there too, while `hostthisd` passes such bytes inside an embedded value
-  through raw and leaves the replacement to the client's decoder.
+  inside a string. Every surface that embeds a value, the whole-room GET and
+  the WebSocket frames, emits only UTF-8: each byte of an invalid UTF-8
+  sequence becomes one U+FFFD, as Go decodes it, whether the value is embedded
+  as JSON or becomes a JSON string. The frames carry the encoding computed
+  when the value was written; the whole-room GET re-encodes every value from
+  its stored bytes by the same rule, on both servers. Both therefore carry the
+  same value, and no client decoder (whose replacement rules differ) ever sees
+  the raw bytes. Only the single-key GET returns the stored bytes as they are.
 - Every response under `/api/rooms` carries `Cache-Control: no-store`, errors
   included, since values change under fixed URLs and a CDN caches an
   undirected 404 by its own default. The Worker also sets it on every
