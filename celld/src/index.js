@@ -1379,8 +1379,8 @@ export class Room {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    // Off mode relays every frame, as hostthisd's proxy, which owns admission
-    // and the frame limit there, expects.
+    // Without an apex the cell relays every frame and admits every join:
+    // hostthisd's proxy owns admission and the frame limit there.
     this.publicSurface = publicSurfaceOn(env);
     if (this.publicSurface) {
       // The runtime answers the ping itself, without waking the cell, and
