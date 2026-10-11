@@ -3560,7 +3560,10 @@ The public router first does what Go's server and `ServeMux` do before
 `/_hostthis` without its slash is redirected 307 to `/_hostthis/`; a path that
 cleaning changes (a doubled slash, a `.` or `..` segment; a trailing slash is
 kept) is redirected 307 to its cleaned form with the query kept; and the path
-is percent-decoded once. On every host it then answers the renderer assets
+is percent-decoded once. Cleaning works on the escaped path, as `ServeMux`'s
+does, and the `Location` is that cleaned escaped path: an escaped `/` or `\`
+stays escaped (`/%2Fevil.com//` redirects to `/%2Fevil.com/`), so the
+`Location` never starts with `//` or `/\` and never leaves the host. On every host it then answers the renderer assets
 under `/_hostthis/` and `/healthz` and `/readyz` (see "The public surface").
 
 It serves an app on a slug host, `<slug>.<apex>` whose one label parses as a
