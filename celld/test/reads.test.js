@@ -34,7 +34,7 @@ const KB_FILES = {
 function kbWorld(w) {
   const size = (content) => new TextEncoder().encode(content).length;
   const files = Object.fromEntries(Object.entries(KB_FILES)
-    .map(([path, [key, content]]) => [path, { Key: key, Size: size(content), ContentType: "", Kind: "" }]));
+    .map(([path, [key, content]]) => [path, { Key: key, Size: size(content), DecodedSize: size(content), ContentType: "", Kind: "" }]));
   w.row(SLUG, { kind: "knowledgebase", status: "ready", updatedAt: UPDATED, uploadId: "up-kb", manifest: { Files: files } });
   for (const [key, content] of Object.values(KB_FILES)) w.blob(key, content);
 }
@@ -95,10 +95,15 @@ test("pending, failed, unknown slugs, redirects and health are hostthisd's", asy
   assert.deepEqual(w.payloadCalls, []);
 });
 
-// Stored bytes for a vector's entry, as long as its size says.
+// An entry without a decoded size holds this many bytes, which its Size
+// never names.
+const UNRECORDED_LENGTH = 38;
+
+// Stored bytes for a vector's entry, as long as its decoded size says.
 function entryBytes(entry) {
+  const n = entry.decodedSize > 0 ? entry.decodedSize : UNRECORDED_LENGTH;
   const text = `bytes of ${entry.key} `;
-  return text.repeat(Math.ceil(entry.size / text.length)).slice(0, entry.size);
+  return text.repeat(Math.ceil(n / text.length)).slice(0, n);
 }
 
 // The answer each shared read vector names, served as hostthisd serves it.
@@ -120,7 +125,10 @@ function expectFor(v, row) {
         kbraw: rawContentType("knowledgebase"),
       };
       return {
-        status: 200, body: entryBytes(want.entry), blob: want.entry.key, length: String(want.entry.size),
+        status: 200,
+        body: entryBytes(want.entry),
+        blob: want.entry.key,
+        length: want.entry.decodedSize > 0 ? String(want.entry.decodedSize) : null,
         headers: { ...validators(`"${want.entry.key}"`), "content-type": types[want.action] },
       };
     }
@@ -179,7 +187,7 @@ for (const v of vectors.vectors) {
       if (want.golden) await assertGolden(await w.fetch(vectorURL(v)), want.golden);
       else if (want.json) assert.deepEqual(JSON.parse(body), want.json);
       else assert.equal(body, want.body);
-      assert.equal(res.headers.get("content-length"), want.length ?? null, "stored bytes carry their size, nothing else does");
+      assert.equal(res.headers.get("content-length"), want.length ?? null, "stored bytes carry their decoded size, nothing else does");
       assert.deepEqual(w.payloadCalls, want.blob ? [`get ${want.blob}`] : []);
     }
   });
@@ -544,19 +552,26 @@ test("stored bytes carry their manifest size, and a body that disagrees ends sho
   }
 });
 
-test("stored bytes carry their size, generated pages none, and an unusable size streams without one", async () => {
+test("stored bytes carry their decoded size, generated pages none, and an entry without one streams whole without one", async () => {
   const w = world();
+  const legacy = "a file whose Size is not its length\n";
   w.row(SLUG, {
     kind: "knowledgebase", status: "ready", updatedAt: UPDATED, uploadId: "up",
     manifest: { Files: {
       "empty.txt": { Key: "k-empty", Size: 0, ContentType: "text/plain" },
-      "doc.md": { Key: "k-doc", Size: 6 },
-      "negative.txt": { Key: "k-negative", Size: -1, ContentType: "text/plain" },
+      "doc.md": { Key: "k-doc", Size: 6, DecodedSize: 6 },
+      "negative.txt": { Key: "k-negative", Size: 8, DecodedSize: -1, ContentType: "text/plain" },
+      "size-zero.txt": { Key: "k-legacy", Size: 0, ContentType: "text/plain" },
+      "stored-size.txt": { Key: "k-legacy", Size: stored(legacy).length, ContentType: "text/plain" },
+      "size-only.txt": { Key: "k-legacy", Size: legacy.length, ContentType: "text/plain" },
     } },
   });
-  for (const [key, content] of [["k-empty", ""], ["k-doc", "# doc\n"], ["k-negative", "negative"]]) w.blob(key, content);
+  for (const [key, content] of [["k-empty", ""], ["k-doc", "# doc\n"], ["k-negative", "negative"], ["k-legacy", legacy]]) {
+    w.blob(key, content);
+  }
   for (const [path, length, body] of [
-    ["/empty.txt", "0", ""], ["/doc.md?raw", "6", "# doc\n"], ["/negative.txt", null, "negative"],
+    ["/empty.txt", null, ""], ["/doc.md?raw", "6", "# doc\n"], ["/negative.txt", null, "negative"],
+    ["/size-zero.txt", null, legacy], ["/stored-size.txt", null, legacy], ["/size-only.txt", null, legacy],
     ["/doc.md", null, null], ["/?files", null, null],
   ]) {
     const res = await w.fetch(at(path));
@@ -565,7 +580,7 @@ test("stored bytes carry their size, generated pages none, and an unusable size 
     const text = await res.text();
     if (body !== null) assert.equal(text, body, path);
   }
-  // An answer without a size streams the same way.
+  // An answer without a decoded size streams the same way.
   const answer = { action: "file", kind: "site", updatedAt: UPDATED, uploadId: "up", entry: { key: "k-doc", contentType: "" } };
   w.env.PASTES = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answer) }) };
   const res = await w.fetch(at("/x"));

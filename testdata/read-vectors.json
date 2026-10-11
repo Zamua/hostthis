@@ -2,7 +2,8 @@
   "about": [
     "Read rules shared by the Go read path (internal/http) and the Worker's celld/src/read.js.",
     "Each vector runs request (path already percent-decoded; raw and files flags) against rows[row] as the Paste cell holds it; null is no row.",
-    "extensions is the known-extension table's asset flag: a miss on an asset extension is a 404, any other a route."
+    "extensions is the known-extension table's asset flag: a miss on an asset extension is a 404, any other a route.",
+    "entry.decodedSize is the stored entry's DecodedSize, 0 for an entry without one; only a positive one is a response's Content-Length, whatever the entry's Size."
   ],
   "extensions": {
     ".html": false,
@@ -58,70 +59,70 @@
       "status": "ready",
       "updatedAt": 1760003600130,
       "uploadId": "uhtml",
-      "manifest": {"Files": {"/": {"Key": "uploads/uhtml/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtml/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
     },
     "markdown": {
       "kind": "markdown",
       "status": "ready",
       "updatedAt": 1760007200137,
       "uploadId": "umarkdown",
-      "manifest": {"Files": {"/": {"Key": "uploads/umarkdown/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/umarkdown/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
     },
     "diff": {
       "kind": "diff",
       "status": "ready",
       "updatedAt": 1760010800144,
       "uploadId": "udiff",
-      "manifest": {"Files": {"/": {"Key": "uploads/udiff/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "diff"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/udiff/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "diff"}}}
     },
     "mermaid": {
       "kind": "mermaid",
       "status": "ready",
       "updatedAt": 1760014400151,
       "uploadId": "umermaid",
-      "manifest": {"Files": {"/": {"Key": "uploads/umermaid/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "mermaid"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/umermaid/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "mermaid"}}}
     },
     "pdf": {
       "kind": "pdf",
       "status": "ready",
       "updatedAt": 1760018000158,
       "uploadId": "updf",
-      "manifest": {"Files": {"/": {"Key": "uploads/updf/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "pdf"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/updf/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "pdf"}}}
     },
     "csv": {
       "kind": "csv",
       "status": "ready",
       "updatedAt": 1760021600165,
       "uploadId": "ucsv",
-      "manifest": {"Files": {"/": {"Key": "uploads/ucsv/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "csv"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/ucsv/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "csv"}}}
     },
     "json": {
       "kind": "json",
       "status": "ready",
       "updatedAt": 1760025200172,
       "uploadId": "ujson",
-      "manifest": {"Files": {"/": {"Key": "uploads/ujson/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "json"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/ujson/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "json"}}}
     },
     "flamegraph": {
       "kind": "flamegraph",
       "status": "ready",
       "updatedAt": 1760028800179,
       "uploadId": "uflamegraph",
-      "manifest": {"Files": {"/": {"Key": "uploads/uflamegraph/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "flamegraph"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/uflamegraph/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "flamegraph"}}}
     },
     "text": {
       "kind": "text",
       "status": "ready",
       "updatedAt": 1760032400186,
       "uploadId": "utext",
-      "manifest": {"Files": {"/": {"Key": "uploads/utext/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "text"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/utext/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "text"}}}
     },
     "log": {
       "kind": "log",
       "status": "ready",
       "updatedAt": 1760036000193,
       "uploadId": "ulog",
-      "manifest": {"Files": {"/": {"Key": "uploads/ulog/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "log"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/ulog/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "log"}}}
     },
     "htmlWithoutUploadId": {
       "kind": "html",
@@ -134,28 +135,28 @@
       "status": "pending",
       "updatedAt": 1760043200207,
       "uploadId": "umdpending",
-      "manifest": {"Files": {"/": {"Key": "uploads/umdpending/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/umdpending/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
     },
     "markdownFailed": {
       "kind": "markdown",
       "status": "failed",
       "updatedAt": 1760046800214,
       "uploadId": "umdfailed",
-      "manifest": {"Files": {"/": {"Key": "uploads/umdfailed/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/umdfailed/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
     },
     "htmlPending": {
       "kind": "html",
       "status": "pending",
       "updatedAt": 1760050400221,
       "uploadId": "uhtmlpending",
-      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlpending/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlpending/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
     },
     "htmlFailed": {
       "kind": "html",
       "status": "failed",
       "updatedAt": 1760054000228,
       "uploadId": "uhtmlfailed",
-      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlfailed/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlfailed/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
     },
     "markdownPendingWithoutManifest": {"kind": "markdown", "status": "pending", "updatedAt": 1760057600235, "uploadId": "umdpendnone", "manifest": null},
     "markdownEmptyStatus": {
@@ -163,14 +164,14 @@
       "status": "",
       "updatedAt": 1760061200242,
       "uploadId": "umdnostatus",
-      "manifest": {"Files": {"/": {"Key": "uploads/umdnostatus/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/umdnostatus/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
     },
     "markdownEmptyKey": {
       "kind": "markdown",
       "status": "ready",
       "updatedAt": 1760064800249,
       "uploadId": "umdemptykey",
-      "manifest": {"Files": {"/": {"Key": "", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
+      "manifest": {"Files": {"/": {"Key": "", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "markdown"}}}
     },
     "htmlKeyAbsent": {"kind": "html", "status": "ready", "updatedAt": 1760068400256, "uploadId": "uhtmlnokey", "manifest": {"Files": {"/": {"Size": 27}}}},
     "markdownNullEntry": {"kind": "markdown", "status": "ready", "updatedAt": 1760072000263, "uploadId": "umdnullentry", "manifest": {"Files": {"/": null}}},
@@ -213,28 +214,28 @@
       "status": "ready",
       "updatedAt": 1760133200382,
       "uploadId": "umdindex",
-      "manifest": {"Files": {"index.html": {"Key": "uploads/umdindex/0", "Size": 27, "CompressedSize": 13, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
+      "manifest": {"Files": {"index.html": {"Key": "uploads/umdindex/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
     },
     "unknownKind": {
       "kind": "weird",
       "status": "ready",
       "updatedAt": 1760136800389,
       "uploadId": "uweird",
-      "manifest": {"Files": {"/": {"Key": "uploads/uweird/0", "Size": 27, "CompressedSize": 13, "ContentType": "", "Kind": "weird"}}}
+      "manifest": {"Files": {"/": {"Key": "uploads/uweird/0", "Size": 27, "DecodedSize": 27, "CompressedSize": 13, "ContentType": "", "Kind": "weird"}}}
     },
     "markdownLowercaseFields": {
       "kind": "markdown",
       "status": "ready",
       "updatedAt": 1760140400396,
       "uploadId": "ufold",
-      "manifest": {"files": {"/": {"key": "uploads/ufold/0", "size": 27, "compressedsize": 13, "contenttype": "", "kind": "markdown"}}}
+      "manifest": {"files": {"/": {"key": "uploads/ufold/0", "size": 27, "decodedsize": 27, "compressedsize": 13, "contenttype": "", "kind": "markdown"}}}
     },
     "markdownUnicodeFoldedFields": {
       "kind": "markdown",
       "status": "ready",
       "updatedAt": 1760144000403,
       "uploadId": "ukelvin",
-      "manifest": {"File\u017f": {"/": {"\u212aey": "uploads/ukelvin/0", "\u017fize": 27}}}
+      "manifest": {"File\u017f": {"/": {"\u212aey": "uploads/ukelvin/0", "\u017fize": 27, "Decoded\u017fize": 27}}}
     },
     "markdownDotlessIFiles": {
       "kind": "markdown",
@@ -264,17 +265,17 @@
       "uploadId": "usite",
       "manifest": {
         "Files": {
-          "index.html": {"Key": "uploads/usite/0", "Size": 512, "CompressedSize": 256, "ContentType": "text/html; charset=utf-8", "Kind": ""},
-          "about.html": {"Key": "uploads/usite/1", "Size": 300, "CompressedSize": 150, "ContentType": "text/html; charset=utf-8", "Kind": ""},
-          "blog/index.html": {"Key": "uploads/usite/2", "Size": 410, "CompressedSize": 205, "ContentType": "text/html; charset=utf-8", "Kind": ""},
-          "assets/app.js": {"Key": "uploads/usite/3", "Size": 9000, "CompressedSize": 4500, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
-          "assets/logo.png": {"Key": "uploads/usite/4", "Size": 2048, "CompressedSize": 1024, "ContentType": "image/png", "Kind": ""},
-          "docs/a b.txt": {"Key": "uploads/usite/5", "Size": 12, "CompressedSize": 6, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "caf\u00e9/men\u00fc.html": {"Key": "uploads/usite/6", "Size": 99, "CompressedSize": 49, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "index.html": {"Key": "uploads/usite/0", "Size": 512, "DecodedSize": 512, "CompressedSize": 256, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "about.html": {"Key": "uploads/usite/1", "Size": 300, "DecodedSize": 300, "CompressedSize": 150, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "blog/index.html": {"Key": "uploads/usite/2", "Size": 410, "DecodedSize": 410, "CompressedSize": 205, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "assets/app.js": {"Key": "uploads/usite/3", "Size": 9000, "DecodedSize": 9000, "CompressedSize": 4500, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
+          "assets/logo.png": {"Key": "uploads/usite/4", "Size": 2048, "DecodedSize": 2048, "CompressedSize": 1024, "ContentType": "image/png", "Kind": ""},
+          "docs/a b.txt": {"Key": "uploads/usite/5", "Size": 12, "DecodedSize": 12, "CompressedSize": 6, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "caf\u00e9/men\u00fc.html": {"Key": "uploads/usite/6", "Size": 99, "DecodedSize": 99, "CompressedSize": 49, "ContentType": "text/html; charset=utf-8", "Kind": ""},
           "notes.xyz": {"Key": "uploads/usite/7", "Size": 5, "CompressedSize": 2, "ContentType": "application/octet-stream", "Kind": ""},
-          "raw/untyped": {"Key": "uploads/usite/8", "Size": 6, "CompressedSize": 3, "ContentType": "", "Kind": ""},
-          "keyless.css": {"Key": "", "Size": 7, "CompressedSize": 3, "ContentType": "text/css; charset=utf-8", "Kind": ""},
-          "v1.2/index.html": {"Key": "uploads/usite/10", "Size": 8, "CompressedSize": 4, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+          "raw/untyped": {"Key": "uploads/usite/8", "Size": 6, "DecodedSize": 6, "CompressedSize": 3, "ContentType": "", "Kind": ""},
+          "keyless.css": {"Key": "", "Size": 7, "DecodedSize": 7, "CompressedSize": 3, "ContentType": "text/css; charset=utf-8", "Kind": ""},
+          "v1.2/index.html": {"Key": "uploads/usite/10", "Size": 8, "DecodedSize": 8, "CompressedSize": 4, "ContentType": "text/html; charset=utf-8", "Kind": ""}
         }
       }
     },
@@ -285,8 +286,8 @@
       "uploadId": "unoindex",
       "manifest": {
         "Files": {
-          "app.js": {"Key": "uploads/unoindex/0", "Size": 10, "CompressedSize": 5, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
-          "page.html": {"Key": "uploads/unoindex/1", "Size": 11, "CompressedSize": 5, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+          "app.js": {"Key": "uploads/unoindex/0", "Size": 10, "DecodedSize": 10, "CompressedSize": 5, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
+          "page.html": {"Key": "uploads/unoindex/1", "Size": 11, "DecodedSize": 11, "CompressedSize": 5, "ContentType": "text/html; charset=utf-8", "Kind": ""}
         }
       }
     },
@@ -295,14 +296,14 @@
       "status": "pending",
       "updatedAt": 1760165600445,
       "uploadId": "usitepending",
-      "manifest": {"Files": {"index.html": {"Key": "uploads/usitepending/0", "Size": 20, "CompressedSize": 10, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
+      "manifest": {"Files": {"index.html": {"Key": "uploads/usitepending/0", "Size": 20, "DecodedSize": 20, "CompressedSize": 10, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
     },
     "siteFailed": {
       "kind": "site",
       "status": "failed",
       "updatedAt": 1760169200452,
       "uploadId": "usitefailed",
-      "manifest": {"Files": {"index.html": {"Key": "uploads/usitefailed/0", "Size": 21, "CompressedSize": 10, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
+      "manifest": {"Files": {"index.html": {"Key": "uploads/usitefailed/0", "Size": 21, "DecodedSize": 21, "CompressedSize": 10, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
     },
     "siteUndecodable": {"kind": "site", "status": "ready", "updatedAt": 1760172800459, "uploadId": "usitebad", "manifest": "oops"},
     "siteRootKeyed": {
@@ -312,8 +313,8 @@
       "uploadId": "usiteroot",
       "manifest": {
         "Files": {
-          "/": {"Key": "uploads/usiteroot/0", "Size": 30, "CompressedSize": 15, "ContentType": "text/html; charset=utf-8", "Kind": ""},
-          "index.html": {"Key": "uploads/usiteroot/1", "Size": 31, "CompressedSize": 15, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+          "/": {"Key": "uploads/usiteroot/0", "Size": 30, "DecodedSize": 30, "CompressedSize": 15, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "index.html": {"Key": "uploads/usiteroot/1", "Size": 31, "DecodedSize": 31, "CompressedSize": 15, "ContentType": "text/html; charset=utf-8", "Kind": ""}
         }
       }
     },
@@ -324,18 +325,18 @@
       "uploadId": "ukb",
       "manifest": {
         "Files": {
-          "README.md": {"Key": "uploads/ukb/0", "Size": 100, "CompressedSize": 50, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "guide/intro.md": {"Key": "uploads/ukb/1", "Size": 101, "CompressedSize": 50, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "guide/index.html": {"Key": "uploads/ukb/2", "Size": 102, "CompressedSize": 51, "ContentType": "text/html; charset=utf-8", "Kind": ""},
-          "notes.MARKDOWN": {"Key": "uploads/ukb/3", "Size": 103, "CompressedSize": 51, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "img/diagram.png": {"Key": "uploads/ukb/4", "Size": 104, "CompressedSize": 52, "ContentType": "image/png", "Kind": ""},
-          "files.json": {"Key": "uploads/ukb/5", "Size": 105, "CompressedSize": 52, "ContentType": "application/json; charset=utf-8", "Kind": ""},
-          "a b/\u00fcn\u00ef.md": {"Key": "uploads/ukb/6", "Size": 106, "CompressedSize": 53, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "x\ud83d\ude00.md": {"Key": "uploads/ukb/7", "Size": 107, "CompressedSize": 53, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "x\uff41.md": {"Key": "uploads/ukb/8", "Size": 108, "CompressedSize": 54, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "keyless.png": {"Key": "", "Size": 109, "CompressedSize": 54, "ContentType": "image/png", "Kind": ""},
-          "keyless.md": {"Key": "", "Size": 110, "CompressedSize": 55, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
-          "Zeta.md": {"Key": "uploads/ukb/11", "Size": 111, "CompressedSize": 55, "ContentType": "text/plain; charset=utf-8", "Kind": ""}
+          "README.md": {"Key": "uploads/ukb/0", "Size": 100, "DecodedSize": 100, "CompressedSize": 50, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "guide/intro.md": {"Key": "uploads/ukb/1", "Size": 101, "DecodedSize": 101, "CompressedSize": 50, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "guide/index.html": {"Key": "uploads/ukb/2", "Size": 102, "DecodedSize": 102, "CompressedSize": 51, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "notes.MARKDOWN": {"Key": "uploads/ukb/3", "Size": 103, "DecodedSize": 103, "CompressedSize": 51, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "img/diagram.png": {"Key": "uploads/ukb/4", "Size": 104, "DecodedSize": 104, "CompressedSize": 52, "ContentType": "image/png", "Kind": ""},
+          "files.json": {"Key": "uploads/ukb/5", "Size": 105, "DecodedSize": 105, "CompressedSize": 52, "ContentType": "application/json; charset=utf-8", "Kind": ""},
+          "a b/\u00fcn\u00ef.md": {"Key": "uploads/ukb/6", "Size": 106, "DecodedSize": 106, "CompressedSize": 53, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "x\ud83d\ude00.md": {"Key": "uploads/ukb/7", "Size": 107, "DecodedSize": 107, "CompressedSize": 53, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "x\uff41.md": {"Key": "uploads/ukb/8", "Size": 108, "DecodedSize": 108, "CompressedSize": 54, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "keyless.png": {"Key": "", "Size": 109, "DecodedSize": 109, "CompressedSize": 54, "ContentType": "image/png", "Kind": ""},
+          "keyless.md": {"Key": "", "Size": 110, "DecodedSize": 110, "CompressedSize": 55, "ContentType": "text/plain; charset=utf-8", "Kind": ""},
+          "Zeta.md": {"Key": "uploads/ukb/11", "Size": 111, "DecodedSize": 111, "CompressedSize": 55, "ContentType": "text/plain; charset=utf-8", "Kind": ""}
         }
       }
     },
@@ -344,9 +345,49 @@
       "status": "pending",
       "updatedAt": 1760183600480,
       "uploadId": "ukbpending",
-      "manifest": {"Files": {"README.md": {"Key": "uploads/ukbpending/0", "Size": 40, "CompressedSize": 20, "ContentType": "text/plain; charset=utf-8", "Kind": ""}}}
+      "manifest": {"Files": {"README.md": {"Key": "uploads/ukbpending/0", "Size": 40, "DecodedSize": 40, "CompressedSize": 20, "ContentType": "text/plain; charset=utf-8", "Kind": ""}}}
     },
-    "knowledgeBaseUndecodable": {"kind": "knowledgebase", "status": "ready", "updatedAt": 1760187200487, "uploadId": "ukbbad", "manifest": "oops"}
+    "knowledgeBaseUndecodable": {"kind": "knowledgebase", "status": "ready", "updatedAt": 1760187200487, "uploadId": "ukbbad", "manifest": "oops"},
+    "htmlLegacySizeZero": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760190800494,
+      "uploadId": "ulegacyzero",
+      "manifest": {"Files": {"/": {"Key": "uploads/ulegacyzero/0", "Size": 0, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+    },
+    "markdownLegacyStoredSize": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760194400501,
+      "uploadId": "ulegacystored",
+      "manifest": {"Files": {"/": {"Key": "uploads/ulegacystored/0", "Size": 21, "CompressedSize": 17, "ContentType": "", "Kind": "markdown"}}}
+    },
+    "htmlNegativeDecodedSize": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760198000508,
+      "uploadId": "unegative",
+      "manifest": {"Files": {"/": {"Key": "uploads/unegative/0", "Size": 27, "DecodedSize": -1, "CompressedSize": 13, "ContentType": "", "Kind": "html"}}}
+    },
+    "htmlUndecodableDecodedSizeString": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760201600515,
+      "uploadId": "uhtmlbad",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmlbad/0", "Size": 3, "DecodedSize": "3"}}}
+    },
+    "siteLegacyStoredSizes": {
+      "kind": "site",
+      "status": "ready",
+      "updatedAt": 1760205200522,
+      "uploadId": "usitelegacy",
+      "manifest": {
+        "Files": {
+          "index.html": {"Key": "uploads/usitelegacy/0", "Size": 21, "CompressedSize": 17, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "app.js": {"Key": "uploads/usitelegacy/1", "Size": 0, "CompressedSize": 30, "ContentType": "text/javascript; charset=utf-8", "Kind": ""}
+        }
+      }
+    }
   },
   "vectors": [
     {"name": "unknown slug", "row": null, "request": {"path": "/", "raw": false, "files": false}, "want": {"found": false}},
@@ -357,19 +398,19 @@
       "name": "html at root",
       "row": "html",
       "request": {"path": "/", "raw": false, "files": false},
-      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "size": 27}}
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "html ignores ?raw",
       "row": "html",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "size": 27}}
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "html ignores ?files",
       "row": "html",
       "request": {"path": "/", "raw": false, "files": true},
-      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "size": 27}}
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760003600130, "uploadId": "uhtml", "entry": {"key": "uploads/uhtml/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "html deeper path",
@@ -387,7 +428,7 @@
       "name": "html without an upload id",
       "row": "htmlWithoutUploadId",
       "request": {"path": "/", "raw": false, "files": false},
-      "want": {"action": "html", "kind": "html", "updatedAt": 1760039600200, "uploadId": "", "entry": {"key": "uploads/ulegacy/0", "contentType": "", "size": 27}}
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760039600200, "uploadId": "", "entry": {"key": "uploads/ulegacy/0", "contentType": "", "decodedSize": 0}}
     },
     {
       "name": "markdown bare URL serves the shell",
@@ -399,7 +440,7 @@
       "name": "markdown ?raw serves the bytes",
       "row": "markdown",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "entry": {"key": "uploads/umarkdown/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "entry": {"key": "uploads/umarkdown/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "diff bare URL serves the shell",
@@ -411,7 +452,7 @@
       "name": "diff ?raw serves the bytes",
       "row": "diff",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "diff", "updatedAt": 1760010800144, "uploadId": "udiff", "entry": {"key": "uploads/udiff/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "diff", "updatedAt": 1760010800144, "uploadId": "udiff", "entry": {"key": "uploads/udiff/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "mermaid bare URL serves the shell",
@@ -423,7 +464,7 @@
       "name": "mermaid ?raw serves the bytes",
       "row": "mermaid",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "mermaid", "updatedAt": 1760014400151, "uploadId": "umermaid", "entry": {"key": "uploads/umermaid/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "mermaid", "updatedAt": 1760014400151, "uploadId": "umermaid", "entry": {"key": "uploads/umermaid/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "pdf bare URL serves the shell",
@@ -435,7 +476,7 @@
       "name": "pdf ?raw serves the bytes",
       "row": "pdf",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "pdf", "updatedAt": 1760018000158, "uploadId": "updf", "entry": {"key": "uploads/updf/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "pdf", "updatedAt": 1760018000158, "uploadId": "updf", "entry": {"key": "uploads/updf/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "csv bare URL serves the shell",
@@ -447,7 +488,7 @@
       "name": "csv ?raw serves the bytes",
       "row": "csv",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "csv", "updatedAt": 1760021600165, "uploadId": "ucsv", "entry": {"key": "uploads/ucsv/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "csv", "updatedAt": 1760021600165, "uploadId": "ucsv", "entry": {"key": "uploads/ucsv/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "json bare URL serves the shell",
@@ -459,7 +500,7 @@
       "name": "json ?raw serves the bytes",
       "row": "json",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "json", "updatedAt": 1760025200172, "uploadId": "ujson", "entry": {"key": "uploads/ujson/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "json", "updatedAt": 1760025200172, "uploadId": "ujson", "entry": {"key": "uploads/ujson/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "flamegraph bare URL serves the shell",
@@ -471,7 +512,7 @@
       "name": "flamegraph ?raw serves the bytes",
       "row": "flamegraph",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "flamegraph", "updatedAt": 1760028800179, "uploadId": "uflamegraph", "entry": {"key": "uploads/uflamegraph/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "flamegraph", "updatedAt": 1760028800179, "uploadId": "uflamegraph", "entry": {"key": "uploads/uflamegraph/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "text bare URL serves the shell",
@@ -483,7 +524,7 @@
       "name": "text ?raw serves the bytes",
       "row": "text",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "text", "updatedAt": 1760032400186, "uploadId": "utext", "entry": {"key": "uploads/utext/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "text", "updatedAt": 1760032400186, "uploadId": "utext", "entry": {"key": "uploads/utext/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "log bare URL serves the shell",
@@ -495,7 +536,7 @@
       "name": "log ?raw serves the bytes",
       "row": "log",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "log", "updatedAt": 1760036000193, "uploadId": "ulog", "entry": {"key": "uploads/ulog/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "log", "updatedAt": 1760036000193, "uploadId": "ulog", "entry": {"key": "uploads/ulog/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "markdown ignores ?files",
@@ -507,7 +548,7 @@
       "name": "markdown ?raw with ?files",
       "row": "markdown",
       "request": {"path": "/", "raw": true, "files": true},
-      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "entry": {"key": "uploads/umarkdown/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760007200137, "uploadId": "umarkdown", "entry": {"key": "uploads/umarkdown/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "markdown deeper path",
@@ -542,7 +583,7 @@
         "kind": "markdown",
         "updatedAt": 1760133200382,
         "uploadId": "umdindex",
-        "entry": {"key": "uploads/umdindex/0", "contentType": "text/html; charset=utf-8", "size": 27}
+        "entry": {"key": "uploads/umdindex/0", "contentType": "text/html; charset=utf-8", "decodedSize": 27}
       }
     },
     {
@@ -706,13 +747,13 @@
       "name": "lowercase field names decode",
       "row": "markdownLowercaseFields",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760140400396, "uploadId": "ufold", "entry": {"key": "uploads/ufold/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760140400396, "uploadId": "ufold", "entry": {"key": "uploads/ufold/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "unicode-folded field names decode",
       "row": "markdownUnicodeFoldedFields",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760144000403, "uploadId": "ukelvin", "entry": {"key": "uploads/ukelvin/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760144000403, "uploadId": "ukelvin", "entry": {"key": "uploads/ukelvin/0", "contentType": "", "decodedSize": 27}}
     },
     {
       "name": "a dotless i does not fold to I",
@@ -724,13 +765,13 @@
       "name": "duplicate field: the last wins",
       "row": "markdownDuplicateFieldLastWins",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760151200417, "uploadId": "udup", "entry": {"key": "uploads/udup/1", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760151200417, "uploadId": "udup", "entry": {"key": "uploads/udup/1", "contentType": "", "decodedSize": 0}}
     },
     {
       "name": "null field keeps the earlier value",
       "row": "markdownNullFieldKeepsEarlier",
       "request": {"path": "/", "raw": true, "files": false},
-      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760154800424, "uploadId": "unullfield", "entry": {"key": "uploads/unullfield/0", "contentType": "", "size": 27}}
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760154800424, "uploadId": "unullfield", "entry": {"key": "uploads/unullfield/0", "contentType": "", "decodedSize": 0}}
     },
     {
       "name": "site root",
@@ -741,7 +782,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -753,7 +794,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -765,7 +806,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -777,7 +818,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -789,7 +830,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/1", "contentType": "text/html; charset=utf-8", "size": 300}
+        "entry": {"key": "uploads/usite/1", "contentType": "text/html; charset=utf-8", "decodedSize": 300}
       }
     },
     {
@@ -801,7 +842,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "size": 410}
+        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "decodedSize": 410}
       }
     },
     {
@@ -813,7 +854,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "size": 410}
+        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "decodedSize": 410}
       }
     },
     {
@@ -825,20 +866,20 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "size": 410}
+        "entry": {"key": "uploads/usite/2", "contentType": "text/html; charset=utf-8", "decodedSize": 410}
       }
     },
     {
       "name": "site dotted directory without slash",
       "row": "site",
       "request": {"path": "/v1.2", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/10", "contentType": "text/html; charset=utf-8", "size": 8}}
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/10", "contentType": "text/html; charset=utf-8", "decodedSize": 8}}
     },
     {
       "name": "site dotted directory with slash",
       "row": "site",
       "request": {"path": "/v1.2/", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/10", "contentType": "text/html; charset=utf-8", "size": 8}}
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/10", "contentType": "text/html; charset=utf-8", "decodedSize": 8}}
     },
     {
       "name": "site asset",
@@ -849,7 +890,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/3", "contentType": "text/javascript; charset=utf-8", "size": 9000}
+        "entry": {"key": "uploads/usite/3", "contentType": "text/javascript; charset=utf-8", "decodedSize": 9000}
       }
     },
     {
@@ -861,14 +902,14 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/3", "contentType": "text/javascript; charset=utf-8", "size": 9000}
+        "entry": {"key": "uploads/usite/3", "contentType": "text/javascript; charset=utf-8", "decodedSize": 9000}
       }
     },
     {
       "name": "site image",
       "row": "site",
       "request": {"path": "/assets/logo.png", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/4", "contentType": "image/png", "size": 2048}}
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/4", "contentType": "image/png", "decodedSize": 2048}}
     },
     {
       "name": "site name with a space",
@@ -879,7 +920,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/5", "contentType": "text/plain; charset=utf-8", "size": 12}
+        "entry": {"key": "uploads/usite/5", "contentType": "text/plain; charset=utf-8", "decodedSize": 12}
       }
     },
     {
@@ -892,7 +933,7 @@
       "name": "site non-ASCII name",
       "row": "site",
       "request": {"path": "/caf\u00e9/men\u00fc.html", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/6", "contentType": "text/html; charset=utf-8", "size": 99}}
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/6", "contentType": "text/html; charset=utf-8", "decodedSize": 99}}
     },
     {
       "name": "site paths are case-sensitive",
@@ -903,7 +944,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -915,20 +956,20 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
       "name": "site unknown extension file",
       "row": "site",
       "request": {"path": "/notes.xyz", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/7", "contentType": "application/octet-stream", "size": 5}}
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/7", "contentType": "application/octet-stream", "decodedSize": 0}}
     },
     {
       "name": "site entry without a content type",
       "row": "site",
       "request": {"path": "/raw/untyped", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/8", "contentType": "", "size": 6}}
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite", "entry": {"key": "uploads/usite/8", "contentType": "", "decodedSize": 6}}
     },
     {
       "name": "site entry without a key",
@@ -945,7 +986,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -957,7 +998,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -969,7 +1010,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -981,7 +1022,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -993,7 +1034,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1005,7 +1046,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1017,7 +1058,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1029,7 +1070,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1041,7 +1082,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1053,7 +1094,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1065,7 +1106,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1125,7 +1166,7 @@
         "kind": "site",
         "updatedAt": 1760162000438,
         "uploadId": "unoindex",
-        "entry": {"key": "uploads/unoindex/1", "contentType": "text/html; charset=utf-8", "size": 11}
+        "entry": {"key": "uploads/unoindex/1", "contentType": "text/html; charset=utf-8", "decodedSize": 11}
       }
     },
     {
@@ -1137,7 +1178,7 @@
         "kind": "site",
         "updatedAt": 1760165600445,
         "uploadId": "usitepending",
-        "entry": {"key": "uploads/usitepending/0", "contentType": "text/html; charset=utf-8", "size": 20}
+        "entry": {"key": "uploads/usitepending/0", "contentType": "text/html; charset=utf-8", "decodedSize": 20}
       }
     },
     {
@@ -1149,7 +1190,7 @@
         "kind": "site",
         "updatedAt": 1760169200452,
         "uploadId": "usitefailed",
-        "entry": {"key": "uploads/usitefailed/0", "contentType": "text/html; charset=utf-8", "size": 21}
+        "entry": {"key": "uploads/usitefailed/0", "contentType": "text/html; charset=utf-8", "decodedSize": 21}
       }
     },
     {
@@ -1173,7 +1214,7 @@
         "kind": "site",
         "updatedAt": 1760176400466,
         "uploadId": "usiteroot",
-        "entry": {"key": "uploads/usiteroot/0", "contentType": "text/html; charset=utf-8", "size": 30}
+        "entry": {"key": "uploads/usiteroot/0", "contentType": "text/html; charset=utf-8", "decodedSize": 30}
       }
     },
     {
@@ -1185,7 +1226,7 @@
         "kind": "site",
         "updatedAt": 1760176400466,
         "uploadId": "usiteroot",
-        "entry": {"key": "uploads/usiteroot/1", "contentType": "text/html; charset=utf-8", "size": 31}
+        "entry": {"key": "uploads/usiteroot/1", "contentType": "text/html; charset=utf-8", "decodedSize": 31}
       }
     },
     {
@@ -1215,7 +1256,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/0", "contentType": "text/plain; charset=utf-8", "size": 100}
+        "entry": {"key": "uploads/ukb/0", "contentType": "text/plain; charset=utf-8", "decodedSize": 100}
       }
     },
     {
@@ -1239,7 +1280,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/1", "contentType": "text/plain; charset=utf-8", "size": 101}
+        "entry": {"key": "uploads/ukb/1", "contentType": "text/plain; charset=utf-8", "decodedSize": 101}
       }
     },
     {
@@ -1257,7 +1298,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/3", "contentType": "text/plain; charset=utf-8", "size": 103}
+        "entry": {"key": "uploads/ukb/3", "contentType": "text/plain; charset=utf-8", "decodedSize": 103}
       }
     },
     {
@@ -1269,7 +1310,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/6", "contentType": "text/plain; charset=utf-8", "size": 106}
+        "entry": {"key": "uploads/ukb/6", "contentType": "text/plain; charset=utf-8", "decodedSize": 106}
       }
     },
     {
@@ -1281,7 +1322,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/7", "contentType": "text/plain; charset=utf-8", "size": 107}
+        "entry": {"key": "uploads/ukb/7", "contentType": "text/plain; charset=utf-8", "decodedSize": 107}
       }
     },
     {
@@ -1311,7 +1352,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/2", "contentType": "text/html; charset=utf-8", "size": 102}
+        "entry": {"key": "uploads/ukb/2", "contentType": "text/html; charset=utf-8", "decodedSize": 102}
       }
     },
     {
@@ -1323,20 +1364,20 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/2", "contentType": "text/html; charset=utf-8", "size": 102}
+        "entry": {"key": "uploads/ukb/2", "contentType": "text/html; charset=utf-8", "decodedSize": 102}
       }
     },
     {
       "name": "kb image",
       "row": "kb",
       "request": {"path": "/img/diagram.png", "raw": false, "files": false},
-      "want": {"action": "file", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "entry": {"key": "uploads/ukb/4", "contentType": "image/png", "size": 104}}
+      "want": {"action": "file", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "entry": {"key": "uploads/ukb/4", "contentType": "image/png", "decodedSize": 104}}
     },
     {
       "name": "kb image ignores ?raw",
       "row": "kb",
       "request": {"path": "/img/diagram.png", "raw": true, "files": false},
-      "want": {"action": "file", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "entry": {"key": "uploads/ukb/4", "contentType": "image/png", "size": 104}}
+      "want": {"action": "file", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "entry": {"key": "uploads/ukb/4", "contentType": "image/png", "decodedSize": 104}}
     },
     {
       "name": "kb files.json is a file",
@@ -1347,7 +1388,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760180000473,
         "uploadId": "ukb",
-        "entry": {"key": "uploads/ukb/5", "contentType": "application/json; charset=utf-8", "size": 105}
+        "entry": {"key": "uploads/ukb/5", "contentType": "application/json; charset=utf-8", "decodedSize": 105}
       }
     },
     {
@@ -1525,7 +1566,7 @@
         "kind": "knowledgebase",
         "updatedAt": 1760183600480,
         "uploadId": "ukbpending",
-        "entry": {"key": "uploads/ukbpending/0", "contentType": "text/plain; charset=utf-8", "size": 40}
+        "entry": {"key": "uploads/ukbpending/0", "contentType": "text/plain; charset=utf-8", "decodedSize": 40}
       }
     },
     {
@@ -1561,7 +1602,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1573,7 +1614,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1585,7 +1626,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1597,7 +1638,7 @@
         "kind": "site",
         "updatedAt": 1760158400431,
         "uploadId": "usite",
-        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "size": 512}
+        "entry": {"key": "uploads/usite/0", "contentType": "text/html; charset=utf-8", "decodedSize": 512}
       }
     },
     {
@@ -1851,6 +1892,42 @@
       "row": "site",
       "request": {"path": "/missing/file.dat", "raw": false, "files": false},
       "want": {"action": "notfound", "kind": "site", "updatedAt": 1760158400431, "uploadId": "usite"}
+    },
+    {
+      "name": "legacy size 0 html streams with no decoded size",
+      "row": "htmlLegacySizeZero",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760190800494, "uploadId": "ulegacyzero", "entry": {"key": "uploads/ulegacyzero/0", "contentType": "", "decodedSize": 0}}
+    },
+    {
+      "name": "legacy stored size markdown ?raw streams with no decoded size",
+      "row": "markdownLegacyStoredSize",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760194400501, "uploadId": "ulegacystored", "entry": {"key": "uploads/ulegacystored/0", "contentType": "", "decodedSize": 0}}
+    },
+    {
+      "name": "a negative decoded size passes through",
+      "row": "htmlNegativeDecodedSize",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760198000508, "uploadId": "unegative", "entry": {"key": "uploads/unegative/0", "contentType": "", "decodedSize": -1}}
+    },
+    {
+      "name": "a decoded size of the wrong type fails the manifest",
+      "row": "htmlUndecodableDecodedSizeString",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "html", "updatedAt": 1760201600515, "uploadId": "uhtmlbad"}
+    },
+    {
+      "name": "legacy site file streams with no decoded size",
+      "row": "siteLegacyStoredSizes",
+      "request": {"path": "/app.js", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760205200522, "uploadId": "usitelegacy", "entry": {"key": "uploads/usitelegacy/1", "contentType": "text/javascript; charset=utf-8", "decodedSize": 0}}
+    },
+    {
+      "name": "legacy site route falls back to an index with no decoded size",
+      "row": "siteLegacyStoredSizes",
+      "request": {"path": "/some/route", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760205200522, "uploadId": "usitelegacy", "entry": {"key": "uploads/usitelegacy/0", "contentType": "text/html; charset=utf-8", "decodedSize": 0}}
     }
   ]
 }

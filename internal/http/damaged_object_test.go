@@ -81,14 +81,14 @@ func (l *syncLog) String() string {
 }
 
 // storedHTMLServer serves one ready HTML paste whose object holds stored, read
-// through the production at-rest decoding.
+// through the production at-rest decoding, with size as its decoded size.
 func storedHTMLServer(stored []byte, size int) *Server {
 	const key = "uploads/u1/0"
 	return &Server{
 		ApexDomain: "paste.test",
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML, UpdatedAt: time.Now().UTC(),
-			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key, Size: size}),
+			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key, Size: size, DecodedSize: size}),
 		}},
 		Blobs: storage.NewCompressedBlobStore(rawObjects{key: stored}),
 	}
@@ -146,7 +146,7 @@ func TestRead_MidStreamDamageAbortsTheResponse(t *testing.T) {
 		"truncated": stored[:len(stored)*3/4],
 		"checksum":  checksum,
 	} {
-		for _, size := range []int{len(body), -1} {
+		for _, size := range []int{len(body), 0} {
 			t.Run(name+"/size "+strconv.Itoa(size), func(t *testing.T) {
 				srv := storedHTMLServer(damaged, size)
 				var logged syncLog
@@ -167,8 +167,9 @@ func TestRead_MidStreamDamageAbortsTheResponse(t *testing.T) {
 }
 
 // A 200 that streams stored bytes declares the entry's decoded size, so a
-// short body is visible to every client; a negative size is unknown.
-func TestRead_ContentLengthIsTheRecordedSize(t *testing.T) {
+// short body is visible to every client. An entry without one streams its
+// whole body with no declared length, whatever its Size says.
+func TestRead_ContentLengthIsTheDecodedSize(t *testing.T) {
 	doc := []byte("# notes\n")
 	big := noise(8 << 10)
 	file := []byte("body{color:red}")
@@ -176,40 +177,48 @@ func TestRead_ContentLengthIsTheRecordedSize(t *testing.T) {
 		"uploads/d/0": encoded(t, doc),
 		"uploads/b/0": encoded(t, big),
 		"uploads/s/0": encoded(t, file),
-		"uploads/s/1": encoded(t, nil),
 	}
+	stored := len(objects["uploads/b/0"])
 	now := time.Now().UTC()
-	paste := func(kind domain.ContentKind, key string, size int) *Server {
+	paste := func(kind domain.ContentKind, key string, e domain.ManifestEntry) *Server {
+		e.Key = key
 		return &Server{Blobs: storage.NewCompressedBlobStore(objects), Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: kind, UpdatedAt: now,
-			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key, Size: size}),
+			Manifest: domain.DocumentManifest(e),
 		}}}
 	}
+	decoded := func(n int) domain.ManifestEntry { return domain.ManifestEntry{Size: n, DecodedSize: n} }
 	site := domain.NewManifest()
-	site.Add("style.css", domain.ManifestEntry{Key: "uploads/s/0", Size: len(file), ContentType: "text/css; charset=utf-8"})
-	site.Add("empty.css", domain.ManifestEntry{Key: "uploads/s/1", Size: 0, ContentType: "text/css; charset=utf-8"})
+	site.Add("style.css", domain.ManifestEntry{
+		Key: "uploads/s/0", Size: len(file), DecodedSize: len(file), ContentType: "text/css; charset=utf-8",
+	})
+	site.Add("legacy.bin", domain.ManifestEntry{Key: "uploads/b/0", Size: stored, ContentType: "application/octet-stream"})
 	sites := &Server{Blobs: storage.NewCompressedBlobStore(objects), Sites: stubSiteReader{s: domain.Site{
 		Slug: "abc23456", Kind: domain.KindSite, Manifest: site, UpdatedAt: now,
 	}}}
 	kbm := domain.NewManifest()
-	kbm.Add("README.md", domain.ManifestEntry{Key: "uploads/d/0", Size: len(doc)})
+	kbm.Add("README.md", domain.ManifestEntry{Key: "uploads/d/0", Size: len(doc), DecodedSize: len(doc)})
 	kb := &Server{Blobs: storage.NewCompressedBlobStore(objects), Pastes: stubPasteReader{p: domain.Paste{
 		Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindKnowledgeBase, UpdatedAt: now, Manifest: kbm,
 	}}}
 
+	// A body with no declared length is past the server's own buffering, so
+	// the server cannot fill one in.
 	cases := []struct {
 		name, target string
 		srv          *Server
 		want         string
 		body         []byte
 	}{
-		{"html", "/p/abc23456", paste(domain.KindHTML, "uploads/d/0", len(doc)), "8", doc},
-		{"raw", "/p/abc23456?raw=1", paste(domain.KindMarkdown, "uploads/d/0", len(doc)), "8", doc},
-		{"large", "/p/abc23456", paste(domain.KindHTML, "uploads/b/0", len(big)), "8192", big},
-		// Past the server's own buffering, so it cannot fill the length in.
-		{"unknown size", "/p/abc23456", paste(domain.KindHTML, "uploads/b/0", -1), "", big},
+		{"html", "/p/abc23456", paste(domain.KindHTML, "uploads/d/0", decoded(len(doc))), "8", doc},
+		{"raw", "/p/abc23456?raw=1", paste(domain.KindMarkdown, "uploads/d/0", decoded(len(doc))), "8", doc},
+		{"large", "/p/abc23456", paste(domain.KindHTML, "uploads/b/0", decoded(len(big))), "8192", big},
+		{"no decoded size", "/p/abc23456", paste(domain.KindHTML, "uploads/b/0", domain.ManifestEntry{}), "", big},
+		{"negative decoded size", "/p/abc23456", paste(domain.KindHTML, "uploads/b/0", domain.ManifestEntry{DecodedSize: -1}), "", big},
+		{"legacy size", "/p/abc23456", paste(domain.KindHTML, "uploads/b/0", domain.ManifestEntry{Size: len(big)}), "", big},
+		{"legacy stored size", "/p/abc23456?raw=1", paste(domain.KindMarkdown, "uploads/b/0", domain.ManifestEntry{Size: stored}), "", big},
 		{"site file", "/p/abc23456/style.css", sites, "15", file},
-		{"empty site file", "/p/abc23456/empty.css", sites, "0", nil},
+		{"legacy site file", "/p/abc23456/legacy.bin", sites, "", big},
 		{"knowledge base document", "/p/abc23456/README.md?raw=1", kb, "8", doc},
 	}
 	for _, c := range cases {
@@ -226,7 +235,7 @@ func TestRead_ContentLengthIsTheRecordedSize(t *testing.T) {
 					t.Fatalf("Content-Length %q, want %q", cl, c.want)
 				}
 				if method == "GET" && !bytes.Equal(got, c.body) {
-					t.Fatalf("body %q, want %q", got, c.body)
+					t.Fatalf("body %d bytes, want %d", len(got), len(c.body))
 				}
 			})
 		}

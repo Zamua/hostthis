@@ -23,6 +23,7 @@ var undecodableManifests = map[string]string{
 	"files not a map":    `{"Files":"x"}`,
 	"entry field type":   `{"Files":{"/":{"Size":"3"}}}`,
 	"keyed mistyped row": `{"Files":{"/":{"Key":"uploads/u1/0","Size":"3"}}}`,
+	"decoded size type":  `{"Files":{"/":{"Key":"uploads/u1/0","DecodedSize":"3"}}}`,
 }
 
 func rowWithManifest(manifest string) string {

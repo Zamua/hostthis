@@ -67,17 +67,22 @@ before(async () => {
   for (const name of FILES) {
     const key = `uploads/live/${name}`;
     await internal(`/blob/${key}`, { method: "PUT", body: readFileSync(join(dir, `${name}.hz`)) });
-    files[`${name}.txt`] = { Key: key, Size: manifest[name].size, ContentType: "text/plain; charset=utf-8" };
+    const size = manifest[name].size;
+    files[`${name}.txt`] = { Key: key, Size: size, DecodedSize: size, ContentType: "text/plain; charset=utf-8" };
   }
   const text = readFileSync(join(dir, "text.hz"));
+  const textSize = manifest.text.size;
   await internal("/blob/uploads/live/truncated", { method: "PUT", body: text.subarray(0, text.length - 2) });
-  files["truncated.txt"] = { Key: "uploads/live/truncated", Size: manifest.text.size, ContentType: "text/plain" };
+  files["truncated.txt"] = { Key: "uploads/live/truncated", Size: textSize, DecodedSize: textSize, ContentType: "text/plain" };
   const flipped = Buffer.from(text);
   flipped[flipped.length - 1] ^= 0x01;
   await internal("/blob/uploads/live/flipped", { method: "PUT", body: flipped });
-  files["flipped.txt"] = { Key: "uploads/live/flipped", Size: manifest.text.size, ContentType: "text/plain" };
+  files["flipped.txt"] = { Key: "uploads/live/flipped", Size: textSize, DecodedSize: textSize, ContentType: "text/plain" };
   // Whole bytes, one short of the size the manifest gives them.
-  files["oversized.txt"] = { Key: "uploads/live/text", Size: manifest.text.size + 1, ContentType: "text/plain" };
+  files["oversized.txt"] = { Key: "uploads/live/text", Size: textSize + 1, DecodedSize: textSize + 1, ContentType: "text/plain" };
+  // Entries without a decoded size, whose Size is wrong.
+  files["size-zero.txt"] = { Key: "uploads/live/text", Size: 0, ContentType: "text/plain" };
+  files["stored-size.txt"] = { Key: "uploads/live/text", Size: text.length, ContentType: "text/plain" };
   await internal("/blob/uploads/live/unframed", { method: "PUT", body: Buffer.from("not at rest") });
   files["unframed.txt"] = { Key: "uploads/live/unframed", Size: 11, ContentType: "text/plain" };
   await internal(`/paste/put?slug=${SLUG}`, {
@@ -134,9 +139,21 @@ test("every corpus blob decodes in workerd to its bytes, with its size as Conten
     assert.equal(hash.digest("hex"), manifest[name].sha256, name);
     if (name === "repeat100m") continue;
     const wire = await wireGet(`/${name}.txt`);
-    assert.equal(wire.headers["content-length"], String(manifest[name].size), name);
-    assert.equal(wire.headers["transfer-encoding"], undefined, name);
+    // An empty file records no decoded size, so it is sent chunked.
+    const length = manifest[name].size > 0 ? String(manifest[name].size) : undefined;
+    assert.equal(wire.headers["content-length"], length, name);
+    assert.equal(wire.headers["transfer-encoding"], length ? undefined : "chunked", name);
     assert.deepEqual([wire.size, wire.sha256, wire.aborted], [manifest[name].size, manifest[name].sha256, false], name);
+  }
+});
+
+test("an entry without a decoded size is sent whole and chunked, whatever its Size", { skip }, async () => {
+  for (const name of ["size-zero", "stored-size"]) {
+    const wire = await wireGet(`/${name}.txt`);
+    assert.equal(wire.status, 200, name);
+    assert.equal(wire.headers["content-length"], undefined, name);
+    assert.equal(wire.headers["transfer-encoding"], "chunked", name);
+    assert.deepEqual([wire.size, wire.sha256, wire.aborted], [manifest.text.size, manifest.text.sha256, false], name);
   }
 });
 

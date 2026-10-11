@@ -60,7 +60,7 @@ async function ok(cell, path, body) {
 function manifest(uploadId, files) {
   return {
     Files: Object.fromEntries(Object.entries(files).map(([path, contentType], n) => [path, {
-      Key: `uploads/${uploadId}/${n}`, Size: 10 + n, CompressedSize: 5 + n, ContentType: contentType, Kind: "",
+      Key: `uploads/${uploadId}/${n}`, Size: 10 + n, DecodedSize: 10 + n, CompressedSize: 5 + n, ContentType: contentType, Kind: "",
     }])),
   };
 }
@@ -97,7 +97,7 @@ function assertSmall(res, ...secrets) {
     assert.ok(ANSWER_FIELDS.has(field), `answer field ${field}`);
   }
   if (res.body.entry) {
-    assert.deepEqual(Object.keys(res.body.entry).sort(), ["contentType", "key", "size"]);
+    assert.deepEqual(Object.keys(res.body.entry).sort(), ["contentType", "decodedSize", "key"]);
   }
   for (const secret of [OWNER, NAME, ...secrets]) {
     assert.ok(!res.text.includes(secret), `answer carries ${secret}`);
@@ -118,7 +118,7 @@ test("resolve answers a stored document", async () => {
   const raw = await call(paste(), resolvePath("docslug1", "/", "&raw=1"));
   assertSmall(raw, generation);
   assert.deepEqual(raw.body, {
-    action: "raw", ...common, entry: { key: "uploads/upload-doc/0", contentType: "", size: 10 },
+    action: "raw", ...common, entry: { key: "uploads/upload-doc/0", contentType: "", decodedSize: 10 },
   });
 
   assert.deepEqual((await call(paste(), resolvePath("docslug1", "/deeper"))).body, { action: "notfound", ...common });
@@ -141,7 +141,7 @@ test("resolve answers a stored site from its served version only", async () => {
   assertSmall(file, generation, "upload-old");
   assert.equal(file.body.action, "file");
   assert.equal(file.body.uploadId, "upload-new");
-  assert.deepEqual(file.body.entry, { key: "uploads/upload-new/1", contentType: "text/css; charset=utf-8", size: 11 });
+  assert.deepEqual(file.body.entry, { key: "uploads/upload-new/1", contentType: "text/css; charset=utf-8", decodedSize: 11 });
 
   const route = await call(paste(), resolvePath("siteslg1", "/users/1"));
   assertSmall(route, generation, "upload-old");

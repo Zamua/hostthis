@@ -135,6 +135,7 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 	e.man.Add(rel, ManifestEntry{
 		Key:            key,
 		Size:           int(capped.read),
+		DecodedSize:    int(capped.read),
 		CompressedSize: compressedSize,
 		ContentType:    ContentTypeForPath(rel),
 	})

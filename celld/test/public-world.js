@@ -111,11 +111,12 @@ export async function assertGolden(res, name) {
   assert.equal(sha256(body), want.sha256, name);
 }
 
-// A document stored at uploads/a/0, size bytes when decoded.
+// A document stored at uploads/a/0, size bytes when decoded, as current writes
+// record it.
 export function documentRow(kind, status = "ready", size = 23) {
   return {
     kind, status, updatedAt: UPDATED, uploadId: "ua",
-    manifest: { Files: { "/": { Key: "uploads/a/0", Size: size, CompressedSize: 20, ContentType: "", Kind: kind } } },
+    manifest: { Files: { "/": { Key: "uploads/a/0", Size: size, DecodedSize: size, CompressedSize: 20, ContentType: "", Kind: kind } } },
   };
 }
 
