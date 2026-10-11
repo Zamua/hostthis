@@ -366,11 +366,17 @@ async function roomPush(request, env, app, route) {
   return method === "POST" ? testPush(room) : methodNotAllowed("POST");
 }
 
-// A push write's answer: 404 and the cap the caller can act on are statuses
-// of their own, anything else past 2xx is a fault, as in internal/celld.
+// A push write's answer: 404, a refusal and the cap the caller can act on are
+// statuses of their own, anything else past 2xx is a fault, as in
+// internal/celld. The cell is the last judge of a write (it alone knows which
+// zones exist), so its 400 is invalid input naming its rule.
 function pushWritten(res, capCode) {
   if (res.status === 404) {
     return notFound();
+  }
+  if (res.status === 400) {
+    const code = typeof res.body?.error === "string" && res.body.error ? `: ${res.body.error}` : "";
+    return goError(400, `push: invalid${code}\n`);
   }
   if (res.status === 413 && res.body?.error === capCode) {
     return goError(413, "room is at its push subscription cap\n");

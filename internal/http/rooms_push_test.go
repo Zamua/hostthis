@@ -247,6 +247,40 @@ func TestPushHTTP_Schedule(t *testing.T) {
 	}
 }
 
+// A push write the router accepts but the Room cell refuses is a 400 naming
+// the cell's rule, never a 500, and the cell alone decides which zones exist,
+// so both servers answer a zone the same way.
+func TestPushHTTP_WriteTheCellRefusesIs400(t *testing.T) {
+	srv := buildRoomServer(t)
+	const slug = "appz2345"
+	id := createRoomID(t, srv, slug)
+	path := "/api/rooms/" + id + "/push/schedule"
+
+	comma := strings.Replace(futureWhen, "Z", ",5Z", 1)
+	for body, want := range map[string]string{
+		`{"tz":"Mars/Olympus","items":[]}`: "push: invalid: invalid-tz\n\n",
+		`{"tz":"Local","items":[]}`:        "push: invalid: invalid-tz\n\n",
+		`{"tz":"UTC","items":[{"id":"x","when":"` + comma + `","title":"t","body":"b"}]}`: "push: invalid: invalid-when\n\n",
+	} {
+		w := req(t, srv, http.MethodPut, slug, path, []byte(body))
+		if w.Code != http.StatusBadRequest || w.Body.String() != want {
+			t.Errorf("%s: code %d body %q, want 400 %q", body, w.Code, w.Body.String(), want)
+		}
+	}
+	for _, tz := range []string{"utc", "america/new_york"} {
+		w := req(t, srv, http.MethodPut, slug, path, []byte(`{"tz":"`+tz+`","items":[]}`))
+		if w.Code != http.StatusNoContent {
+			t.Errorf("tz %q: code %d body %q, want 204", tz, w.Code, w.Body.String())
+		}
+	}
+
+	sub := strings.Replace(string(pushSubJSON(1)), "fcm.googleapis.com/", "fcm.googleapis.com:99999/", 1)
+	w := req(t, srv, http.MethodPut, slug, "/api/rooms/"+id+"/push/subscriptions", []byte(sub))
+	if w.Code != http.StatusBadRequest || w.Body.String() != "push: invalid: invalid-endpoint\n\n" {
+		t.Errorf("port past 65535: code %d body %q, want 400 invalid-endpoint", w.Code, w.Body.String())
+	}
+}
+
 func TestPushHTTP_Test(t *testing.T) {
 	srv := buildRoomServer(t)
 	const slug = "appz2345"

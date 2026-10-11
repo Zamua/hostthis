@@ -166,20 +166,17 @@ func (it PushItem) WhenTime() (time.Time, error) {
 // key; the real date is substituted at send time.
 const pushDateSample = "2026-09-06"
 
-// ValidatePushSchedule applies every rule in the spec to the whole document;
-// a one-shot item must fall strictly after now. The first violation is
-// returned; nothing is applied partially.
+// ValidatePushSchedule applies the spec's rules to the whole document; a
+// one-shot item must fall strictly after now. The first violation is
+// returned; nothing is applied partially. Whether tz names a zone is left to
+// the backend that schedules in it: this process's zone database is not the
+// one the schedule runs on.
 func ValidatePushSchedule(s PushSchedule, now time.Time) error {
 	if len(s.Items) > MaxPushItems {
 		return fmt.Errorf("%w: more than %d items", ErrPushInvalid, MaxPushItems)
 	}
 	if s.TZ == "" {
 		return fmt.Errorf("%w: tz is required", ErrPushInvalid)
-	}
-	// LoadLocation("Local") resolves to the process zone, which no client
-	// means by an IANA name.
-	if _, err := time.LoadLocation(s.TZ); err != nil || s.TZ == "Local" {
-		return fmt.Errorf("%w: unknown tz %q", ErrPushInvalid, s.TZ)
 	}
 	seen := make(map[string]struct{}, len(s.Items))
 	for i, it := range s.Items {
