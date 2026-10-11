@@ -134,7 +134,7 @@ func main() {
 	// A decorator, so a mutation invalidates the edge cache for its slug while
 	// the verb service stays cache-unaware (SPEC "Active invalidation:
 	// CachePurger"). Noop unless a CDN is configured.
-	cachePurger := buildCachePurger(logger, *scheme, *apexDomain, *urlMode)
+	cachePurger := buildCachePurger(logger, *apexDomain, *urlMode)
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 
 	// Own registry rather than the default one, so no collector arrives via a
@@ -301,10 +301,9 @@ func buildBlobStore(logger *log.Logger) (*storage.CompressedBlobStore, error) {
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
-// CachePurger, defaulting to Noop. scheme/apex/mode let the cloudflare adapter
-// build every public URL variant of a slug (the page plus the markdown shell's
-// "?raw=1" fetch), so a purge invalidates every cache key it is reachable at.
-func buildCachePurger(logger *log.Logger, scheme, apex, mode string) service.CachePurger {
+// CachePurger, defaulting to Noop. apex/mode let the cloudflare adapter name a
+// slug's host (or path prefix), so a purge covers every URL the slug answers.
+func buildCachePurger(logger *log.Logger, apex, mode string) service.CachePurger {
 	backend := strings.ToLower(envOr("HOSTTHIS_CACHE_BACKEND", "noop"))
 	switch backend {
 	case "", "noop":
@@ -316,7 +315,7 @@ func buildCachePurger(logger *log.Logger, scheme, apex, mode string) service.Cac
 			logger.Fatalf("HOSTTHIS_CACHE_BACKEND=cloudflare requires HOSTTHIS_CF_ZONE_ID and HOSTTHIS_CF_PURGE_TOKEN")
 		}
 		logger.Printf("cache: cloudflare purger enabled for zone %s", zone)
-		return &cache.Cloudflare{ZoneID: zone, Token: token, Scheme: scheme, Apex: apex, Mode: mode, Logger: logger}
+		return &cache.Cloudflare{ZoneID: zone, Token: token, Apex: apex, Mode: mode, Logger: logger}
 	default:
 		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
 		return nil

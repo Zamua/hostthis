@@ -147,10 +147,9 @@ func TestServeAsset_WhitelistAndDeny(t *testing.T) {
 }
 
 // Every shell's bootstrap fetches "<path>?raw=1", and the knowledge base shell
-// fetches "<path>?files=1" for its file list as well. Those are the suffixes
-// internal/cache/urls.go purges alongside the bare URL. A shell fetching any
-// other query would serve stale bytes after an edit with nothing failing.
-func TestShells_FetchRawQueryInLockstepWithCachePurge(t *testing.T) {
+// fetches "<path>?files=1" for its file list as well: the queries the read
+// path answers with the bytes and the list.
+func TestShells_FetchRawAndFilesQueries(t *testing.T) {
 	// The queries each kind's scripts must spell. Absent means "?raw=1" alone.
 	extra := map[domain.ContentKind][]string{
 		domain.KindKnowledgeBase: {`"?files=1"`},
