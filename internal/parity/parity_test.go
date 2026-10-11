@@ -11,6 +11,7 @@
 package parity
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,12 @@ func TestParityAgainstURLs(t *testing.T) {
 	cfg, ok := readExternalConfig(t)
 	if !ok {
 		t.Fatal("the environment did not configure a run")
+	}
+	// A resolver that does not map names under localhost to loopback (RFC
+	// 6761) cannot dial the public hosts; the daemon's address stands in.
+	if _, err := net.LookupHost(slugs[0] + "." + w.apex); err != nil {
+		t.Logf("names under %s do not resolve (%v); dialing hostthisd at %s", w.apex, err, w.hostthisd.addr)
+		cfg.pin = w.hostthisd.addr
 	}
 	ext := externalWorld(t, cfg)
 	if len(ext.slugs) != len(slugs) || len(ext.slugs[2].targets) == 0 || len(ext.slugs[3].targets) == 0 {
