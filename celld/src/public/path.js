@@ -69,19 +69,37 @@ export function escapePath(path) {
 
 const HTML_ESCAPES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&#34;", "'": "&#39;" };
 
-// ServeMux's redirect of a path that is not clean: 307, query kept, and for
-// GET and HEAD the body http.Redirect writes. Null for a clean path.
-export function cleanRedirect(method, pathname, search) {
-  const cleaned = cleanPath(pathname);
-  if (cleaned === pathname) {
-    return null;
-  }
-  const location = escapePath(decodePath(cleaned) ?? cleaned) + search;
+// http.Redirect with 307: for GET and HEAD a Content-Type, and for GET the
+// body it writes.
+function temporaryRedirect(method, location) {
   const headers = { Location: location };
   if (method !== "GET" && method !== "HEAD") {
     return new Response(null, { status: 307, headers });
   }
   headers["Content-Type"] = "text/html; charset=utf-8";
+  if (method === "HEAD") {
+    return new Response(null, { status: 307, headers });
+  }
   const href = location.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]);
   return new Response(`<a href="${href}">Temporary Redirect</a>.\n\n`, { status: 307, headers });
+}
+
+// ServeMux's redirect of a path that is not clean: 307, query kept. Null for a
+// clean path.
+export function cleanRedirect(method, pathname, search) {
+  const cleaned = cleanPath(pathname);
+  if (cleaned === pathname) {
+    return null;
+  }
+  return temporaryRedirect(method, escapePath(decodePath(cleaned) ?? cleaned) + search);
+}
+
+// The one subtree hostthisd registers, /_hostthis/, which ServeMux answers
+// for its root named without the slash with a 307 to /_hostthis/, ahead of
+// any cleaning. Null for any other path.
+export function subtreeRedirect(method, pathname, search) {
+  if (decodePath(cleanPath(pathname)) !== "/_hostthis") {
+    return null;
+  }
+  return temporaryRedirect(method, `/_hostthis/${search}`);
 }

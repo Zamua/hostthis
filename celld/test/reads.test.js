@@ -1,0 +1,613 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import test from "node:test";
+
+import { listAssets, REPO } from "../build/shells.mjs";
+import worker, { Paste } from "../src/index.js";
+import { goStringList } from "../src/public/gojson.js";
+import { rawContentType, renderShell } from "../src/public/shells.js";
+import { FakeStorage, state } from "./harness.js";
+import { bucket, stored } from "./stored.js";
+
+const APEX = "paste.test";
+const SLUG = "abc23456";
+const TOKEN = "t0ken";
+const FORWARDED = "X-Hostthis-Forwarded-Host";
+const UPDATED = Date.UTC(2026, 5, 7, 14);
+const golden = JSON.parse(readFileSync(join(REPO, "testdata", "shells-golden.json"), "utf8"));
+const vectors = JSON.parse(readFileSync(join(REPO, "testdata", "read-vectors.json"), "utf8"));
+
+// The public Worker over real Paste cells in memory and a recording payload
+// bucket. Every request a Paste cell receives is recorded.
+function world(vars = {}) {
+  const storages = new Map();
+  const cellRequests = [];
+  const payloadCalls = [];
+  const payloads = bucket(new Map(), payloadCalls);
+  const assetCalls = [];
+  const storageOf = (slug) => {
+    if (!storages.has(slug)) storages.set(slug, new FakeStorage());
+    return storages.get(slug);
+  };
+  const env = {
+    HOSTTHIS_APEX_DOMAIN: APEX,
+    HOSTTHIS_CELLD_TOKEN: TOKEN,
+    ...vars,
+    PAYLOADS: payloads,
+    PASTES: {
+      idFromName: (name) => name,
+      get: (name) => ({
+        async fetch(request) {
+          const body = request.body ? await request.text() : null;
+          cellRequests.push({ name, method: request.method, url: request.url, body });
+          const init = { method: request.method, headers: request.headers };
+          if (body !== null) init.body = body;
+          return new Paste(state(storageOf(name)), env).fetch(new Request(request.url, init));
+        },
+      }),
+    },
+  };
+  const waits = [];
+  const ctx = { waitUntil: (promise) => waits.push(promise) };
+  const w = {
+    env,
+    ctx,
+    waits,
+    storageOf,
+    cellRequests,
+    payloadCalls,
+    assetCalls,
+    row(slug, row) {
+      storageOf(slug).data.set("row", structuredClone(row));
+    },
+    blob(key, content) {
+      payloads.objects.set(key, typeof content === "string" || content instanceof Uint8Array ? stored(content) : content);
+    },
+    // Raw bytes, as the deploy stores renderer assets.
+    object(key, bytes) {
+      payloads.objects.set(key, bytes);
+    },
+    assets(serve) {
+      env.ASSETS = {
+        async fetch(request) {
+          assetCalls.push(`${request.method} ${new URL(request.url).pathname}`);
+          return serve(request);
+        },
+      };
+    },
+    fetch(url, init = {}) {
+      return worker.fetch(new Request(url, init), env, ctx);
+    },
+  };
+  return w;
+}
+
+const at = (path, slug = SLUG) => `https://${slug}.${APEX}${path}`;
+
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function headersOf(res) {
+  const out = {};
+  for (const [name, value] of res.headers) {
+    if (name !== "content-length") out[name] = value;
+  }
+  return out;
+}
+
+// The response equals hostthisd's record: status, every header, and the body.
+async function assertGolden(res, name) {
+  const want = golden[name];
+  assert.ok(want, `no golden ${name}`);
+  assert.equal(res.status, want.status, name);
+  const wantHeaders = Object.fromEntries(Object.entries(want.header).map(([k, v]) => [k.toLowerCase(), v]));
+  assert.deepEqual(headersOf(res), wantHeaders, name);
+  const body = new Uint8Array(await res.arrayBuffer());
+  assert.equal(body.length, want.size, name);
+  assert.equal(sha256(body), want.sha256, name);
+}
+
+function documentRow(kind, status = "ready") {
+  return {
+    kind, status, updatedAt: UPDATED, uploadId: "ua",
+    manifest: { Files: { "/": { Key: "uploads/a/0", Size: 23, CompressedSize: 20, ContentType: "", Kind: kind } } },
+  };
+}
+
+const SHELL_KINDS = Object.keys(golden).filter((k) => k.startsWith("shell/")).map((k) => k.slice("shell/".length));
+const RAW_SOURCE = "# title\n\nsome **body**\n";
+
+// internal/http's buildKBServer.
+const KB_FILES = {
+  "README.md": ["key-readme", "# notes\n"],
+  "guide/setup.md": ["key-setup", "# setup\n"],
+  "guide/diagram.png": ["key-png", "\x89PNG"],
+  "guide/index.html": ["key-guide-index", "<h1>guide index</h1>"],
+  "report.html": ["key-html", "<h1>report</h1>"],
+  "files.json": ["key-files", "{\"own\":\"file\"}"],
+};
+
+function kbWorld(w) {
+  const files = Object.fromEntries(Object.entries(KB_FILES)
+    .map(([path, [key]]) => [path, { Key: key, Size: 4, ContentType: "", Kind: "" }]));
+  w.row(SLUG, { kind: "knowledgebase", status: "ready", updatedAt: UPDATED, uploadId: "up-kb", manifest: { Files: files } });
+  for (const [key, content] of Object.values(KB_FILES)) w.blob(key, content);
+}
+
+// internal/http's escapingKBPaths.
+const ESCAPING_PATHS = [
+  "a<b>&c.md", "line\u2028sep\u2029.md", "quote\"back\\slash.md", "tab\tnl\n.md", "ctl\x01\x1f\b\f.md",
+  "del\x7f.md", "\u00e9.md", "\u{1d11e}.md", "\ue000.md", "z.md",
+];
+
+test("shells and raw bytes are hostthisd's, byte for byte", async () => {
+  assert.ok(SHELL_KINDS.length >= 10);
+  for (const kind of SHELL_KINDS) {
+    const w = world();
+    w.row(SLUG, documentRow(kind));
+    w.blob("uploads/a/0", RAW_SOURCE);
+    await assertGolden(await w.fetch(at("/")), `shell/${kind}`);
+    await assertGolden(await w.fetch(at("/?raw=1")), `raw/${kind}`);
+  }
+});
+
+test("a knowledge base's shell, documents and file list are hostthisd's", async () => {
+  const w = world();
+  kbWorld(w);
+  for (const [name, path] of [["kb/root", "/"], ["kb/document", "/guide/setup.md"], ["kb/raw", "/guide/setup.md?raw=1"],
+    ["kb/files", "/?files=1"]]) {
+    await assertGolden(await w.fetch(at(path)), name);
+  }
+});
+
+test("the file list is json.Encoder's bytes: HTML and line separator escapes, UTF-8 order", async () => {
+  const w = world();
+  const files = Object.fromEntries(ESCAPING_PATHS.map((path, i) => [path, { Key: `key-${i}`, Size: 1 }]));
+  w.row(SLUG, { kind: "knowledgebase", status: "ready", updatedAt: UPDATED, uploadId: "up-escapes", manifest: { Files: files } });
+  await assertGolden(await w.fetch(at("/?files")), "kb/files-escapes");
+  assert.equal(goStringList(["<&>"]), "[\"\\u003c\\u0026\\u003e\"]\n");
+  assert.equal(goStringList(["\ud800x"]), "[\"\\ufffdx\"]\n");
+});
+
+test("pending, failed, unknown slugs, redirects and health are hostthisd's", async () => {
+  for (const [name, status] of [["status/pending", "pending"], ["status/failed", "failed"]]) {
+    const w = world();
+    w.row(SLUG, documentRow("markdown", status));
+    await assertGolden(await w.fetch(at("/")), name);
+  }
+  const w = world();
+  await assertGolden(await w.fetch(at("/")), "error/notfound");
+  await assertGolden(await w.fetch(at("/a//b?raw=1")), "redirect/clean");
+  await assertGolden(await w.fetch(at("/a//b"), { method: "HEAD" }), "redirect/head");
+  await assertGolden(await w.fetch(at("/_hostthis?v=x")), "redirect/tree");
+  await assertGolden(await w.fetch(at("/healthz")), "health/healthz");
+  await assertGolden(await w.fetch(at("/readyz")), "health/readyz");
+  await assertGolden(await w.fetch(at("//healthz")), "health/redirect");
+  // Health answers on every public host, as hostthisd's does on any Host.
+  for (const host of [APEX, `www.${APEX}`, `a.b.${APEX}`]) {
+    await assertGolden(await w.fetch(`https://${host}/healthz`), "health/healthz");
+  }
+  assert.deepEqual(w.payloadCalls, []);
+});
+
+// The answer each shared read vector names, served as hostthisd serves it.
+function expectFor(v, row) {
+  const want = v.want;
+  if (want.found === false || want.action === "notfound") return { status: 404, body: "404 page not found\n" };
+  if (want.status === "pending") return { status: 200, golden: "status/pending" };
+  if (want.status === "failed") return { status: 410, golden: "status/failed" };
+  const validators = (etag) => ({ etag, "last-modified": new Date(row.updatedAt).toUTCString(), "cache-control": "public, no-cache" });
+  switch (want.action) {
+    case "html":
+    case "raw":
+    case "file":
+    case "kbraw": {
+      const types = {
+        html: "text/html; charset=utf-8",
+        raw: rawContentType(want.kind) ?? "text/plain; charset=utf-8",
+        file: want.entry.contentType || "application/octet-stream",
+        kbraw: rawContentType("knowledgebase"),
+      };
+      return {
+        status: 200, body: `bytes of ${want.entry.key}`, blob: want.entry.key,
+        headers: { ...validators(`"${want.entry.key}"`), "content-type": types[want.action] },
+      };
+    }
+    case "shell":
+    case "kbshell": {
+      const shell = renderShell(want.shell);
+      if (!shell) return { status: 500, body: "unsupported kind\n" };
+      return {
+        status: 200, body: shell.body,
+        headers: { ...validators(`"${shell.version}"`), "content-type": "text/html; charset=utf-8", "content-security-policy": shell.csp },
+      };
+    }
+    case "files":
+      return {
+        status: 200, json: want.files,
+        headers: { ...validators(`"files-${want.uploadId}"`), "content-type": "application/json; charset=utf-8" },
+      };
+    default:
+      throw new Error(`unhandled vector answer ${JSON.stringify(want)}`);
+  }
+}
+
+function vectorURL(v) {
+  const query = [v.request.raw && "raw=1", v.request.files && "files=1"].filter(Boolean).join("&");
+  return at(v.request.path.split("/").map(encodeURIComponent).join("/") + (query ? `?${query}` : ""));
+}
+
+for (const v of vectors.vectors) {
+  test(`read vector through the router: ${v.name}`, async () => {
+    const w = world();
+    const row = v.row === null ? null : vectors.rows[v.row];
+    if (row) {
+      w.row(SLUG, row);
+    }
+    if (v.want.entry?.key) {
+      w.blob(v.want.entry.key, `bytes of ${v.want.entry.key}`);
+    }
+    const want = expectFor(v, row);
+    for (const method of ["GET", "HEAD"]) {
+      w.payloadCalls.length = 0;
+      const res = await w.fetch(vectorURL(v), { method });
+      assert.equal(res.status, want.status, method);
+      for (const [name, value] of Object.entries(want.headers ?? {})) {
+        assert.equal(res.headers.get(name), value, `${method} ${name}`);
+      }
+      if (want.status === 200) {
+        assert.equal(res.headers.get("x-frame-options"), "DENY");
+        assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+      }
+      const body = await res.text();
+      if (method === "HEAD") {
+        assert.equal(body, "");
+        assert.deepEqual(w.payloadCalls, [], "a HEAD reads no payload");
+        continue;
+      }
+      if (want.golden) await assertGolden(await w.fetch(vectorURL(v)), want.golden);
+      else if (want.json) assert.deepEqual(JSON.parse(body), want.json);
+      else assert.equal(body, want.body);
+      assert.deepEqual(w.payloadCalls, want.blob ? [`get ${want.blob}`] : []);
+    }
+  });
+}
+
+test("a conditional request is answered before any payload is read, comparing weakly", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("html"));
+  w.blob("uploads/a/0", "<h1>hi</h1>");
+  const lastModified = new Date(UPDATED).toUTCString();
+  const notModified = [
+    { "If-None-Match": "\"uploads/a/0\"" },
+    { "If-None-Match": "W/\"uploads/a/0\"" },
+    { "If-None-Match": "\"other\", W/\"uploads/a/0\"" },
+    { "If-None-Match": " * " },
+    { "If-Modified-Since": lastModified },
+    { "If-Modified-Since": "Sun, 07 Jun 2026 14:00:00.5 GMT" },
+    { "If-Modified-Since": "sun, 07 jun 2026 14:00:01 GMT" },
+    { "If-Modified-Since": "Sunday, 07-Jun-26 14:00:00 EST" },
+    { "If-Modified-Since": "Sun Jun  7 14:00:00 2026" },
+    { "If-None-Match": "\"other\"", "If-Modified-Since": lastModified },
+  ];
+  for (const headers of notModified) {
+    w.payloadCalls.length = 0;
+    const res = await w.fetch(at("/"), { headers });
+    assert.equal(res.status, 304, JSON.stringify(headers));
+    assert.equal(await res.text(), "");
+    assert.equal(res.headers.get("ETag"), "\"uploads/a/0\"");
+    assert.equal(res.headers.get("Last-Modified"), lastModified);
+    assert.equal(res.headers.get("Cache-Control"), "public, no-cache");
+    assert.equal(res.headers.get("Content-Type"), null);
+    assert.deepEqual(w.payloadCalls, []);
+  }
+  const modified = [
+    { "If-None-Match": "\"uploads/a/1\"" },
+    { "If-Modified-Since": "Sun, 07 Jun 2026 13:59:59 GMT" },
+    { "If-Modified-Since": "yesterday" },
+    { "If-Modified-Since": "Sun, 31 Jun 2026 14:00:00 GMT" },
+    { "If-Modified-Since": "Sun, 07 Jun 2026 14:00:00 UTC" },
+    { "If-Modified-Since": "Sun, 7 Jun 2026 14:00:00 GMT" },
+  ];
+  for (const headers of modified) {
+    const res = await w.fetch(at("/"), { headers });
+    assert.equal(res.status, 200, JSON.stringify(headers));
+    assert.equal(await res.text(), "<h1>hi</h1>");
+  }
+  // A shell's 304 carries the validators and no CSP or Content-Type.
+  w.row(SLUG, documentRow("markdown"));
+  const shell = renderShell("markdown");
+  const res = await w.fetch(at("/"), { headers: { "If-None-Match": `"${shell.version}"` } });
+  assert.equal(res.status, 304);
+  assert.equal(res.headers.get("Content-Security-Policy"), null);
+});
+
+test("reads answer GET and HEAD only, before any cell call", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("html"));
+  w.blob("uploads/a/0", "<h1>hi</h1>");
+  for (const method of ["POST", "PUT", "DELETE", "PATCH", "OPTIONS"]) {
+    for (const path of ["/", "/x.png", "/_hostthis/md.js"]) {
+      const init = { method };
+      if (method !== "OPTIONS") init.body = "x";
+      const res = await w.fetch(at(path), init);
+      assert.equal(res.status, 405, `${method} ${path}`);
+      assert.equal(res.headers.get("Allow"), "GET, HEAD");
+      assert.equal(await res.text(), "Method Not Allowed\n");
+    }
+    // Health answers every method, as hostthisd's does.
+    assert.equal((await w.fetch(at("/healthz"), { method })).status, 200, method);
+  }
+  assert.deepEqual(w.cellRequests, []);
+  assert.deepEqual(w.payloadCalls, []);
+});
+
+test("the path is decoded once and a malformed escape is a 400", async () => {
+  const w = world();
+  w.row(SLUG, {
+    kind: "site", status: "ready", updatedAt: UPDATED, uploadId: "us",
+    manifest: { Files: {
+      "index.html": { Key: "k-index", ContentType: "text/html; charset=utf-8" },
+      "a b/ünï.txt": { Key: "k-text", ContentType: "text/plain; charset=utf-8" },
+      "lit%20eral.txt": { Key: "k-literal", ContentType: "text/plain; charset=utf-8" },
+    } },
+  });
+  for (const key of ["k-index", "k-text", "k-literal"]) w.blob(key, key);
+  assert.equal(await (await w.fetch(at("/a%20b/%C3%BCn%C3%AF.txt"))).text(), "k-text");
+  assert.equal(await (await w.fetch(at("/lit%2520eral.txt"))).text(), "k-literal");
+  // The URL parser resolves dot segments before the Worker sees the path.
+  assert.equal(await (await w.fetch(at("/x/../a%20b/%C3%BCn%C3%AF.txt"))).text(), "k-text");
+  for (const path of ["/%zz", "/a%2", "/%"]) {
+    const res = await w.fetch(at(path));
+    assert.equal(res.status, 400, path);
+    assert.equal(await res.text(), "400 Bad Request");
+  }
+  const res = await w.fetch(at("/x//y?raw"), { method: "POST" });
+  assert.equal(res.status, 307);
+  assert.equal(res.headers.get("Location"), "/x/y?raw");
+  assert.equal(res.headers.get("Content-Type"), null);
+});
+
+test("flags parse as Go's URL.Query().Has does", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("markdown"));
+  w.blob("uploads/a/0", RAW_SOURCE);
+  const raw = ["?raw", "?raw=", "?raw=0", "?r%61w", "?x=1&raw", "?raw=a+b", "?a=1;b&raw", "?raw&raw"];
+  const shell = ["", "?", "?RAW", "?raw;x", "?raw=%zz", "?r%zzaw", "?rawx", `?${"x&".repeat(10000)}raw`];
+  for (const query of raw) {
+    assert.equal(await (await w.fetch(at(`/${query}`))).text(), RAW_SOURCE, query);
+  }
+  for (const query of shell) {
+    assert.equal(await (await w.fetch(at(`/${query}`))).text(), renderShell("markdown").body, query);
+  }
+});
+
+test("the cell sees only the parsed slug, path and flags, and nothing changes", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("html"));
+  w.blob("uploads/a/0", "<h1>hi</h1>");
+  const before = structuredClone([...w.storageOf(SLUG).data]);
+  const opsSource = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+  const ops = [...opsSource.matchAll(/^ {2}(\w+): (?:read|mutation)\(/gm)].map((m) => m[1]);
+  assert.ok(ops.includes("put") && ops.includes("remove") && ops.length > 20, `${ops}`);
+  const paths = [
+    "/", "/__cell/image", "/__cell/restore", `/blob/uploads/x/0`, "/blob?prefix=uploads/x/",
+    ...ops.flatMap((op) => [`/?op=${op}`, `/paste/${op}?slug=${SLUG}`, `/x?op=${op}&slug=other&path=/x&raw=1`]),
+  ];
+  const targets = [
+    (path) => [at(path), {}],
+    (path) => [`http://${APEX}/p/${SLUG}${path}`, {}],
+    (path) => [`http://celld.internal${path}`, { Authorization: `Bearer ${TOKEN}`, [FORWARDED]: `${SLUG}.${APEX}` }],
+  ];
+  const env = { HOSTTHIS_URL_MODE: "path" };
+  Object.assign(w.env, env);
+  for (const target of targets) {
+    for (const path of paths) {
+      for (const method of ["GET", "HEAD", "POST", "DELETE"]) {
+        const [url, headers] = target(path);
+        const init = { method, headers };
+        if (method === "POST") init.body = "{\"slug\":\"other\"}";
+        await (await w.fetch(url, init)).arrayBuffer();
+      }
+    }
+  }
+  assert.ok(w.cellRequests.length > 0);
+  for (const r of w.cellRequests) {
+    const url = new URL(r.url);
+    assert.equal(r.name, SLUG);
+    assert.equal(r.method, "GET");
+    assert.equal(r.body, null);
+    assert.equal(url.pathname, "/paste/resolve");
+    assert.deepEqual([...url.searchParams.keys()].filter((k) => !["raw", "files"].includes(k)), ["slug", "path"]);
+    assert.equal(url.searchParams.get("slug"), SLUG);
+  }
+  assert.deepEqual(structuredClone([...w.storageOf(SLUG).data]), before);
+  assert.ok(w.payloadCalls.every((c) => c === "get uploads/a/0"), `${w.payloadCalls}`);
+});
+
+test("path mode serves /p/<slug> on the apex host only", async () => {
+  const w = world({ HOSTTHIS_URL_MODE: "path" });
+  w.row(SLUG, {
+    kind: "site", status: "ready", updatedAt: UPDATED, uploadId: "us",
+    manifest: { Files: { "index.html": { Key: "k-index" }, "x/y.txt": { Key: "k-y", ContentType: "text/plain" } } },
+  });
+  w.blob("k-index", "index");
+  w.blob("k-y", "y");
+  assert.equal(await (await w.fetch(`http://${APEX}/p/${SLUG}`)).text(), "index");
+  assert.equal(await (await w.fetch(`http://${APEX}/p/${SLUG}/`)).text(), "index");
+  assert.equal(await (await w.fetch(`http://${APEX}/p/${SLUG}/x/y.txt`)).text(), "y");
+  for (const url of [`http://${APEX}/p/ABC23456`, `http://${APEX}/p/`, `http://www.${APEX}/p/${SLUG}`, `http://${APEX}/`]) {
+    assert.equal((await w.fetch(url)).status, 404, url);
+  }
+  const subdomain = world();
+  subdomain.row(SLUG, documentRow("html"));
+  assert.equal((await subdomain.fetch(`http://${APEX}/p/${SLUG}`)).status, 404);
+});
+
+test("a forwarded read answers as the direct one", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("markdown"));
+  w.blob("uploads/a/0", RAW_SOURCE);
+  for (const path of ["/", "/?raw=1", "/missing.png"]) {
+    const direct = await w.fetch(at(path));
+    const forwarded = await w.fetch(`http://celld.internal${path}`, {
+      headers: { Authorization: `Bearer ${TOKEN}`, [FORWARDED]: `${SLUG}.${APEX}` },
+    });
+    assert.equal(forwarded.status, direct.status, path);
+    assert.deepEqual(headersOf(forwarded), headersOf(direct), path);
+    assert.equal(await forwarded.text(), await direct.text(), path);
+  }
+  const denied = await w.fetch(`http://celld.internal/`, { headers: { [FORWARDED]: `${SLUG}.${APEX}` } });
+  assert.equal(denied.status, 401);
+});
+
+async function capturingWarnings(run) {
+  const warned = [];
+  const original = console.warn;
+  console.warn = (...args) => warned.push(args.join(" "));
+  try {
+    await run();
+  } finally {
+    console.warn = original;
+  }
+  return warned;
+}
+
+async function assertInternalError(res) {
+  assert.equal(res.status, 500);
+  assert.equal(await res.text(), "internal error\n");
+  assert.deepEqual(headersOf(res), { "content-type": "text/plain; charset=utf-8", "x-content-type-options": "nosniff" });
+}
+
+test("a payload that is missing or damaged before the first byte is a 500 with one warning", async () => {
+  const damaged = stored("<h1>hi</h1>");
+  damaged[0] = 0x58;
+  for (const [what, setup] of [
+    ["missing", () => {}],
+    ["bad magic", (w) => w.object("uploads/a/0", damaged)],
+    ["empty object", (w) => w.object("uploads/a/0", new Uint8Array(0))],
+    ["magic only", (w) => w.object("uploads/a/0", stored("").subarray(0, 4))],
+  ]) {
+    const w = world();
+    w.row(SLUG, documentRow("html"));
+    setup(w);
+    const warned = await capturingWarnings(async () => assertInternalError(await w.fetch(at("/"))));
+    assert.equal(warned.length, 1, what);
+    assert.match(warned[0], new RegExp(`slug=${SLUG} `), what);
+    // HEAD opens nothing, so it cannot see the damage.
+    assert.equal((await w.fetch(at("/"), { method: "HEAD" })).status, 200, what);
+  }
+});
+
+test("damage found after the first byte errors the body and logs one warning", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("html"));
+  const content = new Uint8Array(300 * 1024).fill(0x61);
+  const truncated = stored(content);
+  w.object("uploads/a/0", truncated.subarray(0, truncated.length - 10));
+  const warned = await capturingWarnings(async () => {
+    const res = await w.fetch(at("/"));
+    assert.equal(res.status, 200);
+    await assert.rejects(res.arrayBuffer(), /truncated/);
+  });
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], new RegExp(`slug=${SLUG} .*truncated`));
+});
+
+test("a metadata failure is a 500 with one warning", async () => {
+  const w = world();
+  w.env.PASTES = {
+    idFromName: (name) => name,
+    get: () => ({ fetch: async () => new Response("cell busy\n", { status: 503 }) }),
+  };
+  const warned = await capturingWarnings(async () => assertInternalError(await w.fetch(at("/"))));
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], new RegExp(`slug=${SLUG} metadata`));
+});
+
+test("a stored kind with no shell is a 500 naming it", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("hologram"));
+  const warned = await capturingWarnings(async () => {
+    const res = await w.fetch(at("/"));
+    assert.equal(res.status, 500);
+    assert.equal(await res.text(), "unsupported kind\n");
+  });
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /hologram/);
+});
+
+const assetSources = new Map(listAssets().map((a) => [a.name, a]));
+
+function staticAssets(request) {
+  const name = new URL(request.url).pathname.slice("/_hostthis/".length);
+  const found = assetSources.get(name);
+  if (!found || found.size > 25 * 1024 * 1024) return new Response("", { status: 404 });
+  return new Response(request.method === "HEAD" ? null : readFileSync(found.source), {
+    headers: { "Content-Type": found.contentType, "ETag": "\"asset\"" },
+  });
+}
+
+test("assets are hostthisd's, from static assets or the payload bucket", async () => {
+  const names = Object.keys(golden).filter((k) => k.startsWith("asset/")).map((k) => k.slice("asset/".length));
+  assert.ok(names.includes("duckdb-eh.wasm") && names.includes("mdshell/md.js") && names.includes("evil.js"));
+  for (const withAssets of [true, false]) {
+    const w = world();
+    if (withAssets) w.assets(staticAssets);
+    for (const found of assetSources.values()) {
+      if (!withAssets || found.size > 25 * 1024 * 1024) {
+        w.object(`static/${found.version}/${found.name}`, readFileSync(found.source));
+      }
+    }
+    for (const name of names) {
+      await assertGolden(await w.fetch(at(`/_hostthis/${name}?v=x`)), `asset/${name}`);
+    }
+    const r2 = [...assetSources.values()].filter((a) => a.size > 25 * 1024 * 1024).map((a) => a.name);
+    assert.deepEqual(r2, ["duckdb-eh.wasm"]);
+    if (withAssets) {
+      // The last segment names the asset, as in hostthisd; the bucket serves only the oversized one.
+      assert.ok(w.assetCalls.includes("GET /_hostthis/md.js"));
+      assert.ok(!w.assetCalls.some((c) => c.endsWith("/evil.js") || c.endsWith("/duckdb-eh.wasm")));
+      assert.deepEqual(w.payloadCalls, [`get static/${assetSources.get("duckdb-eh.wasm").version}/duckdb-eh.wasm`]);
+    }
+  }
+});
+
+test("an asset HEAD reads nothing, and a missing stored asset is a 500", async () => {
+  const w = world();
+  const res = await w.fetch(at("/_hostthis/md.js"), { method: "HEAD" });
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("Content-Type"), "text/javascript; charset=utf-8");
+  assert.equal(await res.text(), "");
+  assert.deepEqual(w.payloadCalls, []);
+  const warned = await capturingWarnings(async () => assertInternalError(await w.fetch(at("/_hostthis/md.js"))));
+  assert.equal(warned.length, 1);
+  // Assets answer on every public host.
+  w.assets(staticAssets);
+  for (const host of [APEX, `www.${APEX}`]) {
+    assert.equal((await w.fetch(`https://${host}/_hostthis/md.js`)).status, 200, host);
+  }
+});
+
+test("a large payload streams in decoder-sized chunks", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("html"));
+  const content = new Uint8Array(3 * 1024 * 1024);
+  for (let i = 0; i < content.length; i++) content[i] = (i * 31) & 0xff;
+  w.blob("uploads/a/0", content);
+  const res = await w.fetch(at("/"));
+  let size = 0;
+  let largest = 0;
+  const hash = createHash("sha256");
+  for await (const chunk of res.body) {
+    size += chunk.length;
+    largest = Math.max(largest, chunk.length);
+    hash.update(chunk);
+  }
+  assert.equal(size, content.length);
+  assert.equal(hash.digest("hex"), sha256(content));
+  assert.ok(largest <= 128 * 1024, `${largest}`);
+});

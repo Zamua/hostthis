@@ -38,9 +38,9 @@ func serveReady(t *testing.T, kind domain.ContentKind, slug, key string, body []
 }
 
 // Every registered kind serves the same contract: the bare URL is the shell
-// for every Accept (no negotiation, so a cache holds one representation), with the shell's CSP
-// and a content-independent ETag; ?raw=1 is the stored bytes under the kind's
-// raw type, ETag'd by object key, with no CSP.
+// for every Accept (no negotiation, so a cache holds one representation),
+// with the shell's CSP and a content-independent ETag; ?raw=1 is the stored
+// bytes under the kind's raw type, ETag'd by object key, with no CSP.
 func TestShells_ServeContractForEveryKind(t *testing.T) {
 	if len(shells) == 0 {
 		t.Fatal("no shells registered")
