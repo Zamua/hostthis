@@ -43,6 +43,18 @@ Runtimes compile WASM only from a module they are handed, so the bundle keeps
 the browser suite all use it; `npm ci --prefix localrt` installs it. It refuses
 to start when the bundle is missing or older than its sources.
 
+Its public surface is off unless `HOSTTHIS_LOCALRT_<NAME>` sets the Worker
+variable `HOSTTHIS_<NAME>` (`APEX_DOMAIN`, `URL_MODE`, `PUBLIC_SCHEME`,
+`CLIENT_IP_SOURCE` and the cache variables below). The prefix keeps a runtime
+started beside `hostthisd` from taking `hostthisd`'s own
+`HOSTTHIS_APEX_DOMAIN`. With an apex it needs `HOSTTHIS_CELLD_TOKEN`, and runs
+as a Cloudflare deploy does: `dist/assets` as the static assets binding, and
+the assets too large for it (`dist/static-r2.json`) stored in `PAYLOADS`. The
+listener's own host (`127.0.0.1`) stays the internal endpoint, so the public
+surface needs a host name under the apex: `localhost` and every name under it
+resolve to loopback. `internal/celldtest.StartPublic` and the browser suite's
+`E2E_READS=worker` start it this way.
+
 To run the Worker on celld itself, install celld v0.6.1 and use its local
 runtime:
 
