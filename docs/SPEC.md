@@ -3618,7 +3618,7 @@ case:
 | no row, `notfound` | 404 |
 | `pending` | 200 loading page, `no-store`, `Retry-After: 1` |
 | `failed` | 410 error page, `no-store` |
-| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the object key |
+| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the object key, `Content-Length` the manifest's size |
 | `shell`, `kbshell` | 200, the kind's shell with its CSP, ETag the shell version |
 | `files` | 200, the sorted path list as `json.Encoder` writes it, ETag `files-<upload id>` |
 | a kind with no shell | 500 `unsupported kind` |
@@ -3644,9 +3644,18 @@ of several MiB) is dropped when its decode ends instead of kept idle.
 The first chunk is decoded before the response starts, so a missing object, a
 missing magic or a damaged frame header is a 500. Damage found later (the
 checksum sits at the end of the frame) errors the response's body stream and
-logs one warning naming the slug; the body ends short of the stored bytes,
-and how a client sees that end (an aborted connection, or a short body) is the
-runtime's. A HEAD never opens the object.
+logs one warning naming the slug. A GET of stored bytes carries
+`Content-Length`: the manifest entry's size, which is the decoded length, held
+to it by the runtime's `FixedLengthStream` where it has one. Decoded bytes
+that would run past that size, or end short of it, are damage too, and the
+chunk that would run past is not sent. The chunk that completes the size is
+sent only once the stream has ended cleanly (the decoder verifies the frame
+checksum after its last output), so damage found at the checksum also leaves
+the body short. A body that ends early either aborts the connection or ends
+short of its `Content-Length`, and no client takes it for whole. An answer with no size, or a negative one, streams without a
+`Content-Length` (a manifest entry that has no `Size` decodes as 0, as Go
+reads it). Shells and file lists are generated and carry none. A HEAD never
+opens the object.
 
 **Renderer assets.** On Cloudflare, the build's static assets answer every
 known `/_hostthis/<name>` before the Worker runs. A request that reaches the
