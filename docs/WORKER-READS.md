@@ -584,10 +584,18 @@ One bundle, three modes:
    - The suite reads two base URLs and a token from the environment, so an
      operator can run it read-only against a deployed environment in forwarded
      mode, with writes confined to a dedicated test paste.
+   - Built: `internal/parity` (`make parity`, part of `make test`). Rate
+     limits are reached by filling the creation ledger through the internal
+     `roomcreated` op, and the app cap by real writes, so no constant is
+     lowered. A deployed run reads `PARITY_HOSTTHISD_URL`,
+     `PARITY_WORKER_URL`, `PARITY_TOKEN_FILE` and `PARITY_SLUGS`, and writes
+     only with `PARITY_ALLOW_WRITES=1` and `PARITY_WRITE_SLUG`.
 4. **e2e.** The Playwright suite gets `E2E_READS=hostthisd|worker`. In worker
    mode hostthisd emits URLs on the Worker's public host (path mode, with a
    hostname distinct from the internal endpoint's, such as `localhost` versus
-   `127.0.0.1`). CI runs both until phase 5, then worker only.
+   `127.0.0.1`). CI runs both until phase 5, then worker only. Built:
+   `e2e/fixtures.ts`, with the runtime's public surface from
+   `HOSTTHIS_LOCALRT_*` (`celld/README.md`).
 5. **Live rooms.** `TestLiveRoom` pointed at the Worker's public WebSocket.
 6. **Edge checks** on real Cloudflare (phase 3): headers after the edge, no
    injected markup, WebSocket through the edge, time to reap a vanished client,
