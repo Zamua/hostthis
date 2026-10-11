@@ -2338,7 +2338,10 @@ A `Schedule` is:
 }
 ```
 
-- `tz` is always present and names an IANA zone the runtime knows. `at` is
+- `tz` is always present and names an IANA zone the runtime knows. The Room
+  cell, which schedules in `tz`, is the one judge of that: both servers pass
+  any non-empty `tz` to it (`utc` included, if the runtime knows it), so the
+  answer never depends on a server process's own zone database. `at` is
   `HH:MM` local time in `tz` and `days` is a non-empty set of distinct weekdays
   (0 = Sunday); a one-shot item carries `when` (RFC 3339 with offset, in the
   future) instead of `at` and `days`.
@@ -2357,7 +2360,11 @@ Statuses: an unknown app is 404 on every push route and on `/api/push/key`,
 checked before anything else; a path under `push/` other than the three
 above is 400; a body that is not one JSON document of the right shape is 400
 (`malformed JSON body`), and one that breaks a rule above is 400 naming the
-rule; a missing room is 404; a 17th subscription is 413; a second test within
+rule. The Room cell checks a subscription or schedule again when it stores
+it, and is the last judge: a document a server passed but the cell refuses (a
+zone the runtime does not know, a `when` whose fraction follows a comma, a
+port out of range) is 400 too, `push: invalid: <the cell's rule>` (for
+example `push: invalid: invalid-tz`), never a 500. A missing room is 404; a 17th subscription is 413; a second test within
 the minute is 429 with `Retry-After` in whole seconds, rounded up. Bodies
 decode as Go's `encoding/json` decodes them into the documents above: the
 first JSON value counts and anything after it is ignored, field names match

@@ -157,14 +157,11 @@ func TestValidatePushSchedule_Invalid(t *testing.T) {
 	cases := map[string]func(*PushSchedule){
 		"missing tz":             func(s *PushSchedule) { s.TZ = "" },
 		"missing tz empty items": func(s *PushSchedule) { s.TZ = ""; s.Items = nil },
-		"Local tz empty items":   func(s *PushSchedule) { s.TZ = "Local"; s.Items = []PushItem{} },
 		"title over 64 bytes":    func(s *PushSchedule) { s.Items[0].Title = strings.Repeat("é", MaxPushTitleBytes) },
 		"url over 512 bytes":     func(s *PushSchedule) { s.Items[0].URL = strings.Repeat("é", MaxPushURLBytes/2+1) },
 		"tag over 64 bytes":      func(s *PushSchedule) { s.Items[0].Tag = strings.Repeat("é", MaxPushTagBytes/2+1) },
 		"when in the past":       func(s *PushSchedule) { s.Items[1].When = "2026-09-01T08:00:00Z" },
 		"when equal to now":      func(s *PushSchedule) { s.Items[1].When = testNow.Format(time.RFC3339) },
-		"unknown tz":             func(s *PushSchedule) { s.TZ = "Mars/Olympus" },
-		"Local tz":               func(s *PushSchedule) { s.TZ = "Local" },
 		"too many items": func(s *PushSchedule) {
 			s.Items = make([]PushItem, MaxPushItems+1)
 			for i := range s.Items {
@@ -205,6 +202,18 @@ func TestValidatePushSchedule_Invalid(t *testing.T) {
 		mutate(&s)
 		if err := ValidatePushSchedule(s, testNow); !errors.Is(err, ErrPushInvalid) {
 			t.Errorf("%s: err = %v, want ErrPushInvalid", name, err)
+		}
+	}
+}
+
+// Any named zone passes: the Room cell, which schedules in it, is the one
+// judge of which zones exist, so the process's zone database never decides.
+func TestValidatePushSchedule_LeavesTheZoneToTheCell(t *testing.T) {
+	for _, tz := range []string{"Mars/Olympus", "Local", "utc", "america/new_york"} {
+		s := validSchedule()
+		s.TZ = tz
+		if err := ValidatePushSchedule(s, testNow); err != nil {
+			t.Errorf("tz %q: refused: %v", tz, err)
 		}
 	}
 }

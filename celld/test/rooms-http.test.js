@@ -467,6 +467,27 @@ test("a schedule round-trips in Go's shape", async () => {
   assert.equal(res.headers.get("Allow"), "GET, PUT");
 });
 
+test("a push write the Room cell refuses is a 400 naming its rule, and the cell alone judges a zone", async () => {
+  const w = world();
+  w.app();
+  const id = await w.room();
+  const sched = url(`/api/rooms/${id}/push/schedule`);
+  const comma = { tz: "UTC", items: [{ id: "x", when: "2099-09-12T08:00:00,5Z", title: "t", body: "b" }] };
+  for (const [body, want] of [
+    [{ tz: "Mars/Olympus", items: [] }, "push: invalid: invalid-tz\n\n"],
+    [{ tz: "Local", items: [] }, "push: invalid: invalid-tz\n\n"],
+    [comma, "push: invalid: invalid-when\n\n"],
+  ]) {
+    await goError(await w.fetch(sched, { method: "PUT", body: JSON.stringify(body) }), 400, want);
+  }
+  for (const tz of ["utc", "america/new_york"]) {
+    assert.equal((await w.fetch(sched, { method: "PUT", body: JSON.stringify({ tz, items: [] }) })).status, 204, tz);
+  }
+  const sub = { ...subscription(1, await devicePoint()), endpoint: "https://fcm.googleapis.com:99999/fcm/send/1" };
+  await goError(await w.fetch(url(`/api/rooms/${id}/push/subscriptions`), { method: "PUT", body: JSON.stringify(sub) }),
+    400, "push: invalid: invalid-endpoint\n\n");
+});
+
 test("a test send runs inline and is limited to one a minute", async () => {
   const w = world();
   w.app();

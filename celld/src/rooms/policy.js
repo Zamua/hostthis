@@ -526,20 +526,6 @@ export function pushEndpointProblem(endpoint) {
   return endpoint === "" || utf8Length(endpoint) > MAX_PUSH_ENDPOINT ? PUSH_INVALID : null;
 }
 
-// time.LoadLocation, approximated by the zones the runtime knows, as the
-// Room cell checks them; "Local" names the process zone, never a client's.
-export function knownTimeZone(tz) {
-  if (tz === "Local") {
-    return false;
-  }
-  try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function daysIn(year, month) {
   if (month === 2) {
     return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0 ? 29 : 28;
@@ -637,6 +623,7 @@ function pushItemProblem(item, now) {
 }
 
 // domain.ValidatePushSchedule's message, or null. now is epoch milliseconds.
+// Whether tz names a zone is the Room cell's to judge.
 export function pushScheduleProblem(schedule, now) {
   const items = schedule.items ?? [];
   if (items.length > MAX_PUSH_ITEMS) {
@@ -644,9 +631,6 @@ export function pushScheduleProblem(schedule, now) {
   }
   if (schedule.tz === "") {
     return invalid("tz is required");
-  }
-  if (!knownTimeZone(schedule.tz)) {
-    return invalid(`unknown tz ${goQuote(schedule.tz)}`);
   }
   const ids = new Set();
   for (let i = 0; i < items.length; i++) {

@@ -338,11 +338,13 @@ test("schedules are validated as domain.ValidatePushSchedule does", () => {
   assert.equal(pushScheduleProblem(schedule(null), now), null);
   assert.equal(pushScheduleProblem(schedule([item({ at: "", days: null, when: "2026-09-12T08:00:00Z" })]), now), null);
   assert.equal(pushScheduleProblem(schedule([item({ body: "", bodyKey: "push:{date}" })]), now), null);
+  // Any named zone passes: the Room cell is the one judge of which exist.
+  for (const tz of ["Mars/Olympus", "Local", "utc"]) {
+    assert.equal(pushScheduleProblem(schedule([item({})], tz), now), null, tz);
+  }
   const cases = [
     [schedule(Array.from({ length: 17 }, (_, n) => item({ id: `i${n}` }))), "push: invalid: more than 16 items"],
     [schedule([], ""), "push: invalid: tz is required"],
-    [schedule([], "Local"), 'push: invalid: unknown tz "Local"'],
-    [schedule([], "Mars/Olympus"), 'push: invalid: unknown tz "Mars/Olympus"'],
     [schedule([item({ id: "" })]), "push: invalid: id must be 1 to 32 characters (item 0)"],
     [schedule([item({ id: "x".repeat(33) })]), "push: invalid: id must be 1 to 32 characters (item 0)"],
     [schedule([item({ id: "a b" })]), 'push: invalid: id "a b" has a character outside [A-Za-z0-9_-] (item 0)'],

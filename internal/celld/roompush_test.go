@@ -58,20 +58,24 @@ func TestRoomPushCelld_SubscriptionPutSendsBrowserJSON(t *testing.T) {
 	if err := repo.PutPushSubscription(pushTestApp, pushTestID, sub, time.Now()); !errors.Is(err, domain.ErrPushFull) {
 		t.Fatalf("413 err = %v", err)
 	}
-	// Only the subscription cap is a 413 the caller can act on; any other
-	// refusal is a contract fault, since the domain validated first.
-	for _, tc := range []struct {
-		status int
-		body   string
-	}{
-		{http.StatusRequestEntityTooLarge, ``},
-		{http.StatusBadRequest, `{"error":"invalid-endpoint"}`},
-		{http.StatusBadRequest, `{"error":"invalid-keys"}`},
+	// Only the subscription cap is a 413 the caller can act on; any other 413
+	// is a contract fault.
+	_, repo = fakeRooms(http.StatusRequestEntityTooLarge, ``)
+	if err := repo.PutPushSubscription(pushTestApp, pushTestID, sub, time.Now()); err == nil ||
+		errors.Is(err, domain.ErrPushFull) || errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrPushInvalid) {
+		t.Fatalf("bare 413: err = %v, want a plain error", err)
+	}
+	// The cell is the last judge of a subscription: its 400 is invalid input,
+	// carrying its reason.
+	for body, want := range map[string]string{
+		`{"error":"invalid-endpoint"}`: "push: invalid: invalid-endpoint",
+		`{"error":"invalid-p256dh"}`:   "push: invalid: invalid-p256dh",
+		``:                             "push: invalid",
 	} {
-		_, repo = fakeRooms(tc.status, tc.body)
+		_, repo = fakeRooms(http.StatusBadRequest, body)
 		err := repo.PutPushSubscription(pushTestApp, pushTestID, sub, time.Now())
-		if err == nil || errors.Is(err, domain.ErrPushFull) || errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("%d %s: err = %v, want a plain error", tc.status, tc.body, err)
+		if !errors.Is(err, domain.ErrPushInvalid) || err.Error() != want {
+			t.Fatalf("400 %s: err = %v, want %q", body, err, want)
 		}
 	}
 	_, repo = fakeRooms(http.StatusNotFound, "")
@@ -123,24 +127,27 @@ func TestRoomPushCelld_Schedule(t *testing.T) {
 		sent.Items[0].At != "08:00" || sent.Subject != "https://hostthis.test" || sent.Now != 9 {
 		t.Fatalf("sent = %s (%v)", f.last().Body, err)
 	}
-	// The item cap is the one 413 the caller can act on; any other 413 or a
-	// 400 is a contract fault, since the domain validated first.
+	// The item cap is the one 413 the caller can act on; any other 413 is a
+	// contract fault.
 	_, r413 := fakeRooms(http.StatusRequestEntityTooLarge, `{"error":"too-many-items"}`)
 	if err := r413.PutPushSchedule(pushTestApp, pushTestID, sched, time.Now()); !errors.Is(err, domain.ErrPushFull) {
 		t.Fatalf("413 too-many-items err = %v, want ErrPushFull", err)
 	}
-	for _, tc := range []struct {
-		status int
-		body   string
-	}{
-		{http.StatusRequestEntityTooLarge, ``},
-		{http.StatusBadRequest, `{"error":"invalid-tz"}`},
-		{http.StatusBadRequest, `{"error":"invalid-when"}`},
+	_, rBare := fakeRooms(http.StatusRequestEntityTooLarge, ``)
+	if err := rBare.PutPushSchedule(pushTestApp, pushTestID, sched, time.Now()); err == nil ||
+		errors.Is(err, domain.ErrPushFull) || errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrPushInvalid) {
+		t.Fatalf("bare 413: err = %v, want a plain error", err)
+	}
+	// The cell is the last judge of a schedule (it alone knows its zones): its
+	// 400 is invalid input, carrying its reason.
+	for body, want := range map[string]string{
+		`{"error":"invalid-tz"}`:   "push: invalid: invalid-tz",
+		`{"error":"invalid-when"}`: "push: invalid: invalid-when",
 	} {
-		_, r := fakeRooms(tc.status, tc.body)
+		_, r := fakeRooms(http.StatusBadRequest, body)
 		err := r.PutPushSchedule(pushTestApp, pushTestID, sched, time.Now())
-		if err == nil || errors.Is(err, domain.ErrPushFull) || errors.Is(err, domain.ErrNotFound) {
-			t.Fatalf("%d %s: err = %v, want a plain error", tc.status, tc.body, err)
+		if !errors.Is(err, domain.ErrPushInvalid) || err.Error() != want {
+			t.Fatalf("400 %s: err = %v, want %q", body, err, want)
 		}
 	}
 	_, r404 := fakeRooms(http.StatusNotFound, "not found\n")
