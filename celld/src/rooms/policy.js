@@ -20,7 +20,9 @@ export const ROOM_PUT_READ_LIMIT = ROOM_MAX_BYTES + 1;
 export const PUSH_BODY_LIMIT = 64 * 1024;
 
 export const ROOM_SOCKET_CAP = 64;
-export const ROOM_PING_STALE_MS = 60_000;
+export const ROOM_PING_STALE_MS = 120_000;
+// An application close code, so a client tells eviction from a server fault.
+export const ROOM_STALE_CLOSE = 4001;
 export const ROOM_CLIENT_FRAME_LIMIT = 32 * 1024;
 export const PING_FRAME = '{"type":"ping"}';
 export const PONG_FRAME = '{"type":"pong"}';

@@ -1573,9 +1573,9 @@ too; one that does has already closed it.
 
 With the public surface on, a room holds at most 64 sockets, counted by its
 Room cell across both front ends. The cell decides at each join, in the same
-turn that would accept the socket: it first evicts stale sockets (below), then
-counts the open ones it holds, and past the cap answers the join with 429
-instead of a 101. On the Worker path that 429 is the client's own handshake
+turn that would accept the socket: it counts the open sockets it holds, and at
+the cap first evicts stale ones (below) and counts again; a room still full
+answers the join with 429 instead of a 101. On the Worker path that 429 is the client's own handshake
 response. `hostthisd` accepts its client before it dials the cell, so there a
 refused join closes the client with 1011. The Worker path has no per-app cap:
 the creation limits bound how many rooms an app has. `hostthisd`'s proxy also
@@ -1587,10 +1587,15 @@ connections is released exactly once when dialing fails or either side closes.
 Neither runtime pings or times out a hibernatable socket, so a client that
 vanishes without closing stays counted until a write to it fails. Liveness is
 therefore the client's job: the canonical browser client sends the ping frame
-every 20 seconds. At each join the cell closes (1000, reason `stale`) every
-socket whose last ping answer is more than 60 seconds old, so a vanished
-client stops counting against the cap. A socket that has never pinged is not
-evicted this way; it leaves when it closes or a write to it fails.
+every 20 seconds. When a join finds the room at its cap, the cell closes every
+socket whose last ping answer is more than 120 seconds old, with the
+application code 4001 and reason `stale`, so a vanished client stops counting
+against the cap. A join under the cap evicts nothing, so a client whose pings
+are only late (a throttled background tab) keeps its socket while the room has
+room. A client that sees 4001 knows the server dropped it as silent, not that
+the room failed, and reconnects for a fresh snapshot. A socket that has never
+pinged is not evicted this way; it leaves when it closes or a write to it
+fails.
 
 `hostthisd`'s proxy also pings its public client every 20 seconds at the
 WebSocket protocol level and requires a pong within 10 seconds. This is below

@@ -140,9 +140,10 @@ every durable `PUT`/`DELETE` is mirrored to all clients as
 to other clients and never stored, for ephemeral motion.
 
 Send `{"type":"ping"}` every 20 seconds: the server answers
-`{"type":"pong"}` and passes it to no one. A room holds 64 sockets, and a
-socket that has pinged but stays quiet for a minute is closed when another
-client joins. A frame you send over 32 KiB closes your socket.
+`{"type":"pong"}` and passes it to no one. A room holds 64 sockets. When it
+is full, a joining client takes the place of any socket that has pinged but
+not in the last two minutes, which is closed with code 4001 (`stale`);
+reconnect when you see it. A frame you send over 32 KiB closes your socket.
 
 A value is opaque bytes. The whole-room read and the `snapshot`/`put`
 frames embed each value as JSON when it parses as JSON - a value you PUT
