@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/index.js --bundle --format=esm --platform=neutral --keep-names --log-level=warning --outfile=dist/index.js",
-    "test": "npm run build && node --test test/*.test.js"
+    "build": "node build/build.mjs",
+    "test": "npm run build && node --import ./test/hooks.mjs --test test/*.test.js"
   },
   "devDependencies": {
     "esbuild": "0.28.2"
