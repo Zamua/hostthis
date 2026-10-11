@@ -242,9 +242,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
 
-	// An update/delete fires an explicit purge via CachePurger, so max-age
-	// only bounds the staleness of passive expiry.
-	h.Set("Cache-Control", "public, max-age=3600")
+	h.Set("Cache-Control", contentCacheControl)
 
 	// A client-rendered kind serves the raw bytes only under an explicit ?raw,
 	// else the fixed shell. No Accept negotiation, so each URL is a SINGLE
@@ -435,15 +433,10 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	// Site files are served RAW, secured by per-subdomain origin isolation
 	// rather than by sanitizing the bytes, so they carry the same sandbox
 	// headers as an HTML paste.
-	//
-	// no-cache, unlike a paste's max-age: under max-age a browser serves a
-	// site's sub-resources without revalidating, so a re-deploy stays invisible
-	// until each asset expires. no-cache revalidates every file against its
-	// object-key ETag, a cheap 304 when unchanged.
 	h := w.Header()
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
-	h.Set("Cache-Control", "public, no-cache")
+	h.Set("Cache-Control", contentCacheControl)
 	if notModified(w, r, `"`+entry.Key+`"`, updatedAt) {
 		return
 	}
@@ -467,6 +460,11 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 // permissionsPolicy denies the powerful browser features a served page could
 // otherwise request.
 const permissionsPolicy = "camera=(), microphone=(), geolocation=(), usb=(), payment=()"
+
+// contentCacheControl is every content response's: any cache may store it but
+// must revalidate before each reuse, so an update, pin or delete shows on the
+// next load, and an unchanged file costs a 304.
+const contentCacheControl = "public, no-cache"
 
 // setSandboxHeaders applies the framing and referrer lockdown every response
 // from a paste origin carries (docs/SPEC.md HTML-sandboxing section).

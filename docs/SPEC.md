@@ -999,9 +999,9 @@ whichever of its paths carries the query.
 
 It is a **query on the existing slug route**, not a new path namespace,
 so no file in the base can shadow it: a base holding `files.json` or a
-`_files/` directory still serves those at their own paths. A knowledge
-base's CDN purge covers this URL alongside the bare URL and `?raw=1` (see
-"Purge every served URL variant").
+`_files/` directory still serves those at their own paths. Like every
+response from the base it is `public, no-cache` (see "Cache-Control
+posture"), and a purge of the base covers it.
 
 ### Same security model as HTML pastes (not a new posture)
 
@@ -3562,8 +3562,9 @@ hostthis has two scaling cliffs that a CDN solves:
 
 - *Egress bandwidth*: a 10 MiB paste served at 100 req/s = ~2.5 PB/month.
   Hetzner free egress is ~20 TB; one viral paste could blow the budget
-  in days. A CDN absorbs ~95% of reads at the edge, dropping origin
-  bandwidth to a sliver.
+  in days. A CDN that stores responses absorbs nearly all of it: it
+  revalidates with the origin, and an unchanged response's 304 carries
+  no body.
 - *Render CPU*: a markdown GET no longer renders on the server - it
   streams the raw bytes or the fixed shell, and the browser runs marked
   + DOMPurify. So a hot URL no longer pegs a server CPU core; the CDN
@@ -3571,18 +3572,35 @@ hostthis has two scaling cliffs that a CDN solves:
 
 ### Cache-Control posture
 
-A non-negotiated paste read response (an HTML paste) sets:
+Every response that serves a paste's or site's content sets:
 
 ```
-Cache-Control: public, max-age=3600
-ETag: "<object key>"
-Last-Modified: <RFC1123 from paste.UpdatedAt>
+Cache-Control: public, no-cache
+ETag: "<validator>"
+Last-Modified: <RFC1123 from the paste's updatedAt>
 ```
 
-CDNs cache for one hour, then revalidate. Browsers cache and send
-conditional `If-None-Match` / `If-Modified-Since` on revisits;
-hostthis returns 304 Not Modified when the ETag matches,
-saving body bytes on the wire.
+That covers an HTML paste, a render shell, `?raw` bytes, a site or knowledge
+base file, a knowledge base's shell and its `?files=1` list. The validator is
+the served file's object key for stored bytes (a key never names different
+bytes), the shell version for a shell page, and `files-<upload id>` for a file
+list.
+
+`no-cache` lets a browser or shared cache store the response but makes it
+revalidate before every reuse, so a reader always sees the version the slug
+serves now: a reload after an update, pin, unpin or delete shows the change,
+and a reload of an unchanged paste costs a bodiless 304. A `max-age` window
+would let a browser show its own stored copy, without asking, for the length
+of the window after an update; for a site it would keep serving cached js and
+css sub-resources after a redeploy until each expired.
+
+A request whose `If-None-Match` lists the ETag (or is `*`), or whose
+`If-Modified-Since` is at or after `updatedAt` (to the second), is answered 304
+before any payload byte is read. The pending and failed pages are `no-store`
+(see "Paste lifecycle status").
+
+The versioned renderer assets under `/_hostthis/` are
+`public, max-age=31536000, immutable`: their URLs carry the shell version.
 
 Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
@@ -3629,47 +3647,13 @@ which the shell itself fetches) and from `ssh hostthis.dev get <slug>`
 requirement - the intended model is that the bare URL serves what a browser
 gets, and raw is an explicit opt-in.
 
-Because the bare URL is one representation, it is safe to **edge-cache**: it
-keeps the shared `Cache-Control: public, max-age=3600`. There is no per-
-`Accept` variant, so the CDN hazard that an earlier `no-store` posture
-guarded against is removed **at the root**: a CDN keys its cache on the URL,
-not on `Accept` (Cloudflare honors only `Vary: Accept-Encoding`, never
-`Vary: Accept`), but with a single representation there is nothing to mis-
-pin - whichever client primes the edge, every later client gets the same
-shell. `no-store` is therefore no longer needed anywhere in the paste serve
-path for this reason.
-
-The tradeoff: the shell is now edge-cacheable, so a shell/style change (a
-`mdShellVersion` / `diffShellVersion` bump) propagates within the `max-age`
-window (1h) OR immediately via the deploy-time edge purge. That is
-acceptable: shell changes only ship on a deploy, and a deploy purges the
-edge.
-
-What is edge-cacheable:
-
-- the bare URL of a client-rendered kind - now one representation (the
-  shell), so it keeps `public, max-age=3600`.
-- the explicit `?raw=1` URL - always raw, a distinct single representation.
-  This is the read-throughput path the shells fetch, and it keeps
-  `public, max-age=3600`.
-- the immutable `/_hostthis/...` assets (the bundled renderer libs).
-- an HTML paste's bare URL - HTML is not negotiated (one representation),
-  so it keeps `public, max-age=3600`.
-
-Static sites (multi-file) set `Cache-Control: public, no-cache` instead
-of `max-age`. A single-file paste is the top-level document, which a
-browser revalidates on every reload, so a `max-age` window never hides a
-paste update. A site is different: its `index.html` loads sub-resources
-(its js/css), and a browser serves those from cache WITHOUT revalidating
-while they are fresh under `max-age` - so a re-deploy would not show until
-each asset's `max-age` expired (the classic SPA "stale bundle after
-deploy" trap). `no-cache` makes every site file revalidate against its
-object-key ETag on each load: a 304 while the file is unchanged (cheap, no
-body bytes) and fresh bytes after a re-deploy, which gives every file a new
-key, so a re-deploy is visible on the next normal reload with no filename-hashing or version query. The
-edge-cache benefit is preserved: a CDN still stores the bytes and serves
-them after a 304, so egress stays absorbed; only a cheap revalidation
-request reaches origin.
+Because the bare URL is one representation, it is safe to keep in a shared
+cache: there is no per-`Accept` variant to mis-pin. A CDN keys its cache on the
+URL, not on `Accept` (Cloudflare honors only `Vary: Accept-Encoding`, never
+`Vary: Accept`), but whichever client primes a cache, every later client gets
+the same shell. Like every content response it is `public, no-cache`, and a
+shell change (a version bump in `web/shells/shells.json`) changes its ETag, so
+it shows on the next revalidation after the deploy that ships it.
 
 ### Active invalidation: CachePurger interface
 
@@ -3682,8 +3666,8 @@ Operations that fire a purge:
 - `delete` - URL should return 404, not the cached body.
 - `pin` - the served version changes (e.g. pinning v1 hides v2 again).
 - `unpin` - when a pin was holding the URL on an older version,
-  unpinning re-exposes the latest; without a purge the old pinned
-  bytes stick until max-age expires.
+  unpinning re-exposes the latest; without a purge, a cache that keeps
+  responses for a TTL of its own holds the old pinned bytes.
 
 `rename` does NOT purge - the name is owner-only metadata, not part of
 the public response. Same with `versions`/`list`/`whoami`/`get`.
@@ -3693,7 +3677,7 @@ only on success, which is right for them: if an update did not happen,
 the cached bytes are still correct. A delete is different, because it can
 report an error *after* the paste is already gone - a transient storage
 error partway through, for instance - and then the URL serves deleted
-content from the edge until `max-age` expires, up to an hour. Since
+content from the edge until the edge's own TTL ends. Since
 purging a paste that still exists is harmless (the next reader simply
 re-fetches it), a delete purges unless the error proves nothing was
 touched.
@@ -3730,13 +3714,13 @@ the target is the currently-served version).
 
 The purge is best-effort: a purge error is logged but never fails the
 underlying operation (the paste IS updated/deleted on origin; the CDN
-just keeps stale content for the remaining max-age).
+just keeps stale content until its TTL ends).
 
 Three implementations ship:
 
 | Impl | When used | Behavior |
 | --- | --- | --- |
-| `noop` (default) | No CDN, or CDN with adequate max-age | No-op; relies on cache TTL expiry |
+| `noop` (default) | No CDN, or one that revalidates every request | No-op |
 | `cloudflare` | Cloudflare in front | POSTs the slug's public URL variants to `/zones/<id>/purge_cache` |
 | `fastly` (not shipped, easy add) | Fastly in front | POSTs to Fastly's purge API |
 
@@ -3752,12 +3736,11 @@ https://<slug>.<apex>/?files=1  a knowledge base's file list
 
 The markdown (and diff) render shell is a fixed, content-independent page
 served at the bare `/`; the actual bytes live at `/?raw=1` (the shell
-fetches them client-side - see "Client-rendered markdown"). Both the bare
-`/` and `/?raw=1` are now edge-cacheable (`max-age=3600`, see "The bare URL
-always serves the shell" above). The editable content lives at `/?raw=1`,
-so purging only the bare `/` would leave stale content cached at `/?raw=1`
-and an edited markdown/diff paste would show its OLD content until max-age
-expired. The adapter therefore purges both: the `/?raw=1` purge is the one
+fetches them client-side - see "Client-rendered markdown"). A cache can
+store both the bare `/` and `/?raw=1` (see "The bare URL always serves the
+shell" above). The editable content lives at `/?raw=1`, so purging only the
+bare `/` would leave stale content cached at `/?raw=1` and an edited
+markdown/diff paste would show its OLD content until that entry expired. The adapter therefore purges both: the `/?raw=1` purge is the one
 that matters for an edit (the bare `/` is the content-independent shell,
 which only changes on a deploy), and purging the bare `/` keeps the edge
 consistent. The URL-variant policy lives in the adapter (which owns the
