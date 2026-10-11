@@ -1,8 +1,11 @@
 // Composes the public read path for one request's configuration: the caches
-// wrap it only when configured and the runtime has a Cache API.
+// wrap it only when configured and the runtime has a Cache API, and the
+// runtime's FixedLengthStream, where it has one, holds each body to its
+// stated length.
 import { openPayload } from "./blobs.js";
 import { withBlobCache, withEdgeCache } from "./caches.js";
 import { normalizeHost } from "./host.js";
+import { withFixedLength } from "./length.js";
 import { readPath } from "./reads.js";
 
 const openStored = (env, entry) => openPayload(env, entry.key);
@@ -12,8 +15,13 @@ function positive(value) {
   return Number.isSafeInteger(n) && n > 0 ? n : 0;
 }
 
-// cacheStorage is the runtime's caches global, absent where there is none.
-export function publicReads(env, cacheStorage = typeof caches === "undefined" ? undefined : caches) {
+// cacheStorage is the runtime's caches global and fixedLengthStream its
+// FixedLengthStream class, each absent where there is none.
+export function publicReads(
+  env,
+  cacheStorage = typeof caches === "undefined" ? undefined : caches,
+  fixedLengthStream = typeof FixedLengthStream === "undefined" ? undefined : FixedLengthStream,
+) {
   const cache = cacheStorage?.default;
   const ttl = positive(env.HOSTTHIS_EDGE_CACHE_TTL_S);
   const blobMax = positive(env.HOSTTHIS_BLOB_CACHE_MAX_BYTES);
@@ -25,6 +33,9 @@ export function publicReads(env, cacheStorage = typeof caches === "undefined" ? 
   let read = readPath(open);
   if (cache && ttl) {
     read = withEdgeCache(read, { cache, ttl });
+  }
+  if (fixedLengthStream) {
+    read = withFixedLength(read, fixedLengthStream);
   }
   return read;
 }

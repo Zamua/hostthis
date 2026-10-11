@@ -110,9 +110,17 @@ export async function assertGolden(res, name) {
   assert.equal(sha256(body), want.sha256, name);
 }
 
-export function documentRow(kind, status = "ready") {
+// A document stored at uploads/a/0, size bytes when decoded.
+export function documentRow(kind, status = "ready", size = 23) {
   return {
     kind, status, updatedAt: UPDATED, uploadId: "ua",
-    manifest: { Files: { "/": { Key: "uploads/a/0", Size: 23, CompressedSize: 20, ContentType: "", Kind: kind } } },
+    manifest: { Files: { "/": { Key: "uploads/a/0", Size: size, CompressedSize: 20, ContentType: "", Kind: kind } } },
   };
+}
+
+export const HI = "<h1>hi</h1>";
+
+// An HTML paste of HI.
+export function hiRow() {
+  return documentRow("html", "ready", HI.length);
 }
