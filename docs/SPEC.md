@@ -3669,8 +3669,9 @@ Nothing changes for a deployment until it routes public traffic to the Worker
 (a Workers route, or forwarded mode); `hostthisd` keeps its own read path.
 
 The URL parser resolves `.` and `..` segments (`%2e` included) before the
-Worker sees the path, so such a request is served at the resolved path where
-`hostthisd` redirects it.
+Worker sees the path, so such a request is served at the resolved path, where
+`hostthisd` redirects a literal dot segment to that path and looks an escaped
+one up as part of the path.
 
 **The read path.** Reads answer GET and HEAD; any other method gets `405`
 with `Allow: GET, HEAD`. Each request makes one call to the slug's Paste cell,
@@ -3736,7 +3737,10 @@ too large for static assets (listed in `static-r2.json`) streams from
 `PAYLOADS` at `static/<shell version>/<name>`, stored as is; so does every
 asset when the Worker has no `ASSETS` binding. Either way the response carries
 the asset's Content-Type and `public, max-age=31536000, immutable`. Assets
-answer GET and HEAD, and a HEAD reads nothing.
+answer GET and HEAD, and a HEAD reads nothing. The static assets layer
+answers a known name on every host, the internal endpoint's included, with a
+validator of its own (an `ETag`, which `hostthisd`'s assets do not carry), and
+answers any other method with a 405 of its own, without `Allow`.
 
 **Deliberate differences** from `hostthisd`, each where the Worker is
 stricter or the runtime decides:
@@ -3748,7 +3752,10 @@ stricter or the runtime decides:
   response turns its ETag into `W/"..."`, which must still match.
 - A stored kind with no shell is a 500 even to a conditional request.
 - Hosts compare lowercased, and `/p/` is served only on the apex host.
-- `.` and `..` segments are resolved by the URL parser rather than redirected.
+- `.` and `..` segments are resolved by the URL parser rather than redirected
+  (or, escaped, looked up as written).
+- An asset the static assets layer answers carries that layer's `ETag`, and
+  its 405 no `Allow`.
 
 **Caches.** Both are decorators around the read path, wired at the entrypoint,
 off unless configured, and used only where the runtime has a Cache API

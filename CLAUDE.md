@@ -183,6 +183,30 @@ runtime on every `go test ./...`, and against a real celld node when
 `CELLD_TEST_ENDPOINT` names one (the CI `celld` job), along with the blob
 contract and the live room suite.
 
+### Response parity
+
+Until hostthisd's read path is gone, two servers answer the public surface:
+hostthisd, and the Worker with an apex set. `internal/parity` holds them to one
+answer. It builds hostthisd, starts it beside a Worker whose public surface is
+on (`celldtest.StartPublic`), uploads a corpus over SSH (every kind, forced
+pending and failed rows, versions, the site fixtures, a knowledge base, damaged
+data), and sends every request to both, the Worker directly and in forwarded
+mode. It diffs the status, the header set `docs/SPEC.md` "The public surface"
+holds equal, and the body. A difference fails the run unless an entry in
+`allowances_test.go` explains it by a SPEC section, and an entry no request
+needs fails it too.
+
+```
+make parity     # local; part of make test
+```
+
+The same suite runs against a deployed environment, in forwarded mode only,
+from `PARITY_HOSTTHISD_URL`, `PARITY_WORKER_URL`, `PARITY_TOKEN_FILE` and
+`PARITY_SLUGS` (read-only), plus `PARITY_ALLOW_WRITES=1` and
+`PARITY_WRITE_SLUG` to run the room and socket checks against one test paste
+(`internal/parity/external_test.go`). `TestParityAgainstURLs` drives that mode
+against the local servers on every run.
+
 Quick smoke from another terminal once it's live:
 
 ```
