@@ -2809,9 +2809,10 @@ Layout:
 Writes are always compressed and prefixed, so an object's stored bytes are
 identical whichever adapter wrote them. Reads inspect the first 4 bytes and
 zstd-decode the rest. An object that does not start with the magic, an empty
-one included, is damaged: its read fails before any byte is served (the HTTP
-read surface logs the slug and answers 500, `get` exits 1), while every other
-object stays readable. The Worker's read path decodes the same format (see
+one included, is damaged, and so is one holding the magic and no zstd frame
+(the encoder writes a frame even for an empty file): its read fails before any
+byte is served (the HTTP read surface logs the slug and answers 500, `get`
+exits 1), while every other object stays readable. The Worker's read path decodes the same format (see
 "The public surface").
 
 ### Entries without an object key
@@ -3639,8 +3640,7 @@ stricter or the runtime decides:
   response turns its ETag into `W/"..."`, which must still match.
 - A stored kind with no shell is a 500 even to a conditional request.
 - Damage found mid-body errors the body stream rather than ending it as
-  complete, and is logged; an object holding the magic and no zstd frame is
-  damaged.
+  complete, and is logged.
 - Hosts compare lowercased, and `/p/` is served only on the apex host.
 - `.` and `..` segments are resolved by the URL parser rather than redirected.
 
