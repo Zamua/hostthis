@@ -52,6 +52,7 @@ type purgeCall struct {
 // in replies (the last one repeats). A call blocks while hold is set.
 type purgeAPI struct {
 	mu      sync.Mutex
+	sent    sendLog
 	calls   []purgeCall
 	replies []int
 	hold    chan struct{}
@@ -84,7 +85,7 @@ func (p *purgeAPI) start(t *testing.T, replies ...int) *http.Client {
 		_, _ = w.Write([]byte(`{"success":` + strconv.FormatBool(status/100 == 2) + `}`))
 	}))
 	t.Cleanup(srv.Close)
-	return &http.Client{Transport: redirectTransport{base: srv.URL}}
+	return &http.Client{Transport: redirectTransport{base: srv.URL, sent: &p.sent}}
 }
 
 func (p *purgeAPI) recorded() []purgeCall {
@@ -216,9 +217,11 @@ func TestCloudflare_BatchesAndSpacesCalls(t *testing.T) {
 	if !slices.Equal(sizes, []int{1, 30, 30, 5}) {
 		t.Fatalf("batch sizes = %v, want [1 30 30 5]", sizes)
 	}
-	for i := 1; i < len(calls); i++ {
-		if gap := calls[i].at.Sub(calls[i-1].at); gap < c.Interval {
-			t.Errorf("call %d came %v after the previous, want at least %v", i, gap, c.Interval)
+	// Spacing is of sends: arrival times add each request's own transit jitter.
+	sent := api.sent.times()
+	for i := 1; i < len(sent); i++ {
+		if gap := sent[i].Sub(sent[i-1]); gap < c.Interval {
+			t.Errorf("call %d was sent %v after the previous, want at least %v", i, gap, c.Interval)
 		}
 	}
 }
@@ -294,9 +297,29 @@ func TestCloudflare_MissingConfig(t *testing.T) {
 
 // redirectTransport rewrites any URL to point at base, preserving path and method.
 // Lets the test point Cloudflare's hard-coded api.cloudflare.com URL at httptest.
-type redirectTransport struct{ base string }
+type redirectTransport struct {
+	base string
+	sent *sendLog
+}
+
+// sendLog records when each request left the client.
+type sendLog struct {
+	mu sync.Mutex
+	at []time.Time
+}
+
+func (l *sendLog) times() []time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.at)
+}
 
 func (t redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.sent != nil {
+		t.sent.mu.Lock()
+		t.sent.at = append(t.sent.at, time.Now())
+		t.sent.mu.Unlock()
+	}
 	u, err := http.NewRequestWithContext(req.Context(), req.Method, t.base+req.URL.Path, req.Body)
 	if err != nil {
 		return nil, err
