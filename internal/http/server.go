@@ -441,7 +441,8 @@ var streamBufPool = sync.Pool{New: func() any { b := make([]byte, 32<<10); retur
 
 // streamEntry writes entry's stored bytes as a 200 under ct, streamed so
 // memory stays constant whatever the size. Content-Length is the entry's
-// decoded size when known, so a short body is visible to every client.
+// recorded decoded size, so a short body is visible to every client; an entry
+// without one declares none, since its Size may be wrong.
 //
 // The first chunk is decoded before the status goes out, so damage found there
 // is a 500. Damage found later aborts the response, the one signal left once
@@ -474,8 +475,9 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 
 	h := w.Header()
 	h.Set("Content-Type", ct)
-	if entry.Size >= 0 {
-		h.Set("Content-Length", strconv.Itoa(entry.Size))
+	size, known := entry.DecodedLength()
+	if known {
+		h.Set("Content-Length", strconv.Itoa(size))
 	}
 	var sent int64
 	for err == nil {
@@ -483,7 +485,7 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 			n, werr := w.Write(buf[:held-1])
 			sent += int64(n)
 			if werr != nil {
-				s.warnShort(werr, slug, surface, what, entry.Size)
+				s.warnShort(werr, slug, surface, what, size)
 				return
 			}
 			buf[0], held = buf[held-1], 1
@@ -498,13 +500,13 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 	}
 	n, werr := w.Write(buf[:held])
 	sent += int64(n)
-	if werr == nil && entry.Size >= 0 && sent != int64(entry.Size) {
+	if werr == nil && known && sent != int64(size) {
 		werr = http.ErrContentLength
 	}
-	s.warnShort(werr, slug, surface, what, entry.Size)
+	s.warnShort(werr, slug, surface, what, size)
 }
 
-// warnShort logs a decoded size that disagrees with the recorded one. The
+// warnShort logs a decoded size that disagrees with the declared one. The
 // server already ends such a response short of its Content-Length; any other
 // write error is a client that went away.
 func (s *Server) warnShort(err error, slug domain.Slug, surface, what string, size int) {

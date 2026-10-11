@@ -214,12 +214,13 @@ export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_M
   };
 }
 
-// Decoded payloads of at most maxBytes, by object key. A key never names
-// different bytes, so an entry needs no invalidation. origin is a URL prefix
-// no read path is keyed under.
+// Decoded payloads whose recorded decoded size is at most maxBytes, by object
+// key. A key never names different bytes, so an entry needs no invalidation.
+// origin is a URL prefix no read path is keyed under.
 export function withBlobCache(open, { cache, maxBytes, origin }) {
   return async function cachedOpen(env, entry, ctx) {
-    if (!(Number.isSafeInteger(entry.size) && entry.size >= 0 && entry.size <= maxBytes)) {
+    const size = entry.decodedSize;
+    if (!(Number.isSafeInteger(size) && size > 0 && size <= maxBytes)) {
       return open(env, entry, ctx);
     }
     const key = `${origin}/${encodeURIComponent(entry.key)}`;

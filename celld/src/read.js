@@ -8,8 +8,10 @@
 //   { status: "pending" | "failed" }       a document still writing, or never written
 //   { action, kind, updatedAt, uploadId, entry?, shell?, files? }
 // action is html | shell | raw | file | kbshell | kbraw | files | notfound.
-// entry ({ key, contentType, size }) is the stored entry whose bytes to stream;
-// which Content-Type serves it is the caller's choice per action. shell names
+// entry ({ key, contentType, decodedSize }) is the stored entry whose bytes to
+// stream; decodedSize is its recorded decoded length, 0 when it has none (its
+// Size is for display and may be wrong, so it never leaves the cell). Which
+// Content-Type serves it is the caller's choice per action. shell names
 // the kind whose template renders; a kind without one is the caller's 500.
 
 const ROOT = "/";
@@ -196,13 +198,14 @@ function utf8Rank(unit) {
 // null field leaves the value as it was, a repeated Files merges into the map,
 // unknown fields are ignored, and a value of the wrong type fails the whole
 // manifest, which then reads as none (CLAUDE.md principle 3). The result maps
-// each path to { key, contentType, size }.
+// each path to { key, contentType, decodedSize }.
 
 class Undecodable extends Error {}
 
 const ENTRY_FIELDS = {
   KEY: ["key", "string"],
-  SIZE: ["size", "int"],
+  SIZE: [null, "int"],
+  DECODEDSIZE: ["decodedSize", "int"],
   COMPRESSEDSIZE: [null, "int"],
   CONTENTTYPE: ["contentType", "string"],
   KIND: [null, "string"],
@@ -240,7 +243,7 @@ function decodeFiles(value) {
 }
 
 function decodeEntry(value) {
-  const entry = { key: "", contentType: "", size: 0 };
+  const entry = { key: "", contentType: "", decodedSize: 0 };
   if (value === undefined || value === null) {
     return entry;
   }
