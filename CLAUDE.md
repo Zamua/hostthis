@@ -140,7 +140,7 @@ README.md            user-facing manpage
 
 ## Local setup
 
-Go 1.26+ (per `go.mod`), Node 24+, and Docker required.
+Go 1.27+ (per `go.mod`), Node 24+, and Docker required.
 
 The Go tests and `make run` run the celld Worker locally under Miniflare, from
 `celld/localrt`. They run the bundle `celld/dist/index.js`, which esbuild builds

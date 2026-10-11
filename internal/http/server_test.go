@@ -170,6 +170,18 @@ func TestPasteRead_Conditional304(t *testing.T) {
 	}
 }
 
+// The cleaned-path redirect keeps an escaped path escaped exactly once.
+func TestCleanPathRedirectKeepsEscapes(t *testing.T) {
+	srv := &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{}}
+	r := httptest.NewRequest("GET", "/a//b%20c", nil)
+	r.Host = "abc23456.paste.test"
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	if w.Code != stdhttp.StatusTemporaryRedirect || w.Header().Get("Location") != "/a/b%20c" {
+		t.Fatalf("status %d Location %q, want 307 to /a/b%%20c", w.Code, w.Header().Get("Location"))
+	}
+}
+
 // RFC 9110 13.2.2: If-Modified-Since is ignored when If-None-Match is present.
 func TestPasteRead_IfNoneMatchOverridesIfModifiedSince(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)

@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           cache: true
 
       # Go tests run the celld Worker bundle under Miniflare (celld/localrt);
@@ -42,7 +42,7 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # Modernize check: in Go 1.26 'go fix' is the modernizer suite (same
+      # Modernize check: 'go fix' is the modernizer suite (same
       # analysis framework as vet). '-diff' prints pending modernizations
       # without applying; a non-empty diff means the tree has un-modernized
       # idioms. Run 'go fix ./...' locally and commit to satisfy this.
@@ -68,7 +68,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.27'
           cache: true
 
       - uses: actions/setup-node@v4
