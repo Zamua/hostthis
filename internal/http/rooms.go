@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -179,13 +181,21 @@ func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain
 		s.writeRoomError(w, r, err)
 		return
 	}
-	// One JSON object, key -> value, encoded by domain.RoomWireValue.
-	out := make(map[string]json.RawMessage, kv.KeyCount())
-	for k, v := range kv.Values {
-		out[k] = domain.RoomWireValue(v)
-	}
+	// One JSON object, keys sorted as json.Encoder sorts a map's, each value
+	// the stored text written as is: an encoder would compact it and escape
+	// HTML, and the frames carry it unchanged.
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	_ = json.NewEncoder(w).Encode(out)
+	_, _ = io.WriteString(w, "{")
+	for i, k := range slices.Sorted(maps.Keys(kv.Values)) {
+		name, _ := json.Marshal(k)
+		if i > 0 {
+			_, _ = io.WriteString(w, ",")
+		}
+		_, _ = w.Write(name)
+		_, _ = io.WriteString(w, ":")
+		_, _ = w.Write(kv.WireValue(k))
+	}
+	_, _ = io.WriteString(w, "}\n")
 }
 
 func (s *Server) getRoomValue(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, id domain.RoomID, key string) {

@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -131,6 +132,10 @@ type RoomKV struct {
 	// stream onto it: discard seq <= S, apply seq > S in order. Zero for a
 	// fresh room.
 	Seq uint64
+
+	// Wire is the JSON text the backend holds for each value, the text the
+	// relay's frames carry. A key without one is encoded by RoomWireValue.
+	Wire map[string]json.RawMessage
 }
 
 // KeyCount is the distinct-key count charged against the per-room key cap.

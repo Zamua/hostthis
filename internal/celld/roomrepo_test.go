@@ -27,6 +27,22 @@ func TestRoomRepoCreateMapsFullApp(t *testing.T) {
 	}
 }
 
+// The scan carries the cell's text per value; text that is not JSON gives way
+// to the bytes' own encoding.
+func TestRoomRepoScanCarriesTheStoredText(t *testing.T) {
+	f := fixedCell(http.StatusOK, `{"values":{"a":"MWU0MDA=","b":"MQ==","c":"PA=="},"seq":3,`+
+		`"wire":{"a":"1e400","b":"not json","c":"\"\\u003c\""}}`)
+	kv, err := NewRoomRepo("https://cell", f.client()).ScanRoom("abcdefgh", "123e4567-e89b-42d3-a456-426614174000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{"a": "1e400", "b": "1", "c": `"\u003c"`} {
+		if got := string(kv.WireValue(key)); got != want {
+			t.Errorf("%s: %s, want %s", key, got, want)
+		}
+	}
+}
+
 // The cell's {created:false} is an id already taken, the error the service
 // retries with a fresh id.
 func TestRoomRepoCreateReportsATakenID(t *testing.T) {

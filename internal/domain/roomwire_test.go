@@ -73,3 +73,18 @@ func TestRoomWireValue(t *testing.T) {
 		})
 	}
 }
+
+// A value's stored text is what every surface carries; a value without one
+// carries its own encoding.
+func TestRoomKVWireValue(t *testing.T) {
+	kv := domain.RoomKV{
+		Values: map[string][]byte{"stored": []byte("<"), "bare": []byte("<")},
+		Wire:   map[string]json.RawMessage{"stored": json.RawMessage(`"<"`)},
+	}
+	if got := string(kv.WireValue("stored")); got != `"<"` {
+		t.Fatalf("stored: %s", got)
+	}
+	if got, want := string(kv.WireValue("bare")), string(domain.RoomWireValue([]byte("<"))); got != want {
+		t.Fatalf("bare: %s, want %s", got, want)
+	}
+}
