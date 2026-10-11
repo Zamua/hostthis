@@ -3721,31 +3721,27 @@ Three implementations ship:
 | Impl | When used | Behavior |
 | --- | --- | --- |
 | `noop` (default) | No CDN, or one that revalidates every request | No-op |
-| `cloudflare` | Cloudflare in front | POSTs the slug's public URL variants to `/zones/<id>/purge_cache` |
+| `cloudflare` | Cloudflare in front | POSTs the slug's hostname to `/zones/<id>/purge_cache` |
 | `fastly` (not shipped, easy add) | Fastly in front | POSTs to Fastly's purge API |
 
-**Purge every served URL variant.** A paste is reachable at more than one
-cache key, and the adapter must purge all of them or an edit leaves stale
-content behind. In subdomain mode the variants for a slug are:
+**Purge the slug's whole host.** A slug answers at many cache keys: the
+bare URL, `?raw=1` (the bytes a render shell fetches), `?files=1` (a knowledge
+base's file list), every file of a site or knowledge base, and any other
+query a client sends. The Cloudflare adapter purges them all in one call, by
+hostname:
 
 ```
-https://<slug>.<apex>/          the page (an HTML paste, or the markdown/diff shell)
-https://<slug>.<apex>/?raw=1    the raw bytes the markdown/diff shell fetches
-https://<slug>.<apex>/?files=1  a knowledge base's file list
+{"hosts": ["<slug>.<apex>"]}
 ```
 
-The markdown (and diff) render shell is a fixed, content-independent page
-served at the bare `/`; the actual bytes live at `/?raw=1` (the shell
-fetches them client-side - see "Client-rendered markdown"). A cache can
-store both the bare `/` and `/?raw=1` (see "The bare URL always serves the
-shell" above). The editable content lives at `/?raw=1`, so purging only the
-bare `/` would leave stale content cached at `/?raw=1` and an edited
-markdown/diff paste would show its OLD content until that entry expired. The adapter therefore purges both: the `/?raw=1` purge is the one
-that matters for an edit (the bare `/` is the content-independent shell,
-which only changes on a deploy), and purging the bare `/` keeps the edge
-consistent. The URL-variant policy lives in the adapter (which owns the
-apex / scheme / URL-mode config); the service layer only ever names the
-slug.
+so no list of variants has to stay in step with what the shells fetch. A
+hostname purge also reaches responses a Worker stored with the Cache API under
+that host. In path mode (dev only) a slug has no host of its own, so the
+adapter purges the path prefix `<apex>/p/<slug>` instead
+(`{"prefixes": [...]}`); slugs have a fixed length, so that prefix names one
+slug. A port on the apex is dropped: purges name hosts, not origins. The
+scope policy lives in the adapter (which owns the apex and URL-mode config);
+the service layer only ever names the slug.
 
 Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
 
@@ -3754,10 +3750,10 @@ HOSTTHIS_CF_PURGE_TOKEN  CF API token, scoped ONLY to 'Cache Purge' on the zone
 HOSTTHIS_CF_ZONE_ID      zone id of the apex domain
 ```
 
-The adapter derives the per-slug purge URLs from the apex domain, public
-scheme, and URL mode hostthis is already configured with
-(`HOSTTHIS_APEX_DOMAIN` / `HOSTTHIS_PUBLIC_SCHEME` / `HOSTTHIS_URL_MODE`),
-so no separate base-URL var is needed.
+The adapter derives a slug's host (or path prefix) from the apex domain and
+URL mode hostthis is already configured with (`HOSTTHIS_APEX_DOMAIN` /
+`HOSTTHIS_URL_MODE`), so no separate base-URL var is needed. The zone's plan
+must accept purges by hostname (and by prefix, for path mode).
 
 The purge token is the only long-lived credential hostthis needs for
 the CDN; it's narrowly scoped (zone-level cache-purge only) so leakage
@@ -3973,7 +3969,6 @@ file). Defaults in parens:
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
                          / HOSTTHIS_CF_PURGE_TOKEN          CF token (Cache:Purge scope only)       (required if cloudflare)
                          / HOSTTHIS_CF_ZONE_ID              CF zone id for the apex                 (required if cloudflare)
-                         / HOSTTHIS_PUBLIC_URL_BASE         base URL used to construct purge URLs   (https://<apex>)
 ```
 
 The runtime container reads the same env vars. The operator supplies
