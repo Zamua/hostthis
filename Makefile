@@ -1,4 +1,4 @@
-.PHONY: help build bundle test smoke dev run docker-build docker-up docker-down \
+.PHONY: help build bundle test parity smoke dev run docker-build docker-up docker-down \
         e2e e2e-ci \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
@@ -15,6 +15,7 @@ help:
 	@echo "  make build         build ./bin/hostthisd (local Go)"
 	@echo "  make bundle        build the celld Worker bundle (celld/dist)"
 	@echo "  make test          run all unit + integration tests"
+	@echo "  make parity        diff hostthisd against the Worker's public surface"
 	@echo "  make e2e           run the browser suite (needs Chrome)"
 	@echo "  make e2e-ci        same, plus JUnit + screenshots for the PR report"
 	@echo "  make smoke         exercise the verb surface against a live URL"
@@ -49,11 +50,20 @@ celld/node_modules: celld/package-lock.json
 	@touch $@
 
 # Go tests run the celld Worker bundle locally (internal/celldtest), so they
-# need it built and its runtime installed.
+# need it built and its runtime installed. The parity suite runs as its own
+# target, once.
 test: bundle celld/localrt/node_modules
-	go test ./...
+	go test $$(go list ./... | grep -v '/internal/parity$$')
+	$(MAKE) parity
 	npm --prefix celld test
 	./scripts/test-repo-contracts.sh
+
+# The response parity suite (internal/parity): every request to hostthisd and
+# to the Worker's public surface, diffed. Locally by default; against a
+# deployed environment when PARITY_HOSTTHISD_URL, PARITY_WORKER_URL,
+# PARITY_TOKEN_FILE and PARITY_SLUGS are set (internal/parity/external_test.go).
+parity: bundle celld/localrt/node_modules
+	go test -count=1 -v -run '^TestParity' ./internal/parity/
 
 # Run locally (no container) - useful for fast iteration. Defaults to
 # path mode so wildcard DNS isn't required. The celld Worker runs beside the

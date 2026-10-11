@@ -54,6 +54,8 @@ var layerPolicy = map[string][]string{
 	// Test-only harness: the importable package is empty and must stay so. Its
 	// _test.go files wire whole stacks, which is why the graph is production-only.
 	"sitevalidation": {},
+	// Test-only like sitevalidation: the response parity suite.
+	"parity": {},
 
 	// Test-only: runs the celld Worker locally for other packages' tests. A
 	// leaf, so any test may use it, and in no production package's allowed set.
