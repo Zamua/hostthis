@@ -1405,6 +1405,12 @@
       "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb", "shell": "knowledgebase"}
     },
     {
+      "name": "kb markdown without a key ?raw",
+      "row": "kb",
+      "request": {"path": "/keyless.md", "raw": true, "files": false},
+      "want": {"action": "notfound", "kind": "knowledgebase", "updatedAt": 1760180000473, "uploadId": "ukb"}
+    },
+    {
       "name": "kb ?files at root",
       "row": "kb",
       "request": {"path": "/", "raw": false, "files": true},

@@ -2833,8 +2833,10 @@ A manifest entry names its bytes by its object key and nothing else. An entry
 without a key, like a paste whose row carries no manifest, is unreadable:
 
 - The HTTP read surface answers 404, the same shape as an unknown path, for a
-  document's URL, its `?raw=1` URL, and a site file alike. No shell is served
-  for it.
+  document's URL, its `?raw=1` URL, a knowledge base document's `?raw=1` URL,
+  and a site or knowledge base file alike. No shell is served for a document
+  paste's keyless root; a knowledge base's shell, which answers every document
+  path whatever it holds, still answers there and finds the bytes not found.
 - `get` answers the standard not found (exit 4).
 - Neither touches the blob store.
 
