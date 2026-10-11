@@ -29,6 +29,10 @@ func (s *Server) serveKnowledgeBase(w http.ResponseWriter, r *http.Request, slug
 	// opens is the shell's choice from the file list, not the server's.
 	doc := reqPath == domain.Root || domain.IsMarkdownPath(reqPath)
 	switch {
+	case hit && doc && wantsRaw(r) && entry.Key == "":
+		// Names no bytes (SPEC "Entries without an object key").
+		http.NotFound(w, r)
+		return
 	case hit && doc && wantsRaw(r):
 		s.streamDocument(w, r, slug, entry, updatedAt)
 		return

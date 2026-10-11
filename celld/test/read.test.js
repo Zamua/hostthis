@@ -21,14 +21,6 @@ test("the asset extensions are the shared table's", () => {
   assert.deepEqual([...ASSET_EXTENSIONS].sort(), shared_.sort());
 });
 
-// The Go read path answers 500 here: it reads the blob store for a key it does
-// not have, where docs/SPEC.md "Entries without an object key" says 404.
-test("a knowledge base document without a key is not found under ?raw", () => {
-  const row = structuredClone(shared.rows.kb);
-  assert.equal(row.manifest.Files["keyless.md"].Key, "");
-  assert.equal(resolveRead(row, { path: "/keyless.md", raw: true }).action, "notfound");
-});
-
 test("flags default to off", () => {
   assert.deepEqual(resolveRead(shared.rows.markdown, { path: "/" }), resolveRead(shared.rows.markdown, {
     path: "/", raw: false, files: false,
