@@ -31,16 +31,26 @@ func roomKey(app domain.Slug, id domain.RoomID) string {
 }
 
 // CreateRoom records the room and its app-scoped creation ledger through one
-// Room-cell request.
+// Room-cell request. A cell that already holds the room answers
+// {created:false}: domain.ErrSlugTaken, so the caller retries a fresh id.
 func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
-	return r.ask(context.Background(), "room create", http.MethodPost, "/room/create", "room",
+	var res struct {
+		Created *bool `json:"created"`
+	}
+	if err := r.ask(context.Background(), "room create", http.MethodPost, "/room/create", "room",
 		roomKey(room.AppSlug, room.ID), map[string]any{
 			"appSlug": room.AppSlug.String(), "id": room.ID.String(),
 			"createdAt": room.CreatedAt.UTC().UnixMilli(),
 			"updatedAt": room.UpdatedAt.UTC().UnixMilli(),
 			"subnet":    subnet, "at": now.UTC().UnixMilli(),
 			"appCap": appCap,
-		}, nil, map[int]error{http.StatusInsufficientStorage: domain.ErrAppRoomsFull})
+		}, &res, map[int]error{http.StatusInsufficientStorage: domain.ErrAppRoomsFull}); err != nil {
+		return err
+	}
+	if res.Created != nil && !*res.Created {
+		return domain.ErrSlugTaken
+	}
+	return nil
 }
 
 func (r *RoomRepo) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, error) {

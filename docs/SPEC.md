@@ -1267,7 +1267,9 @@ Behavior, endpoint by endpoint:
   under the requesting app slug, and returns `{"id": "<uuid>"}` (HTTP
   201). The app stores that id (in the URL hash, in `localStorage`, in a
   share link) and uses it for every subsequent call. Creation is subject
-  to the room-creation rate limit (see "Quota and abuse").
+  to the room-creation rate limit (see "Quota and abuse"). An id whose Room
+  cell already holds a room is never handed out, since its holder would share
+  that room: creation mints another, up to five ids, and then fails 500.
 - **GET /api/rooms/<uuid>** scans and returns every key+value pair in the
   room as a single JSON object, so an app loads the full room state in one
   request on join. Each value is embedded as raw JSON when the stored bytes

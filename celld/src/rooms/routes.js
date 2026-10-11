@@ -34,6 +34,7 @@ import {
 } from "./wire.js";
 
 const NO_STORE = { "Cache-Control": "no-store" };
+const ROOM_CREATE_TRIES = 5;
 
 // http.Error: the message plus the newline Fprintln adds. Most of hostthisd's
 // messages carry their own newline too, so their bodies end in two.
@@ -192,20 +193,27 @@ async function createRoom(request, env, app, client) {
       "Retry-After": String(ROOM_CREATE_WINDOW_MS / 1000),
     });
   }
-  const id = crypto.randomUUID();
-  const created = await ask(app.room(id), "/room/create", {
-    method: "POST",
-    body: {
-      appSlug: app.slug, id, createdAt: now, updatedAt: now, subnet, at: now, appCap: APP_MAX_ROOM_BYTES,
-    },
-  });
-  if (created.status === 507) {
-    return goError(507, "app room storage is at capacity\n");
+  // An id the cell already holds ({created:false}) is retried with a fresh
+  // one, as hostthisd's Rooms.Create does: handing it out would share a room.
+  for (let tries = 0; tries < ROOM_CREATE_TRIES; tries++) {
+    const id = crypto.randomUUID();
+    const created = await ask(app.room(id), "/room/create", {
+      method: "POST",
+      body: {
+        appSlug: app.slug, id, createdAt: now, updatedAt: now, subnet, at: now, appCap: APP_MAX_ROOM_BYTES,
+      },
+    });
+    if (created.status === 507) {
+      return goError(507, "app room storage is at capacity\n");
+    }
+    if (created.status >= 300) {
+      return internalError();
+    }
+    if (created.body?.created !== false) {
+      return goJSON(201, JSON.stringify({ id }));
+    }
   }
-  if (created.status >= 300) {
-    return internalError();
-  }
-  return goJSON(201, JSON.stringify({ id }));
+  return internalError();
 }
 
 // Each value re-encoded from its stored bytes, keys sorted as Go sorts a map.
