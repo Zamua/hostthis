@@ -1,0 +1,750 @@
+{
+  "asset/apache-arrow.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 200024,
+    "sha256": "a8df996b23647cd0dc777d91676bf1f0e988092bb8c6e1e416fb20622458bdcd"
+  },
+  "asset/codemirror.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 571358,
+    "sha256": "858ed7f56499bead23029038325e8fb223bf7318d166bd04ce41075748605ac3"
+  },
+  "asset/common/deeplink.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 5447,
+    "sha256": "3d8fa5cc03d0c0e57be5ad60d7b60eac23a4b2d429fcbd3aac63a40f3275af7d"
+  },
+  "asset/data.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 6336,
+    "sha256": "e03ce559bec8c7926800f0003f9524a77b3a2064130c79659facb4174efefacb"
+  },
+  "asset/data.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 20025,
+    "sha256": "2d901018f10ad41402dadb6a7379c815ef16944e41c9751adf0eb262540ab2c6"
+  },
+  "asset/deeplink.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 5447,
+    "sha256": "3d8fa5cc03d0c0e57be5ad60d7b60eac23a4b2d429fcbd3aac63a40f3275af7d"
+  },
+  "asset/diff.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 13539,
+    "sha256": "be8afcb52df2fd8ad43d3cfd0aa13790f2373fa02c156f6703e8c3d53aa73209"
+  },
+  "asset/diff.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 12606,
+    "sha256": "3712600737fbbf5299601219371df820a933cc363d5a23894dccfb53df8f8751"
+  },
+  "asset/diff2html-ui-base.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 92231,
+    "sha256": "b3eb7b900da13cd3c35caf39b75b8eb2217c10d60e2699e193ce64a94e34cd20"
+  },
+  "asset/diff2html.min.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 17331,
+    "sha256": "20c04ae15359a748afc1e7d29f9d5bb3076cae19341e83132dcd86a851c50578"
+  },
+  "asset/duckdb-browser-eh.worker.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 760530,
+    "sha256": "260b4773d2d78e5ab1106bc163ffd5b0b6eaeddedacf23190e9cafc9cc010d3d"
+  },
+  "asset/duckdb-browser.mjs": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 29955,
+    "sha256": "218cf26366433cf0a5ccaeb427611013a36171edb6a76d4bcaac0356d5819906"
+  },
+  "asset/duckdb-eh.wasm": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "application/wasm"
+    },
+    "size": 35659694,
+    "sha256": "00d45e5e074b7f7e17e45daabacb0fb67248eac8bd638a72cd1b42dad23788e4"
+  },
+  "asset/evil.js": {
+    "status": 404,
+    "header": {
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "size": 19,
+    "sha256": "b16e15764b8bc06c5c3f9f19bc8b99fa48e7894aa5a6ccdad65da49bbf564793"
+  },
+  "asset/flame.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 3392,
+    "sha256": "b0d95abd4b207b45d9b99acd7494fe398ab3e4da1421219b0556b68eca0766ee"
+  },
+  "asset/flame.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 9831,
+    "sha256": "0ceeb49c74b3e2d6960b48a0f5c9d5aa2478e12c4cc9eb1104664daf733cf3af"
+  },
+  "asset/flatbuffers.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 9269,
+    "sha256": "e2e255fa750cc1ba9c2dbae40290cc8cb00a39546c926f86a49164ad1dea308f"
+  },
+  "asset/highlight.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 124980,
+    "sha256": "471ef9ae90c407af440fcdc48edfeeb562106b3267bd12d99071c162fb52ed32"
+  },
+  "asset/hljs-dark.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 1315,
+    "sha256": "9f208d022102b1d0c7aebfecd8e42ca7997d5de636649d2b31ea63093d809019"
+  },
+  "asset/hljs-light.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 1309,
+    "sha256": "3a9a5def8b9c311e5ae43abde85c63133185eed4f0d9f67fea4b00a8308cf066"
+  },
+  "asset/kb-search.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 7836,
+    "sha256": "ea031400be74b4b19dde2f1ac8c5ec654c59d4fb83e210472d529f0b95ab09b4"
+  },
+  "asset/kb-tree.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 8381,
+    "sha256": "ca0d5de7403df011e4f59db4e08826c1fbb67f802bd7cb1cfebd0b5e2e48e68d"
+  },
+  "asset/kb.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 13741,
+    "sha256": "dda80e7fa9398cc4cc2b02a029335a229f9efdca0eda5e9102adf6c3e3421d7a"
+  },
+  "asset/kb.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 28087,
+    "sha256": "7627150b7fa646c4a94690ad79857bb94d40d36cf8cb825f4a2f017b1037a90d"
+  },
+  "asset/linegutter.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 1896,
+    "sha256": "25f669572950343b3c78d923670ba5b962e2401bd39537d2a9aa34e02d033836"
+  },
+  "asset/linegutter.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 4976,
+    "sha256": "6e1b03e32d3fd1164fc4157c62797ed22909590d221f35ea61908ecbb5d817a8"
+  },
+  "asset/log.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 7908,
+    "sha256": "8de419be54a426d82c055058d0528c40487295ac86955d9110a32d0160246d58"
+  },
+  "asset/log.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 21700,
+    "sha256": "3f80a62c46d8fc0b93ba426d461c0113787f20022c4dec5986ceea4ed0a7002e"
+  },
+  "asset/marked.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 35479,
+    "sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894"
+  },
+  "asset/md.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 4853,
+    "sha256": "f225f682a5d0a35ed93d43abf9f3da2d996187dc1be4352acfb5b921006b2a94"
+  },
+  "asset/md.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 5699,
+    "sha256": "7ef741eb8b076118094c06454d89d9c3af847f5c05c7668230e3dd0326efa857"
+  },
+  "asset/mdshell/md.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 5699,
+    "sha256": "7ef741eb8b076118094c06454d89d9c3af847f5c05c7668230e3dd0326efa857"
+  },
+  "asset/mermaid.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 1105,
+    "sha256": "0f11f7f23f91f0090ec7d1b1d86feca8787aadf8439ebc14e339599a3d3cafbf"
+  },
+  "asset/mermaid.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 1305,
+    "sha256": "64410e77531184a0ac84e8441b20ded7180ac38755bebc9f3356a2d0583e5c98"
+  },
+  "asset/mermaid.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 3565102,
+    "sha256": "74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b"
+  },
+  "asset/pdf.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 2606,
+    "sha256": "8a25c58b0ea3ca95dc0e97c23349c15c90248f8cd8b21a7b5fcbeb1da571f3d8"
+  },
+  "asset/pdf.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 7657,
+    "sha256": "5622f6b8fbd081e52ed03b10449582c4c4085bffccb43b3c7709a3d715c2e13d"
+  },
+  "asset/pdf.min.mjs": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 352645,
+    "sha256": "27fc2a057a00f92a4334ad06e17dbd7259912954e9fb7f76400bcca5fd190a9c"
+  },
+  "asset/pdf.worker.min.mjs": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 1375838,
+    "sha256": "1baa1844c89c80a5b2797c916e75ab29254be46d8e9cb53cb6364d7aad84be36"
+  },
+  "asset/purify.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 21251,
+    "sha256": "833a4bb2049353452eaac19dfe376324c0f11d33b008765f094bfadf4a5501f0"
+  },
+  "asset/query.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 5299,
+    "sha256": "f49c710bece85113ab433785ce16f6f6d5a5d2f29392bc4e7d7842dd366cc76b"
+  },
+  "asset/shell.html": {
+    "status": 404,
+    "header": {
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "size": 19,
+    "sha256": "b16e15764b8bc06c5c3f9f19bc8b99fa48e7894aa5a6ccdad65da49bbf564793"
+  },
+  "asset/shells.json": {
+    "status": 404,
+    "header": {
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff"
+    },
+    "size": 19,
+    "sha256": "b16e15764b8bc06c5c3f9f19bc8b99fa48e7894aa5a6ccdad65da49bbf564793"
+  },
+  "asset/text.css": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/css; charset=utf-8"
+    },
+    "size": 1759,
+    "sha256": "a7dbe95cbe716d8f176628f0bcddbd05c14ed9512cac6a81d30d04ad0ecae188"
+  },
+  "asset/text.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 3005,
+    "sha256": "e5a6f01f37cb278d42b489570743660207c6bba5516dad5ee40b6eb790315db0"
+  },
+  "asset/tslib.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 10708,
+    "sha256": "4f4982b6423bc56309d1d97cc76b26a4dc0e36c6cec7fee540a2ff8e0f408115"
+  },
+  "kb/document": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"kbshell-v4\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 2172,
+    "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
+  },
+  "kb/raw": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, no-cache",
+      "Content-Type": "text/markdown; charset=utf-8",
+      "Etag": "\"key-setup\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 8,
+    "sha256": "5a4f421ee720f133f23c0e822eaf4f047560f62255b451624a3ec1145084494e"
+  },
+  "kb/root": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"kbshell-v4\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 2172,
+    "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
+  },
+  "raw/csv": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/diff": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/flamegraph": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/json": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "application/json; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/knowledgebase": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/markdown; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/log": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/markdown": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/markdown; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/mermaid": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/pdf": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "application/pdf",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "raw/text": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Etag": "\"uploads/a/0\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 23,
+    "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
+  },
+  "shell/csv": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"datashell-v7\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 1200,
+    "sha256": "a962c5f5193c2e1d57a365a705dd1ec4bbd80468aceeb39bd8a8ddebdf264bf2"
+  },
+  "shell/diff": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"diffshell-v32\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 1126,
+    "sha256": "93ca800e049f996030255a0f787bdb1d61c59cf6c02a64be4af5fe79c38b442d"
+  },
+  "shell/flamegraph": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"flameshell-v2\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 888,
+    "sha256": "8bd10ae04f431a28cf4fb60b1dac42bd844411b60c405382fe1f51ef407f24d6"
+  },
+  "shell/json": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"datashell-v7\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 1201,
+    "sha256": "3c7ff2445c65b1b2c205244d10baabbaf5ceab4d7c80499bee0441ffc1f4790c"
+  },
+  "shell/knowledgebase": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"kbshell-v4\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 2172,
+    "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
+  },
+  "shell/log": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"logshell-v4\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 1185,
+    "sha256": "051817ba05d2674e237547187d3ccadfcb62dfaecf2e7887d9e5e1f7f57c05be"
+  },
+  "shell/markdown": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"mdshell-v7\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 506,
+    "sha256": "80a7a2ba1a7b55b45d3ed4dff3de3b138353f9288945102437812b0e22e768f0"
+  },
+  "shell/mermaid": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"mermaidshell-v1\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 515,
+    "sha256": "c0130e19f9c0ca949c40c8df6db06f202c20f723cf12055e65951eed227c16fa"
+  },
+  "shell/pdf": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"pdfshell-v4\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 791,
+    "sha256": "2cf3b8a9651330ffa046651246952010db18e937e307c8a9cbf9661e3599cb7f"
+  },
+  "shell/text": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=3600",
+      "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Etag": "\"textshell-v1\"",
+      "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Referrer-Policy": "no-referrer",
+      "X-Frame-Options": "DENY"
+    },
+    "size": 725,
+    "sha256": "7f49bdddeb81a9701ca0c087d6b048eaa233456df577d6aab12e1d73c9fe01f3"
+  }
+}
