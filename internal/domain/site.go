@@ -31,8 +31,14 @@ type ManifestEntry struct {
 	// Key is the object holding the file's bytes, under its upload's prefix.
 	// Objects never change, so it doubles as an HTTP validator. An entry
 	// without one names no bytes.
-	Key            string
-	Size           int    // decoded bytes; the read path's Content-Length (negative: unknown)
+	Key string
+	// Size is the decoded bytes, for display. Entries written before
+	// DecodedSize existed may hold 0 or the stored length here, so no read
+	// trusts it.
+	Size int
+	// DecodedSize is the decoded bytes, recorded by every current write path;
+	// the read path's Content-Length. 0 is unknown, an empty file included.
+	DecodedSize    int    `json:",omitempty"`
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
 	ContentType    string // by extension; see ContentTypeForPath
 
@@ -41,6 +47,15 @@ type ManifestEntry struct {
 	// single-document paste keeps its detected kind; a file inside a directory
 	// leaves it empty and is served raw.
 	Kind string
+}
+
+// DecodedLength is the entry's recorded decoded length, and whether it has
+// one.
+func (e ManifestEntry) DecodedLength() (int, bool) {
+	if e.DecodedSize <= 0 {
+		return 0, false
+	}
+	return e.DecodedSize, true
 }
 
 // Manifest maps each safe, site-root-relative path to its blob ref. Pure

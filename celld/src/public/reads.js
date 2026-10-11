@@ -99,10 +99,11 @@ export function readPath(openBlob) {
         warn(target.slug, `${what} blob read: ${error.message}`);
         return failure();
       }
-      // The manifest's size is the decoded length; held to it, damage found
-      // after the headers leaves a body short of its Content-Length.
-      const size = entry.size;
-      if (Number.isSafeInteger(size) && size >= 0) {
+      // Held to its recorded decoded length, damage found after the headers
+      // leaves a body short of its Content-Length. An entry without one
+      // states none: a runtime may end its errored body as if whole.
+      const size = entry.decodedSize;
+      if (Number.isSafeInteger(size) && size > 0) {
         headers["Content-Length"] = String(size);
         body = exactLength(body, size);
       }

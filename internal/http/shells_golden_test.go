@@ -30,7 +30,7 @@ type goldenResponse struct {
 }
 
 // recordResponse leaves out Content-Length: it is framing, which the Worker's
-// runtime decides, and TestRead_ContentLengthIsTheRecordedSize pins its value.
+// runtime decides, and TestRead_ContentLengthIsTheDecodedSize pins its value.
 func recordResponse(w *httptest.ResponseRecorder) goldenResponse {
 	h := map[string]string{}
 	for name, values := range w.Header() {

@@ -1030,7 +1030,8 @@ Nothing about the product opinions changes for sites:
   upload uses, gated by the same Sybil per-subnet admission.
 - **Quota** counts every path in every retained version against the SAME
   per-identity cap, using each final manifest entry's stored (post-zstd)
-  compressed size. Each entry keeps its uncompressed `Size` for display;
+  compressed size. Each entry keeps its uncompressed size, as `Size` for
+  display and as `DecodedSize` for the read path (see "On-disk format");
   `CompressedSize` is the quota basis. The untar guard
   separately bounds the uncompressed running total against the owner's remaining
   allowance. The persisted charge is computed from the final normalized
@@ -2884,16 +2885,24 @@ byte is served (the HTTP read surface logs the slug and answers 500, `get`
 exits 1), while every other object stays readable. The Worker's read path
 decodes the same format (see "The public surface").
 
+A manifest entry records its object's decoded (uncompressed) length in up to
+two fields. `Size` is for display only: an entry written before `DecodedSize`
+existed may hold a wrong one there (0, or the object's stored length).
+`DecodedSize` is set by every current write path, a document's from the bytes
+read from its input and a site or knowledge base file's from the bytes read
+out of its archive entry, and is absent on older entries; an empty file
+records none either, since 0 is absent. It is the only length a read trusts.
+
 A read response that streams stored bytes (an HTML paste, `?raw` bytes, a site
-or knowledge base file) declares the entry's decoded size, the manifest's
-`Size`, as its `Content-Length`, on GET and HEAD alike; a negative size is
-unknown and declares none, while 0 is an empty file. The first chunk is
-decoded before the status is sent, so damage found there (a bad frame header)
-is a 500 like an unframed object. Damage found later aborts the response and
-logs one warning naming the slug, and the last byte is held back until the
-stream ends cleanly, so damage the frame checksum finds at the very end still
-leaves the client short of the declared length: a damaged object never reads
-as a complete body. A decoded size that disagrees with the recorded one is
+or knowledge base file) declares the entry's `DecodedSize` as its
+`Content-Length`, on GET and HEAD alike, when the entry carries one (greater
+than 0). An entry without one streams with no declared length, whatever its
+`Size`. The first chunk is decoded before the status is sent, so damage found
+there (a bad frame header) is a 500 like an unframed object. Damage found
+later aborts the response and logs one warning naming the slug, and the last
+byte is held back until the stream ends cleanly, so damage the frame checksum
+finds at the very end still breaks the transfer: a damaged object never reads
+as a complete body. A decoded length that disagrees with the declared one is
 logged too, and the response ends short of its `Content-Length`.
 
 ### Entries without an object key
@@ -3688,7 +3697,7 @@ case:
 | no row, `notfound` | 404 |
 | `pending` | 200 loading page, `no-store`, `Retry-After: 1` |
 | `failed` | 410 error page, `no-store` |
-| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the object key, `Content-Length` the manifest's size |
+| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the object key, `Content-Length` the entry's decoded size when it has one |
 | `shell`, `kbshell` | 200, the kind's shell with its CSP, ETag the shell version |
 | `files` | 200, the sorted path list as `json.Encoder` writes it, ETag `files-<upload id>` |
 | a kind with no shell | 500 `unsupported kind` |
@@ -3716,18 +3725,22 @@ of several MiB) is dropped when its decode ends instead of kept idle.
 The first chunk is decoded before the response starts, so a missing object, a
 missing magic or a damaged frame header is a 500. Damage found later (the
 checksum sits at the end of the frame) errors the response's body stream and
-logs one warning naming the slug. A GET of stored bytes carries
-`Content-Length`: the manifest entry's size, which is the decoded length, held
-to it by the runtime's `FixedLengthStream` where it has one. Decoded bytes
-that would run past that size, or end short of it, are damage too, and the
-chunk that would run past is not sent. The chunk that completes the size is
-sent only once the stream has ended cleanly (the decoder verifies the frame
+logs one warning naming the slug. A GET of stored bytes whose entry carries a
+`DecodedSize` (see "On-disk format") states it as `Content-Length`, held to
+it by the runtime's `FixedLengthStream` where it has one. Decoded bytes that
+would run past that size, or end short of it, are damage too, and the chunk
+that would run past is not sent. The chunk that completes the size is sent
+only once the stream has ended cleanly (the decoder verifies the frame
 checksum after its last output), so damage found at the checksum also leaves
 the body short. A body that ends early either aborts the connection or ends
-short of its `Content-Length`, and no client takes it for whole. An answer
-with no size, or a negative one, streams without a `Content-Length` (a
-manifest entry that has no `Size` decodes as 0, as Go reads it). Shells and
-file lists are generated and carry none. A HEAD never opens the object.
+short of its `Content-Length`, and no client takes it for whole. An entry
+without a decoded size (none, 0 or negative, whatever its `Size`; a missing
+field decodes as 0, as Go reads it) streams without a `Content-Length`. Its
+damage found after the headers still errors the body stream and logs, but a
+runtime may end a chunked response cleanly when its body errors (Cloudflare
+does), so there a damaged body can read as whole: only the decoded size
+guards against that. Shells and file lists are generated and carry none. A
+HEAD never opens the object.
 
 **Renderer assets.** On Cloudflare, the build's static assets answer every
 known `/_hostthis/<name>` before the Worker runs. A request that reaches the
@@ -3781,21 +3794,23 @@ off unless configured, and used only where the runtime has a Cache API
   misses goes to the read path and fills nothing. Only a `200` with the
   content posture is stored: never a 5xx, a 404, or a pending or failed page.
   A fill is capped by `HOSTTHIS_EDGE_CACHE_MAX_BYTES` (default 8 MiB): a
-  response whose `Content-Length` (the manifest's size) is over it starts no
-  fill, and one that states none (a shell, a file list) is abandoned once it
-  runs past it. A write purges the slug's host (see "Active invalidation"),
-  which also drops these entries; the TTL bounds a missed purge. A read that
+  response whose `Content-Length` (the entry's decoded size) is over it starts
+  no fill, and one that states none (a shell, a file list, an entry without a
+  decoded size) is abandoned once it runs past it. A write purges the slug's
+  host (see "Active invalidation"), which also drops these entries; the TTL
+  bounds a missed purge. A read that
   began before a write can still be filling when the purge lands, so a fill
   must end within 10 s of its read beginning (timed from before the read's
   cell call), and one that would end later is abandoned and stores nothing:
   `hostthisd` purges the slug a second time 15 s after each purge, and that
   second purge then finds every entry such a read stored.
 - `HOSTTHIS_BLOB_CACHE_MAX_BYTES` (default `0`, off) caches the decoded bytes
-  of each object whose decoded size (the manifest's) is at most that many
-  bytes, keyed by the object key. A key never names different bytes, so these
-  entries need no invalidation; they serve the miss right after a purge when
-  the bytes did not change (a pin back to an older version). A decode that
-  fails stores nothing.
+  of each object whose entry carries a decoded size (`DecodedSize`) of at most
+  that many bytes, keyed by the object key; an entry without one is not
+  cached. A key never names different bytes, so these entries need no
+  invalidation; they serve the miss right after a purge when the bytes did
+  not change (a pin back to an older version). A decode that fails stores
+  nothing.
 - A cache that fails to answer is a miss, never an error.
 
 A response stored while it streams to the client is split in lockstep: the

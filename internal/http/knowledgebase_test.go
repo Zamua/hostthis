@@ -29,7 +29,9 @@ func buildKBServer(t *testing.T) *Server {
 		{"report.html", "key-html", "<h1>report</h1>"},
 		{"files.json", "key-files", `{"own":"file"}`},
 	} {
-		m.Add(f.path, domain.ManifestEntry{Key: f.key, Size: len(f.body), ContentType: domain.ContentTypeForPath(f.path)})
+		m.Add(f.path, domain.ManifestEntry{
+			Key: f.key, Size: len(f.body), DecodedSize: len(f.body), ContentType: domain.ContentTypeForPath(f.path),
+		})
 		blobs[f.key] = []byte(f.body)
 	}
 	return &Server{

@@ -304,7 +304,7 @@ test("an edge fill is capped by the response's size", async () => {
   const w = world({ ...TTL, HOSTTHIS_EDGE_CACHE_MAX_BYTES: "11" });
   w.row(SLUG, hiRow());
   w.blob("uploads/a/0", "<h1>hi</h1>");
-  w.row("xyz23456", { ...hiRow(), manifest: { Files: { "/": { Key: "uploads/b/0", Size: 12 } } } });
+  w.row("xyz23456", { ...hiRow(), manifest: { Files: { "/": { Key: "uploads/b/0", Size: 12, DecodedSize: 12 } } } });
   w.blob("uploads/b/0", "<h1>hi!</h1>");
   // A shell states no size, and is far over the cap.
   w.row("mnp23456", documentRow("markdown"));
@@ -323,7 +323,7 @@ test("the edge fill cap defaults to 8 MiB", async () => {
   const cache = new FakeCache();
   const w = world(TTL);
   for (const [slug, size] of [[SLUG, 8 * 1024 * 1024], ["xyz23456", 8 * 1024 * 1024 + 1]]) {
-    w.row(slug, { ...documentRow("html", "ready", size), manifest: { Files: { "/": { Key: `k-${slug}`, Size: size } } } });
+    w.row(slug, { ...documentRow("html", "ready", size), manifest: { Files: { "/": { Key: `k-${slug}`, Size: size, DecodedSize: size } } } });
     w.blob(`k-${slug}`, "short");
   }
   const warn = console.warn;
@@ -357,23 +357,27 @@ test("the blob cache keeps decoded payloads under the size cap, by object key", 
   w.row(SLUG, {
     kind: "site", status: "ready", updatedAt: 1, uploadId: "us",
     manifest: { Files: {
-      "index.html": { Key: "k-small", Size: 5 },
-      "big.txt": { Key: "k-big", Size: 101 },
+      "index.html": { Key: "k-small", Size: 5, DecodedSize: 5 },
+      "big.txt": { Key: "k-big", Size: 101, DecodedSize: 101 },
       "empty.txt": { Key: "k-empty", Size: 0 },
+      "legacy.txt": { Key: "k-legacy", Size: 6 },
     } },
   });
   w.blob("k-small", "small");
   w.blob("k-big", "b".repeat(101));
   w.blob("k-empty", "");
+  w.blob("k-legacy", "legacy");
   await withCaches(cache, async () => {
-    for (const path of ["/", "/big.txt", "/empty.txt"]) await (await w.fetch(at(path))).text();
+    for (const path of ["/", "/big.txt", "/empty.txt", "/legacy.txt"]) await (await w.fetch(at(path))).text();
     await settle(w);
-    assert.deepEqual([...cache.entries.keys()], ["https://paste.test/_blobs/k-small", "https://paste.test/_blobs/k-empty"]);
+    // Only a recorded decoded size can be checked against the cap.
+    assert.deepEqual([...cache.entries.keys()], ["https://paste.test/_blobs/k-small"]);
     assert.equal(new TextDecoder().decode(cache.entries.get("https://paste.test/_blobs/k-small").body), "small");
     w.payloadCalls.length = 0;
     assert.equal(await (await w.fetch(at("/"))).text(), "small");
     assert.equal(await (await w.fetch(at("/big.txt"))).text(), "b".repeat(101));
-    assert.deepEqual(w.payloadCalls, ["get k-big"]);
+    assert.equal(await (await w.fetch(at("/legacy.txt"))).text(), "legacy");
+    assert.deepEqual(w.payloadCalls, ["get k-big", "get k-legacy"]);
   });
 });
 
