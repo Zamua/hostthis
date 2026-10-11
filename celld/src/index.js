@@ -3,7 +3,7 @@ import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
 import { resolveRead } from "./read.js";
 import {
-  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP,
+  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
 } from "./rooms/policy.js";
 
 // The owner identity scopes intents, quota reservations, and the paste index.
@@ -1475,32 +1475,35 @@ export class Room {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // Closes the sockets whose last ping answer is stale, then refuses a join
-  // past the cap with the 429 the client sees in place of the 101. A socket
-  // that never pinged has no answer to go stale; it leaves when it closes or a
-  // write to it fails. ROOM_PING_STALE_MS in env is a test hook.
+  // A join at the cap first closes the sockets whose last ping answer is
+  // stale, then is refused with the 429 the client sees in place of the 101
+  // if the room is still full. Under the cap nothing is evicted, so a client
+  // whose pings are only late keeps its socket. A socket that never pinged has
+  // no answer to go stale; it leaves when it closes or a write to it fails.
+  // ROOM_PING_STALE_MS in env is a test hook.
   admit(now) {
     if (!this.publicSurface) {
       return null;
     }
+    // A socket already closing is on its way out.
+    const open = this.state.getWebSockets().filter((ws) => !(ws.readyState >= 2));
+    if (open.length < ROOM_SOCKET_CAP) {
+      return null;
+    }
     const staleAfter = Number(this.env?.ROOM_PING_STALE_MS ?? ROOM_PING_STALE_MS);
-    let open = 0;
-    for (const ws of this.state.getWebSockets()) {
+    let kept = open.length;
+    for (const ws of open) {
       const answered = this.state.getWebSocketAutoResponseTimestamp?.(ws) ?? null;
       if (answered !== null && now - answered.getTime() > staleAfter) {
         try {
-          ws.close(1000, "stale");
+          ws.close(ROOM_STALE_CLOSE, "stale");
         } catch {
           // closed already
         }
-        continue;
-      }
-      // A socket already closing is on its way out.
-      if (!(ws.readyState >= 2)) {
-        open++;
+        kept--;
       }
     }
-    if (open < ROOM_SOCKET_CAP) {
+    if (kept < ROOM_SOCKET_CAP) {
       return null;
     }
     return new Response("room connection limit reached\n", {
