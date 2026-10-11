@@ -1379,9 +1379,14 @@ export class Room {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    // The runtime answers the ping itself, without waking the cell, and
-    // records when it last did: the liveness admit() reads.
-    state.setWebSocketAutoResponse?.(new WebSocketRequestResponsePair(PING_FRAME, PONG_FRAME));
+    // Off mode relays every frame, as hostthisd's proxy, which owns admission
+    // and the frame limit there, expects.
+    this.publicSurface = publicSurfaceOn(env);
+    if (this.publicSurface) {
+      // The runtime answers the ping itself, without waking the cell, and
+      // records when it last did: the liveness admit() reads.
+      state.setWebSocketAutoResponse?.(new WebSocketRequestResponsePair(PING_FRAME, PONG_FRAME));
+    }
   }
 
   // The app's paste cell, which owns the per-app room budget and the creation
@@ -1475,6 +1480,9 @@ export class Room {
   // that never pinged has no answer to go stale; it leaves when it closes or a
   // write to it fails. ROOM_PING_STALE_MS in env is a test hook.
   admit(now) {
+    if (!this.publicSurface) {
+      return null;
+    }
     const staleAfter = Number(this.env?.ROOM_PING_STALE_MS ?? ROOM_PING_STALE_MS);
     let open = 0;
     for (const ws of this.state.getWebSockets()) {
@@ -2040,7 +2048,7 @@ export class Room {
   }
 
   async webSocketMessage(ws, message) {
-    if (overFrameLimit(message)) {
+    if (this.publicSurface && overFrameLimit(message)) {
       try {
         ws.close(1009, "frame too large");
       } catch {
@@ -2071,6 +2079,11 @@ export class Room {
       }
     }
   }
+}
+
+// The Worker serves the public surface once it has an apex.
+function publicSurfaceOn(env) {
+  return normalizeHost(env?.HOSTTHIS_APEX_DOMAIN ?? "") !== "";
 }
 
 // Every UTF-16 unit is one to three bytes of UTF-8, so only a frame between

@@ -22,25 +22,32 @@ try {
 const skip = Miniflare ? false : "celld/localrt is not installed";
 
 let mf;
+// The same bundle with no apex: off mode, where hostthisd's proxy fronts the room.
+let mfOff;
 
-before(async () => {
-  if (skip) return;
+function runtime(bindings) {
   const config = JSON.parse(readFileSync(`${celld}wrangler.jsonc`, "utf8")
     .split("\n").filter((line) => !line.trim().startsWith("//")).join("\n"));
-  mf = new Miniflare({
+  return new Miniflare({
     modules: true,
     scriptPath: `${celld}dist/index.js`,
     modulesRoot: celld,
     modulesRules: [{ type: "ESModule", include: ["**/*.js"] }, { type: "CompiledWasm", include: ["**/*.wasm"] }],
     compatibilityDate: config.compatibility_date,
     cf: false,
-    bindings: { HOSTTHIS_APEX_DOMAIN: APEX, HOSTTHIS_CELLD_TOKEN: TOKEN, ROOM_PING_STALE_MS: String(STALE_MS) },
+    bindings,
     r2Buckets: Object.fromEntries(config.r2_buckets.map((b) => [b.binding, b.bucket_name])),
     durableObjectsPersist: false,
     durableObjects: Object.fromEntries(config.durable_objects.bindings
       .map((b) => [b.name, { className: b.class_name, useSQLite: true }])),
   });
-  await mf.ready;
+}
+
+before(async () => {
+  if (skip) return;
+  mf = runtime({ HOSTTHIS_APEX_DOMAIN: APEX, HOSTTHIS_CELLD_TOKEN: TOKEN, ROOM_PING_STALE_MS: String(STALE_MS) });
+  mfOff = runtime({ HOSTTHIS_CELLD_TOKEN: TOKEN, ROOM_PING_STALE_MS: String(STALE_MS) });
+  await Promise.all([mf.ready, mfOff.ready]);
   const res = await mf.dispatchFetch(`http://celld.internal/paste/put?slug=${APP}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${TOKEN}` },
@@ -54,6 +61,7 @@ before(async () => {
 
 after(async () => {
   await mf?.dispose();
+  await mfOff?.dispose();
 });
 
 async function newRoom() {
@@ -66,9 +74,19 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // An accepted client socket with its frames queued and its close recorded.
 async function connect(id, headers = {}) {
-  const res = await mf.dispatchFetch(`http://${APP}.${APEX}/api/rooms/${id}/ws`, {
+  return accepted(await mf.dispatchFetch(`http://${APP}.${APEX}/api/rooms/${id}/ws`, {
     headers: { Upgrade: "websocket", ...headers },
-  });
+  }));
+}
+
+// hostthisd's join, on the off-mode runtime.
+async function connectOff(id) {
+  return accepted(await mfOff.dispatchFetch(`http://celld.internal/room/join?room=${encodeURIComponent(`${APP}|${id}`)}`, {
+    headers: { Upgrade: "websocket", Authorization: `Bearer ${TOKEN}` },
+  }));
+}
+
+async function accepted(res) {
   if (res.status !== 101) {
     return { res };
   }
@@ -202,4 +220,24 @@ test("hostthisd's internal join still answers with a socket and a snapshot", { s
   const first = await new Promise((resolve) => res.webSocket.addEventListener("message", (e) => resolve(e.data)));
   assert.equal(JSON.parse(first).type, "snapshot");
   res.webSocket.close(1000);
+});
+
+test("off mode relays the ping frame and frames over 32 KiB, and admits a 65th socket", { skip }, async () => {
+  const id = crypto.randomUUID();
+  const a = await connectOff(id);
+  const b = await connectOff(id);
+  a.ws.send('{"type":"ping"}');
+  assert.equal(await b.next(), '{"type":"ping"}');
+  const big = "y".repeat(40 * 1024);
+  a.ws.send(big);
+  assert.ok((await b.next()) === big, "a frame over 32 KiB reached the peer");
+  assert.equal(await a.next(250), undefined, "no pong came back");
+  assert.equal(a.closed, null);
+  const more = [];
+  for (let n = 2; n < 65; n++) {
+    const client = await connectOff(id);
+    assert.equal(client.res.status, 101, `socket ${n}`);
+    more.push(client);
+  }
+  for (const client of [a, b, ...more]) client.ws.close(1000);
 });
