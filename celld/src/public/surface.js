@@ -1,9 +1,30 @@
-// Composes the public read path for one request's configuration.
+// Composes the public read path for one request's configuration: the caches
+// wrap it only when configured and the runtime has a Cache API.
 import { openPayload } from "./blobs.js";
+import { withBlobCache, withEdgeCache } from "./caches.js";
+import { normalizeHost } from "./host.js";
 import { readPath } from "./reads.js";
 
 const openStored = (env, entry) => openPayload(env, entry.key);
 
-export function publicReads(_env) {
-  return readPath(openStored);
+function positive(value) {
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : 0;
+}
+
+// cacheStorage is the runtime's caches global, absent where there is none.
+export function publicReads(env, cacheStorage = typeof caches === "undefined" ? undefined : caches) {
+  const cache = cacheStorage?.default;
+  const ttl = positive(env.HOSTTHIS_EDGE_CACHE_TTL_S);
+  const blobMax = positive(env.HOSTTHIS_BLOB_CACHE_MAX_BYTES);
+  let open = openStored;
+  if (cache && blobMax) {
+    const origin = `https://${normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? "")}/_blobs`;
+    open = withBlobCache(open, { cache, maxBytes: blobMax, origin });
+  }
+  let read = readPath(open);
+  if (cache && ttl) {
+    read = withEdgeCache(read, { cache, ttl });
+  }
+  return read;
 }

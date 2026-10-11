@@ -3646,6 +3646,35 @@ stricter or the runtime decides:
 - Hosts compare lowercased, and `/p/` is served only on the apex host.
 - `.` and `..` segments are resolved by the URL parser rather than redirected.
 
+**Caches.** Both are decorators around the read path, wired at the entrypoint,
+off unless configured, and used only where the runtime has a Cache API
+(celld's always misses, so a celld deployment leaves them off):
+
+- `HOSTTHIS_EDGE_CACHE_TTL_S` (default `0`, off) caches whole read responses
+  in the data center's cache, keyed by the request URL on the public host. An
+  unconditional GET that misses fills it: the stored copy carries
+  `Cache-Control: public, max-age=<ttl>` and `Cache-Tag: <slug>`, while the
+  client gets the browser headers. A hit answers GET, HEAD and conditional
+  requests (the cache answers `If-None-Match` and `If-Modified-Since` with a
+  304 itself, by RFC 9110's rules) without a cell call or a payload read, and
+  reaches the client
+  with `Cache-Control: public, no-cache`. A conditional request or a HEAD that
+  misses goes to the read path and fills nothing. Only a `200` with the
+  content posture is stored: never a 5xx, a 404, or a pending or failed page.
+  A write purges the slug's host (see "Active invalidation"), which also
+  drops these entries; the TTL bounds a missed purge.
+- `HOSTTHIS_BLOB_CACHE_MAX_BYTES` (default `0`, off) caches the decoded bytes
+  of each object whose decoded size (the manifest's) is at most that many
+  bytes, keyed by the object key. A key never names different bytes, so these
+  entries need no invalidation; they serve the miss right after a purge when
+  the bytes did not change (a pin back to an older version). A decode that
+  fails stores nothing.
+- A cache that fails to answer is a miss, never an error.
+
+A response stored while it streams to the client is split in lockstep: the
+source is read only when both the client and the cache have taken the last
+chunk, so neither copy is buffered whatever the client's pace.
+
 ## Edge caching
 
 hostthis has two scaling cliffs that a CDN solves:
@@ -3691,6 +3720,10 @@ before any payload byte is read. The pending and failed pages are `no-store`
 
 The versioned renderer assets under `/_hostthis/` are
 `public, max-age=31536000, immutable`: their URLs carry the shell version.
+
+The Worker's public surface can also keep whole responses in the edge's own
+cache for a TTL, purged with the slug's host on every write (see "The public
+surface"); browsers still revalidate every load.
 
 Apex landing page is `Cache-Control: public, max-age=300` (5 min) so
 content updates propagate quickly without becoming a no-cache origin
@@ -4075,6 +4108,8 @@ HOSTTHIS_APEX_DOMAIN   public apex; turns on the public/internal host split     
 HOSTTHIS_CELLD_TOKEN   bearer token for the internal routes; required with an apex   (unset)
 HOSTTHIS_URL_MODE      path also serves /p/<slug> on the apex host (dev only)   (subdomain)
 ASSETS                 static assets binding for /_hostthis/; absent serves them from PAYLOADS
+HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      (0)
+HOSTTHIS_BLOB_CACHE_MAX_BYTES  largest decoded payload cached; 0 is off         (0)
 ```
 
 See "Public and internal hosts". A deployment runs the bundled Worker,
