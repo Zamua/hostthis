@@ -78,6 +78,7 @@ func (r *localRuntime) start() {
 	}
 	ready := make(chan string, 1)
 	go func() {
+		defer close(ready)
 		sc := bufio.NewScanner(out)
 		for sc.Scan() {
 			if u, ok := strings.CutPrefix(sc.Text(), "LISTENING "); ok {
@@ -86,7 +87,12 @@ func (r *localRuntime) start() {
 		}
 	}()
 	select {
-	case r.baseURL = <-ready:
+	case u, ok := <-ready:
+		if !ok {
+			r.bootErr = fmt.Errorf("celldtest: runtime exited before serving; its stderr says why (a missing or stale bundle needs `make bundle`)")
+			return
+		}
+		r.baseURL = u
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		r.bootErr = fmt.Errorf("celldtest: runtime not ready after 30s")

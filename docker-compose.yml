@@ -10,21 +10,31 @@
 # Production: drop these mappings, run with --network=host, and
 # have a TLS-terminating reverse proxy front 127.0.0.1:8080.
 #
-# The celld service runs the Worker under Miniflare, the same runtime the
-# tests use; production runs it on celld instead. Its port is not published.
+# The celld service builds the Worker bundle and runs it under Miniflare, the
+# same runtime the tests use; production runs it on celld instead. Its port is
+# not published.
 
 services:
   celld:
     image: node:24-slim
     working_dir: /celld/localrt
-    command: ["sh", "-c", "npm ci --no-audit --no-fund && exec node serve.mjs"]
+    command:
+      - sh
+      - -c
+      - >-
+        npm ci --prefix /celld --no-audit --no-fund &&
+        npm --prefix /celld run build &&
+        npm ci --no-audit --no-fund &&
+        exec node serve.mjs
     environment:
       HOST: 0.0.0.0
       PORT: "8787"
       PERSIST_DIR: /data
     volumes:
       - ./celld:/celld
-      # Linux modules stay in the volume, apart from the host's own install.
+      # Linux modules and the bundle stay in volumes, apart from the host's own.
+      - celld-modules:/celld/node_modules
+      - celld-dist:/celld/dist
       - localrt-modules:/celld/localrt/node_modules
       - ./data/celld:/data
     restart: unless-stopped
@@ -53,4 +63,6 @@ services:
     user: "65532:65532"
 
 volumes:
+  celld-modules:
+  celld-dist:
   localrt-modules:

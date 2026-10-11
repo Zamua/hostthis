@@ -1,9 +1,9 @@
-// Local entry for the celld Worker under workerd. The Worker source runs
+// Local entry for the celld Worker under workerd. The bundled Worker runs
 // unchanged; this module only adds isolation: a request under /ns/<id>/
 // addresses cells named "\0ns:<id>\0<name>", and every cell-to-cell call from
 // such a cell stays in the same namespace, so one runtime serves many tests
 // without shared state.
-import worker, * as cells from "../src/index.js";
+import worker, * as cells from "../dist/index.js";
 
 // NUL cannot occur in a name the Go adapters build.
 const NS_MARK = "\0ns:";
