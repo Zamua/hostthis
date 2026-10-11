@@ -236,7 +236,14 @@ suite.
 make e2e        # run it (installs e2e/node_modules on first use)
 make e2e-ci     # same, after installing the browsers and their system libraries
 make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'   # one file, one engine
+E2E_READS=worker make e2e   # read every paste from the Worker's public surface
 ```
+
+With `E2E_READS=worker` each Worker runs its public surface in path mode at
+`localhost`, a host its daemon's internal endpoint (`127.0.0.1`) does not
+share, and the daemon prints URLs on it, so the browser reads from the Worker
+while uploads still go through hostthisd. That run writes
+`e2e/playwright-report-worker`. CI runs both modes.
 
 The harness is `e2e/fixtures.ts`. A run builds `hostthisd` once and mints one
 SSH key; each Playwright worker starts its own celld Worker under Miniflare and

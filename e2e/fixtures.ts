@@ -9,8 +9,17 @@ import { dirname, join } from 'node:path';
 export type UploadOpts = { type?: string; name?: string };
 export type Paste = { slug: string; url: string };
 
+// E2E_READS picks what the browser reads from: hostthisd (the default), or
+// the celld Worker's public surface, whose host hostthisd's URLs then name.
+const reads = process.env.E2E_READS || 'hostthisd';
+if (reads !== 'hostthisd' && reads !== 'worker') {
+  throw new Error(`E2E_READS is ${JSON.stringify(reads)}, not hostthisd or worker`);
+}
+
 export class Server {
+  // The origin pastes are read from, and the server behind it.
   readonly baseURL: string;
+  readonly reads = reads;
   private log = '';
   private exited = false;
 
@@ -21,7 +30,7 @@ export class Server {
     readonly sshPort: number,
     private dataDir: string,
   ) {
-    this.baseURL = `http://${httpAddr}`;
+    this.baseURL = reads === 'worker' ? runtime.publicURL : `http://${httpAddr}`;
     proc.stdout?.on('data', (d) => (this.log += d));
     proc.stderr?.on('data', (d) => (this.log += d));
     proc.on('exit', () => (this.exited = true));
@@ -35,7 +44,7 @@ export class Server {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (this.exited) throw new Error(`hostthisd exited before serving\n${this.log}`);
-      if ((await httpUp(`${this.baseURL}/healthz`)) && (await tcpUp(this.sshPort))) return;
+      if ((await httpUp(`http://${this.httpAddr}/healthz`)) && (await tcpUp(this.sshPort))) return;
       await sleep(50);
     }
     throw new Error(`hostthisd did not serve http+ssh within ${timeoutMs}ms\n${this.log}`);
@@ -122,18 +131,32 @@ export class Server {
 // Runtime is the celld Worker under Miniflare (celld/localrt), one per worker,
 // so each daemon owns its cells. It exits when its stdin closes. It requires a
 // bearer token, so every flow the suite drives also proves the daemon sends it.
+// In worker mode its public surface is on, in path mode, at localhost: a host
+// the daemon's internal endpoint (127.0.0.1) does not share.
 class Runtime {
+  readonly publicURL: string;
+
   private constructor(
     private proc: ChildProcess,
     readonly url: string,
     readonly token: string,
-  ) {}
+  ) {
+    this.publicURL = `http://localhost:${new URL(url).port}`;
+  }
 
   static async start(timeoutMs = 30_000): Promise<Runtime> {
     const token = randomBytes(16).toString('hex');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('HOSTTHIS_LOCALRT_')));
+    if (reads === 'worker') {
+      Object.assign(env, {
+        HOSTTHIS_LOCALRT_APEX_DOMAIN: 'localhost',
+        HOSTTHIS_LOCALRT_URL_MODE: 'path',
+        HOSTTHIS_LOCALRT_PUBLIC_SCHEME: 'http',
+      });
+    }
     const proc = spawn('node', ['serve.mjs'], {
       cwd: join(process.env.HOSTTHIS_E2E_ROOT!, 'celld', 'localrt'),
-      env: { ...process.env, HOSTTHIS_CELLD_TOKEN: token },
+      env: { ...env, HOSTTHIS_CELLD_TOKEN: token },
       stdio: ['pipe', 'pipe', 'inherit'],
     });
     let out = '';
@@ -229,7 +252,8 @@ export const test = base.extend<TestFixtures, { server: Server }>({
           ...env,
           HOSTTHIS_URL_MODE: 'path',
           HOSTTHIS_PUBLIC_SCHEME: 'http',
-          HOSTTHIS_APEX_DOMAIN: httpAddr,
+          // The apex names the host the URLs it prints point at.
+          HOSTTHIS_APEX_DOMAIN: reads === 'worker' ? new URL(runtime.publicURL).host : httpAddr,
           HOSTTHIS_HTTP_ADDR: httpAddr,
           HOSTTHIS_SSH_ADDR: `127.0.0.1:${ports[1]}`,
           HOSTTHIS_METRICS_ADDR: `127.0.0.1:${ports[2]}`,

@@ -2,7 +2,9 @@ name: e2e report (PR)
 
 # Publishes Playwright's HTML report for every pull request at one URL a
 # reviewer can open on a phone: results per browser, the screenshots the tests
-# attach, and traces for failures. Runs the `e2e-ci` make target.
+# attach, and traces for failures. Runs the `e2e-ci` make target twice: reading
+# from hostthisd, and with E2E_READS=worker from the celld Worker's public
+# surface, whose report is published under /worker/.
 on:
   pull_request:
 
@@ -17,7 +19,7 @@ permissions:
 jobs:
   report:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     env:
       # Job level, not step level: the secrets context is rejected in a step's
       # `if`, and a step's own env block is not visible to its own condition.
@@ -48,6 +50,13 @@ jobs:
         continue-on-error: true
         run: make e2e-ci
 
+      - name: Run e2e, Worker reads
+        id: tests-worker
+        continue-on-error: true
+        env:
+          E2E_READS: worker
+        run: make e2e-ci
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,6 +65,8 @@ jobs:
           path: |
             e2e/playwright-report/
             e2e/test-results/
+            e2e/playwright-report-worker/
+            e2e/test-results-worker/
           if-no-files-found: warn
           retention-days: 30
 
@@ -83,6 +94,11 @@ jobs:
           slug=$(hh hostthis.dev list -o json 2>/dev/null \
                  | jq -r --arg n "$REPORT_NAME" 'map(select(.name==$n))[0].slug // ""' 2>/dev/null || true)
           echo "existing slug for '$REPORT_NAME': ${slug:-<none>}"
+
+          if [ -d e2e/playwright-report-worker ]; then
+            rm -rf e2e/playwright-report/worker
+            cp -R e2e/playwright-report-worker e2e/playwright-report/worker
+          fi
 
           # errexit is on by default here, so the pipeline must be shielded or
           # the step dies before any diagnostic below it runs. stderr is kept:
@@ -116,13 +132,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" --body \
-            "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }} (commit \`${GITHUB_SHA:0:8}\`)"
+            "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }}, Worker reads ${{ steps.tests-worker.outcome }}: ${{ steps.publish.outputs.url }}/worker/ (commit \`${GITHUB_SHA:0:8}\`)"
 
       - name: Summary
         if: always()
         run: |
           {
-            echo "### e2e: ${{ steps.tests.outcome }}"
+            echo "### e2e: ${{ steps.tests.outcome }}, Worker reads: ${{ steps.tests-worker.outcome }}"
             echo ""
             echo "| field | value |"
             echo "| --- | --- |"
@@ -132,7 +148,7 @@ jobs:
 
       # The suite's own result decides the job, after the report exists.
       - name: Gate on the suite result
-        if: always() && steps.tests.outcome != 'success'
+        if: always() && (steps.tests.outcome != 'success' || steps.tests-worker.outcome != 'success')
         run: |
-          echo "e2e failed; report: ${{ steps.publish.outputs.url }}"
+          echo "e2e ${{ steps.tests.outcome }}, Worker reads ${{ steps.tests-worker.outcome }}; report: ${{ steps.publish.outputs.url }}"
           exit 1
