@@ -9,7 +9,7 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 
 import { REPO } from "../build/shells.mjs";
-import { DecodeError, INPUT_BATCH, MAGIC, zstdDecoder } from "../src/public/zstd.js";
+import { DecodeError, decoderStats, INPUT_BATCH, MAGIC, zstdDecoder } from "../src/public/zstd.js";
 
 const VENDOR = join(REPO, "celld", "vendor", "zstd");
 const OUT_CHUNK = 128 * 1024;
@@ -181,6 +181,30 @@ test("a window over 8 MiB is refused, and one of 8 MiB is not", async () => {
   // Window descriptor: exponent in the top five bits, log = 10 + exponent.
   await rejects(frame(14 << 3), /memory|window/i);
   assert.equal((await drain(decode(frame(13 << 3)))).size, 0);
+});
+
+// A frame with a window of 2^(10 + exponent) bytes and one last raw block of
+// size bytes, which makes the decoder allocate the window.
+function windowFrame(exponent, size) {
+  const header = (size << 3) | 1;
+  const bytes = new Uint8Array(MAGIC.length + 9 + size);
+  bytes.set([...MAGIC, 0x28, 0xb5, 0x2f, 0xfd, 0x00, exponent << 3, header & 0xff, (header >> 8) & 0xff, header >> 16]);
+  return bytes;
+}
+
+test("an instance whose memory grew past the pool's cap is dropped, not pooled", async () => {
+  await drain(decode(stored("text")));
+  const { idle } = decoderStats();
+  assert.ok(idle >= 1);
+  // A 1 MiB window, as hostthisd writes, keeps its instance.
+  assert.equal((await drain(decode(windowFrame(10, 1000)))).size, 1000);
+  assert.equal(decoderStats().idle, idle);
+  // An 8 MiB window grows the heap past the cap.
+  assert.equal((await drain(decode(windowFrame(13, 1000)))).size, 1000);
+  assert.equal(decoderStats().idle, idle - 1);
+  assert.equal(decoderStats().busy, 0);
+  const got = await drain(decode(stored("text")));
+  assert.equal(got.sha256, manifest.text.sha256);
 });
 
 test("a decoder that failed decodes the next stream correctly", async () => {
