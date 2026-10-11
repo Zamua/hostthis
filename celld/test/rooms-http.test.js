@@ -559,7 +559,13 @@ test("push routes 404 an unknown app first, then refuse other push paths", async
   await notFound(await w.fetch(url(`/api/rooms/${MISSING_ROOM}/push/test`), { method: "POST" }));
 });
 
-const WS = { Upgrade: "websocket", Connection: "Upgrade" };
+// A complete browser handshake.
+const WS = {
+  Upgrade: "websocket",
+  Connection: "Upgrade",
+  "Sec-WebSocket-Version": "13",
+  "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+};
 
 test("the socket route checks app, room, upgrade and origin before the join", async () => {
   const w = world();
