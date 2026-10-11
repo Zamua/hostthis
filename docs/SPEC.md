@@ -1277,7 +1277,8 @@ Behavior, endpoint by endpoint:
   NESTED object, not a JSON-string of escaped text - and as a JSON string of
   the verbatim bytes otherwise. (The WebSocket `snapshot` and `put` frames
   encode values identically; the single-key GET below instead returns the raw
-  bytes.) A well-formed UUID that names no room returns **404**.
+  bytes.) A well-formed UUID that names no room returns **404**, on both
+  servers also when the room goes away while the request is reading it.
 - **GET /api/rooms/<uuid>/<key>** returns the stored value verbatim with a
   conservative content type (`application/octet-stream` unless the app
   stored a recognizable JSON value, which is served `application/json`). A

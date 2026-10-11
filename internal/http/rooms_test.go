@@ -163,6 +163,24 @@ func TestRoomsHTTP_NonexistentRoomIs404(t *testing.T) {
 	}
 }
 
+// scanGone answers the room's meta but not its scan: the room went away
+// between the two reads.
+type scanGone struct{ service.RoomRepo }
+
+func (scanGone) ScanRoom(domain.Slug, domain.RoomID) (domain.RoomKV, error) {
+	return domain.RoomKV{}, domain.ErrNotFound
+}
+
+func TestRoomsHTTP_ScanOfARoomGoneAfterItsMetaIs404(t *testing.T) {
+	srv := buildRoomServer(t)
+	const slug = "appz2345"
+	id := createRoomID(t, srv, slug)
+	srv.Rooms.(*service.Rooms).Repo = scanGone{srv.Rooms.(*service.Rooms).Repo}
+	if w := req(t, srv, http.MethodGet, slug, "/api/rooms/"+id, nil); w.Code != http.StatusNotFound {
+		t.Fatalf("scan: code %d body %q, want 404", w.Code, w.Body.String())
+	}
+}
+
 // A key is read under the name it was written with: one that decodes to bytes
 // that are not UTF-8 is refused on every verb, before any cell call.
 func TestRoomsHTTP_KeyNotUTF8Is400(t *testing.T) {
