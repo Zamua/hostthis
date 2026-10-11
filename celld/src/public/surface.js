@@ -2,6 +2,8 @@
 // wrap it only when configured and the runtime has a Cache API, and the
 // runtime's FixedLengthStream, where it has one, holds each body to its
 // stated length.
+import { BUILD } from "hostthis:build";
+
 import { openPayload } from "./blobs.js";
 import { EDGE_CACHE_MAX_BYTES, withBlobCache, withEdgeCache } from "./caches.js";
 import { normalizeHost } from "./host.js";
@@ -33,7 +35,7 @@ export function publicReads(
   let read = readPath(open);
   if (cache && ttl) {
     const maxBytes = positive(env.HOSTTHIS_EDGE_CACHE_MAX_BYTES) || EDGE_CACHE_MAX_BYTES;
-    read = withEdgeCache(read, { cache, ttl, maxBytes });
+    read = withEdgeCache(read, { cache, ttl, build: BUILD, maxBytes });
   }
   if (fixedLengthStream) {
     read = withFixedLength(read, fixedLengthStream);

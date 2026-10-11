@@ -136,11 +136,11 @@ function keep(ctx, cache, key, tee, init, maxBytes) {
 
 // The key a response is stored under. Its host is the public host, so a
 // hostname purge of <slug>.<apex> reaches it (and in path mode, through
-// mount, a prefix purge of <apex>/p/<slug>). The rest names what the read
-// path answers from: the decoded path and the parsed flags, never the
-// client's query.
-function responseKey(target) {
-  const params = new URLSearchParams({ path: target.path });
+// mount, a prefix purge of <apex>/p/<slug>). The rest names the build, so a
+// deploy never serves another build's entries, and what the read path answers
+// from: the decoded path and the parsed flags, never the client's query.
+function responseKey(target, build) {
+  const params = new URLSearchParams({ build, path: target.path });
   if (target.flags.raw) params.set("raw", "1");
   if (target.flags.files) params.set("files", "1");
   return `https://${target.host}${target.mount}/?${params}`;
@@ -166,14 +166,14 @@ function forBrowser(stored, method) {
 // conditional requests (the cache answers the conditionals itself). Only an
 // unconditional GET fills it, and only with a 200 carrying the content
 // posture and at most maxBytes: never an error, a 404, or a pending or failed
-// page.
-export function withEdgeCache(read, { cache, ttl, maxBytes = EDGE_CACHE_MAX_BYTES }) {
+// page. build names the code and shells serving the reads.
+export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_MAX_BYTES }) {
   return async function cachedRead(request, env, ctx, target) {
     const { method } = request;
     if (method !== "GET" && method !== "HEAD") {
       return read(request, env, ctx, target);
     }
-    const key = responseKey(target);
+    const key = responseKey(target, build);
     const conditional = {};
     for (const name of CONDITIONALS) {
       const value = request.headers.get(name);
