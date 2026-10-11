@@ -105,6 +105,13 @@ var ErrRawTooLarge = errors.New("service: upload too large to consider (raw inpu
 // more than MaxPasteBytes.
 var ErrCompressedTooLarge = errors.New("service: upload exceeds 10 MiB compressed cap")
 
+// ErrEmptyUpload is returned for a body with no bytes.
+var ErrEmptyUpload = errors.New("empty upload")
+
+// errStaging marks a failure to stage the body on local disk, before any
+// write reaches storage.
+var errStaging = errors.New("staging")
+
 // Create persists a new paste owned by owner, a "key:<fp>" identity built from
 // the uploader's ssh public key fingerprint. That identity gates quota: its
 // active pastes plus this body cannot exceed UserQuotaBytes.
@@ -142,10 +149,10 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	case errors.Is(err, errCompressedCapExceeded):
 		return Result{}, ErrCompressedTooLarge
 	case err != nil:
-		return Result{}, fmt.Errorf("staging: %w", err)
+		return Result{}, fmt.Errorf("%w: %w", errStaging, err)
 	}
 	if staged.RawSize == 0 {
-		return Result{}, errors.New("empty upload")
+		return Result{}, ErrEmptyUpload
 	}
 	kind, err := domain.DetectKind(staged.Prefix, typeHint, u.Sniff)
 	if err != nil {
