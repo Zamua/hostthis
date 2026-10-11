@@ -20,15 +20,17 @@ var kbUpdated = time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 func buildKBServer(t *testing.T) *Server {
 	t.Helper()
 	m := domain.NewManifest()
-	for _, f := range []struct{ path, key string }{
-		{"README.md", "key-readme"},
-		{"guide/setup.md", "key-setup"},
-		{"guide/diagram.png", "key-png"},
-		{"guide/index.html", "key-guide-index"},
-		{"report.html", "key-html"},
-		{"files.json", "key-files"},
+	blobs := map[string][]byte{}
+	for _, f := range []struct{ path, key, body string }{
+		{"README.md", "key-readme", "# notes\n"},
+		{"guide/setup.md", "key-setup", "# setup\n"},
+		{"guide/diagram.png", "key-png", "\x89PNG"},
+		{"guide/index.html", "key-guide-index", "<h1>guide index</h1>"},
+		{"report.html", "key-html", "<h1>report</h1>"},
+		{"files.json", "key-files", `{"own":"file"}`},
 	} {
-		m.Add(f.path, domain.ManifestEntry{Key: f.key, Size: 4, ContentType: domain.ContentTypeForPath(f.path)})
+		m.Add(f.path, domain.ManifestEntry{Key: f.key, Size: len(f.body), ContentType: domain.ContentTypeForPath(f.path)})
+		blobs[f.key] = []byte(f.body)
 	}
 	return &Server{
 		ApexDomain: "paste.test",
@@ -36,14 +38,7 @@ func buildKBServer(t *testing.T) *Server {
 			Slug: "abc23456", Identity: "key:test", Status: domain.PasteStatusReady,
 			Kind: domain.KindKnowledgeBase, UploadID: "up-kb", UpdatedAt: kbUpdated, Manifest: m,
 		}},
-		Blobs: stubBlobMap{m: map[string][]byte{
-			"key-readme":      []byte("# notes\n"),
-			"key-setup":       []byte("# setup\n"),
-			"key-png":         []byte("\x89PNG"),
-			"key-guide-index": []byte("<h1>guide index</h1>"),
-			"key-html":        []byte("<h1>report</h1>"),
-			"key-files":       []byte(`{"own":"file"}`),
-		}},
+		Blobs: stubBlobMap{m: blobs},
 	}
 }
 
