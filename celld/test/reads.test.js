@@ -9,6 +9,7 @@ import { goStringList } from "../src/public/gojson.js";
 import { cleanRedirect } from "../src/public/path.js";
 import { rawContentType, renderShell } from "../src/public/shells.js";
 import { publicReads } from "../src/public/surface.js";
+import { INPUT_BATCH } from "../src/public/zstd.js";
 import {
   APEX, assertGolden, at, documentRow, FORWARDED, GOLDEN, headersOf, hiRow, sha256, SLUG, TOKEN, UPDATED, world,
 } from "./public-world.js";
@@ -458,6 +459,8 @@ test("a payload that is missing or damaged before the first byte is a 500 with o
     ["bad magic", (w) => w.object("uploads/a/0", damaged)],
     ["empty object", (w) => w.object("uploads/a/0", new Uint8Array(0))],
     ["magic only", (w) => w.object("uploads/a/0", stored("").subarray(0, 4))],
+    ["not a zstd frame", (w) => w.object("uploads/a/0", Uint8Array.of(...stored("").subarray(0, 4), 1, 2, 3, 4, 5, 6, 7, 8))],
+    ["a window over 8 MiB", (w) => w.object("uploads/a/0", Uint8Array.of(...stored("").subarray(0, 8), 0x00, 14 << 3, 1, 0, 0))],
   ]) {
     const w = world();
     w.row(SLUG, hiRow());
@@ -496,15 +499,32 @@ async function readAll(res) {
   return { size, error: null };
 }
 
+test("a checksummed payload decodes whole", async () => {
+  const content = new Uint8Array(300 * 1024 + 5);
+  for (let i = 0; i < content.length; i++) content[i] = (i * 7) & 0xff;
+  for (const bytes of [content, content.subarray(0, 3), content.subarray(0, 0)]) {
+    const w = world();
+    w.row(SLUG, documentRow("html", "ready", bytes.length));
+    w.object("uploads/a/0", stored(bytes, { checksum: true }));
+    const res = await w.fetch(at("/"));
+    assert.equal(sha256(new Uint8Array(await res.arrayBuffer())), sha256(bytes), `${bytes.length} bytes`);
+  }
+});
+
 test("stored bytes carry their manifest size, and a body that disagrees ends short of it, aborted", async () => {
   const content = new Uint8Array(300 * 1024).fill(0x61);
   const whole = stored(content);
   const trailing = new Uint8Array(whole.length + 8).fill(0x41);
   trailing.set(whole);
+  // A frame whose blocks end on an input batch, so the decoder sends every
+  // byte before it reads the checksum, and only then fails it.
+  const batched = content.subarray(0, 3 * INPUT_BATCH - 12);
+  const flipped = stored(batched, { checksum: true });
+  flipped[flipped.length - 1] ^= 0x01;
   for (const [what, size, object] of [
     ["damaged mid-body", content.length, whole.subarray(0, whole.length - 10)],
-    // As a checksum that fails after the last decoded byte.
-    ["damaged after its last byte", content.length, trailing],
+    ["a flipped checksum byte", batched.length, flipped],
+    ["bytes after the frame", content.length, trailing],
     ["shorter than its size", content.length + 1, whole],
     ["longer than its size", content.length - 1, whole],
   ]) {
