@@ -264,11 +264,19 @@ test("keys come from the decoded path, bytes and all", async () => {
   const id = await w.room();
   assert.equal((await put(w, id, "a%2Fb", "1")).status, 204);
   assert.equal(await (await w.fetch(url(`/api/rooms/${id}/a/b`))).text(), "1");
-  // A key that is not UTF-8 is stored under the text Go's JSON gives it, and
-  // read back under the same text.
-  assert.equal((await put(w, id, "k%E2%82", "2")).status, 204);
-  assert.ok(Object.hasOwn(w.doc(APP, id).kv, "k\ufffd\ufffd"));
-  assert.equal(await (await w.fetch(url(`/api/rooms/${id}/k%E2%82`))).text(), "2");
+  // A key is the text of its UTF-8 bytes; one whose bytes are not UTF-8 is
+  // refused on every verb before any cell call.
+  assert.equal((await put(w, id, "caf%C3%A9%E2%82%AC", "2")).status, 204);
+  assert.ok(Object.hasOwn(w.doc(APP, id).kv, "caf\u00e9\u20ac"));
+  assert.equal(await (await w.fetch(url(`/api/rooms/${id}/caf%C3%A9%E2%82%AC`))).text(), "2");
+  const before = w.calls.length;
+  for (const key of ["k%FF", "k%E2%82", "%C0%80", "%ED%A0%80"]) {
+    for (const method of ["GET", "PUT", "DELETE"]) {
+      const init = method === "PUT" ? { method, body: "v" } : { method };
+      await goError(await w.fetch(url(`/api/rooms/${id}/${key}`), init), 400, "invalid key\n\n");
+    }
+  }
+  assert.equal(w.calls.length, before);
   assert.equal((await put(w, id, "x".repeat(256), "3")).status, 204);
   await goError(await put(w, id, "x".repeat(257), "3"), 400, "invalid key\n\n");
   await goError(await w.fetch(url(`/api/rooms/${id}/${"%E2%82%AC".repeat(86)}`)), 400, "invalid key\n\n");

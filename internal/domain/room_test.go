@@ -90,4 +90,12 @@ func TestValidateRoomKey(t *testing.T) {
 	if err := ValidateRoomKey("card/abc123"); err != nil {
 		t.Fatalf("slashed key rejected: %v", err)
 	}
+	if err := ValidateRoomKey("café/€"); err != nil {
+		t.Fatalf("UTF-8 key rejected: %v", err)
+	}
+	for _, key := range []string{"k\xff", "k\xe2\x82", "\xc0\x80", "\xed\xa0\x80"} {
+		if err := ValidateRoomKey(key); !errors.Is(err, ErrRoomKeyNotUTF8) {
+			t.Fatalf("key %q = %v, want ErrRoomKeyNotUTF8", key, err)
+		}
+	}
 }

@@ -1297,9 +1297,13 @@ existence of any specific room.
 
 The remaining rules, shared by every route above:
 
-- A key is the rest of the decoded path after the UUID: 1 to 256 bytes, and
-  never `ws`, `push` or anything under `push/`, which are the relay and push
-  routes. A key over 256 bytes is a **400**.
+- A key is the rest of the decoded path after the UUID: 1 to 256 bytes of
+  UTF-8, and never `ws`, `push` or anything under `push/`, which are the relay
+  and push routes. A key over 256 bytes is a **400**, and so is one whose
+  decoded bytes are not UTF-8 (`%FF`, a truncated or overlong sequence, an
+  encoded surrogate), on GET, PUT and DELETE alike, before any storage call:
+  such bytes have no single text form, so a key written under one could not
+  be read back under the same one.
 - A route answers only its listed methods; any other method is a **405** with
   an `Allow` header naming them.
 - A PUT body is read to at most 256 KiB plus one byte, so an oversized body

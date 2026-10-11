@@ -95,6 +95,11 @@ test("keys are 1 to 256 bytes and never a reserved segment", () => {
   for (const key of ["push:x", "pushy", "wss", "x/push"]) {
     assert.equal(roomKeyProblem(key), null, key);
   }
+  // Byte strings, as utf8.ValidString reads them.
+  assert.equal(roomKeyProblem(byteString("café\u{1f600}")), null);
+  for (const key of ["k\xff", "k\xe2\x82", "\xc0\x80", "\xed\xa0\x80", "\xf4\x90\x80\x80"]) {
+    assert.equal(roomKeyProblem(key), "room key is not valid UTF-8", JSON.stringify(key));
+  }
 });
 
 // Expected values are hostthisd's ipSubnet(net.ParseIP(address)).
