@@ -32,7 +32,7 @@ type ManifestEntry struct {
 	// Objects never change, so it doubles as an HTTP validator. An entry
 	// without one names no bytes.
 	Key            string
-	Size           int    // uncompressed bytes (for display)
+	Size           int    // decoded bytes; the read path's Content-Length (negative: unknown)
 	CompressedSize int    // stored post-zstd bytes; the quota basis (matches how pastes charge)
 	ContentType    string // by extension; see ContentTypeForPath
 

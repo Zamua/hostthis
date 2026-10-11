@@ -21,7 +21,7 @@ func serveReady(t *testing.T, kind domain.ContentKind, slug, key string, body []
 	srv := &Server{
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: domain.Slug(slug), Status: domain.PasteStatusReady, Kind: kind,
-			Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: key}),
+			Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: key, Size: len(body)}),
 			UpdatedAt: time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC),
 		}},
 		Blobs:      stubBlobReader{body: body},

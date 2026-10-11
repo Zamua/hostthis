@@ -2,7 +2,6 @@ package http
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"slices"
 	"time"
@@ -69,15 +68,7 @@ func (s *Server) streamDocument(w http.ResponseWriter, r *http.Request, slug dom
 	if notModified(w, r, `"`+entry.Key+`"`, updatedAt) {
 		return
 	}
-	rc, _, err := s.Blobs.Read(r.Context(), entry)
-	if err != nil {
-		s.logf("warn: knowledge base read 500: slug=%s document blob read: %v", slug, err)
-		serveReadError(w, "internal error")
-		return
-	}
-	defer rc.Close() //nolint:errcheck
-	h.Set("Content-Type", rawContentType[domain.KindKnowledgeBase])
-	_, _ = io.Copy(w, rc)
+	s.streamEntry(w, r, slug, entry, rawContentType[domain.KindKnowledgeBase], "knowledge base", "document")
 }
 
 // serveFileList answers ?files=1 with the base's file paths as JSON, which is

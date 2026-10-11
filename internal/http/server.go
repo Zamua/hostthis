@@ -11,7 +11,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -262,23 +264,9 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		return
 	}
 
-	// streamBlob copies the stored bytes out under ct without buffering, so
-	// server memory stays constant regardless of paste size.
-	streamBlob := func(ct, what string) {
-		rc, _, err := s.Blobs.Read(r.Context(), root)
-		if err != nil {
-			s.logf("warn: paste read 500: slug=%s %s blob read: %v", slug, what, err)
-			serveReadError(w, "internal error")
-			return
-		}
-		defer func() { _ = rc.Close() }()
-		h.Set("Content-Type", ct)
-		_, _ = io.Copy(w, rc)
-	}
-
 	// HTML is the one kind served as itself: the stored bytes ARE the page.
 	if p.Kind == domain.KindHTML {
-		streamBlob("text/html; charset=utf-8", "html")
+		s.streamEntry(w, r, slug, root, "text/html; charset=utf-8", "paste", "html")
 		return
 	}
 
@@ -294,7 +282,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		if ct == "" {
 			ct = "text/plain; charset=utf-8"
 		}
-		streamBlob(ct, "raw "+string(p.Kind))
+		s.streamEntry(w, r, slug, root, ct, "paste", "raw "+string(p.Kind))
 		return
 	}
 	h.Set("Content-Security-Policy", shell.policy())
@@ -441,20 +429,88 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 		return
 	}
 
-	// Streamed so a GET never buffers the whole asset.
-	rc, _, err := s.Blobs.Read(r.Context(), entry)
-	if err != nil {
-		s.logf("warn: site read 500: slug=%s file blob read: %v", slug, err)
-		serveReadError(w, "internal error")
-		return
-	}
-	defer rc.Close() //nolint:errcheck
 	ct := entry.ContentType
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
+	s.streamEntry(w, r, slug, entry, ct, "site", "file")
+}
+
+// streamBufPool holds the copy buffers of streamEntry.
+var streamBufPool = sync.Pool{New: func() any { b := make([]byte, 32<<10); return &b }}
+
+// streamEntry writes entry's stored bytes as a 200 under ct, streamed so
+// memory stays constant whatever the size. Content-Length is the entry's
+// decoded size when known, so a short body is visible to every client.
+//
+// The first chunk is decoded before the status goes out, so damage found there
+// is a 500. Damage found later aborts the response, the one signal left once
+// the status is sent. The last byte is held back until the stream ends
+// cleanly, so damage found only at the end (the frame checksum) still leaves
+// the client short.
+func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain.Slug,
+	entry domain.ManifestEntry, ct, surface, what string,
+) {
+	rc, _, err := s.Blobs.Read(r.Context(), entry)
+	if err != nil {
+		s.logf("warn: %s read 500: slug=%s %s blob read: %v", surface, slug, what, err)
+		serveReadError(w, "internal error")
+		return
+	}
+	defer rc.Close() //nolint:errcheck
+
+	bp := streamBufPool.Get().(*[]byte)
+	defer streamBufPool.Put(bp)
+	buf := *bp
+	held := 0
+	for held == 0 && err == nil {
+		held, err = rc.Read(buf)
+	}
+	if err != nil && err != io.EOF {
+		s.logf("warn: %s read 500: slug=%s %s decode: %v", surface, slug, what, err)
+		serveReadError(w, "internal error")
+		return
+	}
+
+	h := w.Header()
 	h.Set("Content-Type", ct)
-	_, _ = io.Copy(w, rc)
+	if entry.Size >= 0 {
+		h.Set("Content-Length", strconv.Itoa(entry.Size))
+	}
+	var sent int64
+	for err == nil {
+		if held > 1 {
+			n, werr := w.Write(buf[:held-1])
+			sent += int64(n)
+			if werr != nil {
+				s.warnShort(werr, slug, surface, what, entry.Size)
+				return
+			}
+			buf[0], held = buf[held-1], 1
+		}
+		var n int
+		n, err = rc.Read(buf[held:])
+		held += n
+	}
+	if err != io.EOF {
+		s.logf("warn: %s read aborted: slug=%s %s decode: %v", surface, slug, what, err)
+		panic(http.ErrAbortHandler)
+	}
+	n, werr := w.Write(buf[:held])
+	sent += int64(n)
+	if werr == nil && entry.Size >= 0 && sent != int64(entry.Size) {
+		werr = http.ErrContentLength
+	}
+	s.warnShort(werr, slug, surface, what, entry.Size)
+}
+
+// warnShort logs a decoded size that disagrees with the recorded one. The
+// server already ends such a response short of its Content-Length; any other
+// write error is a client that went away.
+func (s *Server) warnShort(err error, slug domain.Slug, surface, what string, size int) {
+	if errors.Is(err, http.ErrContentLength) {
+		s.logf("warn: %s read short: slug=%s %s decoded size differs from the recorded %d", surface, slug, what, size)
+	}
 }
 
 // permissionsPolicy denies the powerful browser features a served page could

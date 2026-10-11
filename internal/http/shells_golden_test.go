@@ -29,9 +29,14 @@ type goldenResponse struct {
 	SHA256 string            `json:"sha256"`
 }
 
+// recordResponse leaves out Content-Length: it is framing, which the Worker's
+// runtime decides, and TestRead_ContentLengthIsTheRecordedSize pins its value.
 func recordResponse(w *httptest.ResponseRecorder) goldenResponse {
 	h := map[string]string{}
 	for name, values := range w.Header() {
+		if name == "Content-Length" {
+			continue
+		}
 		h[name] = strings.Join(values, ", ")
 	}
 	sum := sha256.Sum256(w.Body.Bytes())

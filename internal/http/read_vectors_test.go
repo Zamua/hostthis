@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +174,7 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 			t.Fatalf("status %d body %q after reading %+v", w.Code, body, *read)
 		}
 		validated(`"` + read.Key + `"`)
+		header("Content-Length", strconv.Itoa(read.Size))
 		entry := map[string]any{"entry": map[string]any{
 			"key": read.Key, "contentType": read.ContentType, "size": read.Size,
 		}}
