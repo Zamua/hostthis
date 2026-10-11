@@ -331,13 +331,16 @@ Equal on: status, `Content-Type`, `Cache-Control`, `ETag`, `Last-Modified`,
 `Content-Security-Policy`, `Retry-After`, `Allow`, `Location`,
 `X-Content-Type-Options`. Ignored: transport headers (`Date`, `Server`,
 `cf-*`, `Content-Length` versus chunked, edge-added `Content-Encoding`,
-`alt-svc`, `nel`, `report-to`). Bodies: byte-identical, except rooms JSON,
-compared as decoded values (Go escapes `<`, `>`, `&`; JS does not).
+`alt-svc`, `nel`, `report-to`). Bodies: byte-identical. In rooms JSON every
+value is the text the Room cell stored with it, on both servers and in the
+frames, in keys ordered by their UTF-8 bytes; only a key's own spelling may
+differ (Go escapes `<`, `>`, `&`, U+2028 and U+2029 in it; JS does not), so a
+key is compared as its decoded string.
 
 Deliberate differences, each spec'd: 405 on non-GET/HEAD reads; HEAD does not
 open the blob (so a damaged object is 200 on HEAD, 500 on GET); weak ETag
-comparison; no server heartbeat (2.9); `no-store` added to the
-`/api/push/key` 404, which today carries no Cache-Control.
+comparison; no server heartbeat (2.9). `/api/push/key` carries `no-store` on
+every response, its 404 and 405 included, on both servers.
 
 ### 2.7 Caching
 
@@ -386,7 +389,8 @@ bindings:
 - `RoomWireValue` and `RoomValueIsJSON` with Go's semantics: invalid UTF-8
   replaced per byte as Go does (the WHATWG decoder replaces per maximal
   subpart), BOM kept (`TextDecoder` with `ignoreBOM: true`), and `json.Valid`'s
-  nesting limit of 10000. Values already stored keep their stored wire form.
+  nesting limit of 10000. Values already stored keep their stored wire form:
+  every read surface carries the text the cell stored, and `scan` answers it.
 - Client subnet from `HOSTTHIS_CLIENT_IP_SOURCE`: `cf-connecting-ip` on
   Cloudflare (set by the edge, not forgeable through it), `xff-rightmost`
   behind a trusted proxy. Forwarded requests use `X-Hostthis-Client-IP`.
@@ -408,22 +412,30 @@ GET /api/rooms/<uuid>/ws on <slug>.<apex>
 - The client's URL, query and body never reach the cell. `Room.fetch`
   dispatches by the last path segment or an `op` query, so forwarding
   `.../ws?op=put` would run a mutation past every public check.
+- The Room cell's own rules below (the ping answer, the frame limit, the cap
+  and eviction) apply only with `HOSTTHIS_APEX_DOMAIN` set on the Worker. In
+  off mode (section 3) the cell relays every frame and admits every join, as
+  hostthisd's proxy, which owns those bounds there, expects.
 - The 32 KiB client frame limit moves into `Room.webSocketMessage` (close 1009).
   Server frames need no limit; the cell writes them.
 - The per-process caps go away with the process. The Room cell enforces one
-  global per-room cap at accept (`getWebSockets().length`); its value comes
-  from data (8, Q2). The per-app cap is dropped; creation limits bound the
-  room count.
+  global per-room cap of 64 at accept, counting the open sockets it holds. The
+  per-app cap is dropped; creation limits bound the room count.
 - Neither runtime pings or times out an idle socket: on Cloudflare a frozen
   client stayed counted for the whole 11-minute measurement, while a client
   whose process exits is closed within milliseconds. The Room cell sets
   `setWebSocketAutoResponse` for a reserved `{"type":"ping"}` frame (answered
   `{"type":"pong"}` without waking the cell, on both runtimes); the room
-  client sends it every 20 s. At accept time the cell evicts sockets whose
-  last auto-response is older than 60 s, so a vanished client stops counting
-  against the cap. A socket that has never pinged is never evicted this way;
-  it leaves on close or a failed write. A spec change: a new reserved frame
-  type.
+  client sends it every 20 s. Only a join that finds the room at its cap
+  evicts: the cell closes, with 4001 `stale`, the sockets whose last
+  auto-response is older than 120 s, then counts again. A join under the cap
+  evicts nothing, so a client whose pings are only late (a throttled
+  background tab) keeps its socket. A socket that has never pinged is never
+  evicted this way; it leaves on close or a failed write. A spec change: a
+  new reserved frame type and close code.
+- The snapshot and `put` frames splice each value's stored text in, never a
+  parse and re-serialization, so they carry the whole-room GET's bytes in
+  every mode.
 - A Worker deploy restarts the cells and drops sockets. That is already true
   because the cells run on Cloudflare; clients reconnect and resnapshot.
 - During the flip, sockets through hostthisd and direct sockets share the Room
@@ -471,9 +483,12 @@ One bundle, three modes:
 | forwarded | token set; hostthisd sends `X-Hostthis-Forwarded-Host` | the Worker, through hostthisd as a reverse proxy | runtimes not exposed publicly; the routeless parity check |
 
 - **Off is today, byte for byte.** The classifier is skipped, the internal
-  router is unchanged, and `resolve` and `exists` are additive ops no old
+  router is unchanged, the Room cell's ping answer, frame limit, cap and
+  eviction stay off (2.9), and `resolve` and `exists` are additive ops no old
   caller uses, which keeps adjacent Worker generations compatible during
-  celld's residency window. The friend's deployment upgrades with no change.
+  celld's residency window. The friend's deployment upgrades with no change
+  but the rooms bug fixes, which apply in every mode (the frames carry each
+  value's stored text, 2.9).
 - **Forwarded** is honored only on the internal router, so only after the
   token check, or on a network where the internal router is already trusted.
   Anyone who can reach that router can already write any cell, so trusting the
