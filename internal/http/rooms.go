@@ -292,10 +292,7 @@ func trustXFFEnv() bool {
 func clientSubnet(r *http.Request) string {
 	host := ""
 	if trustXFFEnv() {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			host = strings.TrimSpace(parts[len(parts)-1])
-		}
+		host = rightmostForwardedFor(r.Header.Values("X-Forwarded-For"))
 	}
 	if host == "" {
 		h, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -307,6 +304,18 @@ func clientSubnet(r *http.Request) string {
 	}
 	ip := net.ParseIP(host)
 	return ipSubnet(ip)
+}
+
+// rightmostForwardedFor is the last value of the X-Forwarded-For list that the
+// header lines form together, "" for none. A client can send a line of its
+// own ahead of the one the trusted proxy appends, so only the last line can
+// hold the proxy's hop.
+func rightmostForwardedFor(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	last := lines[len(lines)-1]
+	return strings.TrimSpace(last[strings.LastIndexByte(last, ',')+1:])
 }
 
 // ipSubnet returns the canonical subnet string: IPv4 -> "/24", IPv6 -> "/48".

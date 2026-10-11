@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { cleanPath, cleanRedirect, decodePath, escapePath } from "../src/public/path.js";
@@ -102,51 +103,24 @@ test("keys are 1 to 256 bytes and never a reserved segment", () => {
   }
 });
 
-// Expected values are hostthisd's ipSubnet(net.ParseIP(address)).
+// The vectors internal/http runs against hostthisd's ipSubnet and clientSubnet.
+const CLIENT_IP = JSON.parse(readFileSync(new URL("../../testdata/client-ip-vectors.json", import.meta.url), "utf8"));
+
 test("client subnets match hostthisd's", () => {
-  const cases = [
-    ["203.0.113.7", "203.0.113.0/24"],
-    ["203.0.113.255", "203.0.113.0/24"],
-    ["0.0.0.0", "0.0.0.0/24"],
-    ["255.255.255.255", "255.255.255.0/24"],
-    ["01.2.3.4", "unknown"],
-    ["1.2.3", "unknown"],
-    ["1.2.3.4.5", "unknown"],
-    ["256.1.1.1", "unknown"],
-    ["::ffff:198.51.100.9", "198.51.100.0/24"],
-    ["::ffff:c633:6409", "198.51.100.0/24"],
-    ["2001:db8:1234:5678::1", "2001:db8:1234::/48"],
-    ["2001:DB8:0:0:1::1", "2001:db8::/48"],
-    ["::1", "::/48"],
-    ["::", "::/48"],
-    ["fe80::1%eth0", "unknown"],
-    ["2001:0db8:0000:0000:0000:0000:0000:0001", "2001:db8::/48"],
-    ["1:2:3:4:5:6:7::", "1:2:3::/48"],
-    ["::2:3:4:5:6:7:8", "0:2:3::/48"],
-    ["1:2:3:4:5:6:7:8", "1:2:3::/48"],
-    ["1:2:3:4:5:6:7:8:9", "unknown"],
-    ["1::2::3", "unknown"],
-    ["2001:db8::", "2001:db8::/48"],
-    ["0:0:1::", "0:0:1::/48"],
-    ["::1.2.3.4", "::/48"],
-    ["1:2:3:4:5:6:1.2.3.4", "1:2:3::/48"],
-    ["1:2:3:4:5:6:7:1.2.3.4", "unknown"],
-    [" 1.2.3.4", "unknown"],
-    ["", "unknown"],
-    ["x", "unknown"],
-    ["12345::1", "unknown"],
-    ["::ffff:1.2.3.4%x", "unknown"],
-    ["64:ff9b::1.2.3.4", "64:ff9b::/48"],
-    ["1:0:0:2::", "1::/48"],
-    ["0:0:0:1::", "::/48"],
-    ["a:b:c::", "a:b:c::/48"],
-    ["a:0:0::", "a::/48"],
-    ["0:b:0::", "0:b::/48"],
-  ];
-  for (const [address, want] of cases) {
+  assert.ok(CLIENT_IP.subnets.length >= 30);
+  for (const [address, want] of CLIENT_IP.subnets) {
     assert.equal(clientSubnet(address), want, address);
   }
   assert.equal(clientSubnet(null), "unknown");
+});
+
+test("xff-rightmost takes the right-most value across every header line, as hostthisd does", () => {
+  assert.ok(CLIENT_IP.xff.length >= 10);
+  for (const { name, lines, address } of CLIENT_IP.xff) {
+    const headers = new Headers();
+    for (const line of lines) headers.append("X-Forwarded-For", line);
+    assert.equal(clientAddress(headers, "xff-rightmost", false) ?? "", address, name);
+  }
 });
 
 test("the client address comes from the configured source only", () => {
