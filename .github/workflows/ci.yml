@@ -19,13 +19,15 @@ jobs:
           go-version: '1.26'
           cache: true
 
-      # Go tests run the celld Worker under Miniflare (celld/localrt), which
-      # `make test` installs from this lockfile.
+      # Go tests run the celld Worker bundle under Miniflare (celld/localrt);
+      # `make test` builds the bundle and installs both from these lockfiles.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: celld/localrt/package-lock.json
+          cache-dependency-path: |
+            celld/package-lock.json
+            celld/localrt/package-lock.json
 
       # Formatting: every file must be gofmt-clean.
       - name: gofmt
@@ -72,6 +74,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+
+      # celld deploys the bundle wrangler.jsonc names as main.
+      - name: build the Worker bundle
+        run: make bundle
 
       - name: install pinned celld
         env:

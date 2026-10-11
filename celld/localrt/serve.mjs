@@ -1,21 +1,40 @@
-// Runs the celld Worker under Miniflare (workerd) on loopback, with the
-// bindings celld/wrangler.jsonc declares. Prints "LISTENING <url>" once ready
-// and serves until signalled or, when stdin is a pipe or socket, until it
-// closes, so a parent process that dies takes the runtime with it.
+// Runs the bundled celld Worker (celld/dist, from `make bundle`) under
+// Miniflare (workerd) on loopback, with the bindings celld/wrangler.jsonc
+// declares. Prints "LISTENING <url>" once ready and serves until signalled or,
+// when stdin is a pipe or socket, until it closes, so a parent process that
+// dies takes the runtime with it.
 //
 // HOST and PORT pick the listener (default loopback, ephemeral port).
 // HOSTTHIS_CELLD_TOKEN, when set, is the bearer token every route but /healthz
 // requires. PERSIST_DIR keeps cells and payloads across restarts; without it
 // cells live in memory and payloads in a temp dir removed on exit.
 import { Miniflare } from "miniflare";
-import { fstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { fstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const config = JSON.parse(readFileSync(join(here, "..", "wrangler.jsonc"), "utf8")
+const celld = join(here, "..");
+const config = JSON.parse(readFileSync(join(celld, "wrangler.jsonc"), "utf8")
   .split("\n").filter((line) => !line.trim().startsWith("//")).join("\n"));
+
+// A stale bundle would run old code while the source under test looks current.
+function mtime(path) {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return -1;
+  }
+}
+const sources = readdirSync(join(celld, "src"), { recursive: true, withFileTypes: true })
+  .filter((entry) => entry.isFile())
+  .map((entry) => mtime(join(entry.parentPath, entry.name)));
+const built = mtime(join(celld, config.main));
+if (built < Math.max(mtime(join(celld, "package.json")), ...sources)) {
+  process.stderr.write(`celld runtime: ${config.main} is ${built < 0 ? "missing" : "older than celld/src"}; run \`make bundle\`\n`);
+  process.exit(1);
+}
 
 const persist = process.env.PERSIST_DIR;
 const tempDir = persist ? null : mkdtempSync(join(tmpdir(), "hostthis-localrt-"));

@@ -140,11 +140,15 @@ README.md            user-facing manpage
 
 Go 1.26+ (per `go.mod`), Node 24+, and Docker required.
 
-The Go tests and `make run` run the celld Worker (`celld/src`) locally under
-Miniflare, from `celld/localrt`. `make test` and `make run` install its
-dependencies on first use; a bare `go test ./...` needs them installed once:
+The Go tests and `make run` run the celld Worker locally under Miniflare, from
+`celld/localrt`. They run the bundle `celld/dist/index.js`, which esbuild builds
+from the modules under `celld/src` and which is not committed. `make test`,
+`make run` and `make e2e` build it and install the runtime on first use; a bare
+`go test ./...` needs both done first, and the bundle rebuilt after every change
+under `celld/src` (the runtime refuses a stale one):
 
 ```
+make bundle
 npm ci --prefix celld/localrt
 ```
 

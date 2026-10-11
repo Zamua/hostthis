@@ -2752,6 +2752,14 @@ persist directory and payloads in a local R2 store. On Cloudflare the
 `PAYLOADS` binding names an R2 bucket; on celld it lives inside the fleet
 bucket.
 
+Its source is split into modules under `celld/src`, entry `celld/src/index.js`.
+celld loads a single module, so every runtime runs one bundled ES module,
+`celld/dist/index.js`, built by `make bundle` (esbuild, pinned in
+`celld/package.json`; unminified, names kept). `dist/` is a build output and is
+not committed; `celld/wrangler.jsonc` points `main` at it with `no_bundle`, so a
+deploy builds the bundle first. The local runtime refuses to start on a missing
+bundle or one older than its sources.
+
 The service and transport layers depend only on domain-shaped ports. The
 conformance suite pins their behavior against the Worker.
 
@@ -3801,6 +3809,9 @@ file). Defaults in parens:
 The runtime container reads the same env vars. The operator supplies
 a docker-compose (or equivalent) file out of band; this repo ships no
 sample production compose.
+
+A deployment runs the bundled celld Worker, `celld/dist/index.js`: run
+`make bundle` before `celld deploy` or `wrangler deploy`.
 
 ### Process shutdown
 

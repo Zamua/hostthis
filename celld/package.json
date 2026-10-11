@@ -1,6 +1,12 @@
 {
+  "name": "hostthis-celld",
+  "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "build": "esbuild src/index.js --bundle --format=esm --platform=neutral --keep-names --log-level=warning --outfile=dist/index.js",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

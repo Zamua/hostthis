@@ -1,4 +1,4 @@
-.PHONY: help build test smoke dev run docker-build docker-up docker-down \
+.PHONY: help build bundle test smoke dev run docker-build docker-up docker-down \
         e2e e2e-ci \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
@@ -13,6 +13,7 @@
 help:
 	@echo "Developer targets:"
 	@echo "  make build         build ./bin/hostthisd (local Go)"
+	@echo "  make bundle        build the celld Worker bundle (celld/dist)"
 	@echo "  make test          run all unit + integration tests"
 	@echo "  make e2e           run the browser suite (needs Chrome)"
 	@echo "  make e2e-ci        same, plus JUnit + screenshots for the PR report"
@@ -25,7 +26,7 @@ help:
 	@echo "  make docker-down   tear it down"
 	@echo "  make fmt / vet     gofmt / go vet"
 	@echo "  make rebuild-site-fixtures  rebuild the vite SPA test fixtures (needs npm)"
-	@echo "  make clean         remove ./bin, ./data and the e2e output"
+	@echo "  make clean         remove ./bin, ./data, the Worker bundle and the e2e output"
 	@echo
 	@echo "Deploy targets live in the operator's private deploy repo."
 
@@ -34,9 +35,21 @@ help:
 build:
 	go build -o bin/hostthisd ./cmd/hostthisd
 
-# Go tests run the celld Worker locally (internal/celldtest), so they need its
-# runtime installed.
-test: celld/localrt/node_modules
+# Every runtime, local or deployed, runs the one bundled module celld/dist/index.js.
+CELLD_SRC := $(shell find celld/src -type f)
+
+bundle: celld/dist/index.js
+
+celld/dist/index.js: $(CELLD_SRC) celld/package.json celld/node_modules
+	npm --prefix celld run build
+
+celld/node_modules: celld/package-lock.json
+	npm ci --prefix celld
+	@touch $@
+
+# Go tests run the celld Worker bundle locally (internal/celldtest), so they
+# need it built and its runtime installed.
+test: bundle celld/localrt/node_modules
 	go test ./...
 	npm --prefix celld test
 	./scripts/test-repo-contracts.sh
@@ -44,7 +57,7 @@ test: celld/localrt/node_modules
 # Run locally (no container) - useful for fast iteration. Defaults to
 # path mode so wildcard DNS isn't required. The celld Worker runs beside the
 # daemon under Miniflare, persisting under ./data/celld.
-dev run: celld/localrt/node_modules
+dev run: bundle celld/localrt/node_modules
 	HOSTTHIS_URL_MODE=path \
 	HOSTTHIS_PUBLIC_SCHEME=http \
 	HOSTTHIS_APEX_DOMAIN=localhost:8080 \
@@ -67,13 +80,13 @@ smoke:
 # The browser suite is a Playwright project under e2e/, run in Chromium and
 # WebKit. E2E_FLAGS passes through to `playwright test`, e.g.
 # make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'.
-e2e: e2e/node_modules celld/localrt/node_modules
+e2e: e2e/node_modules bundle celld/localrt/node_modules
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
 # CI installs the browsers with their system libraries first. The HTML report
 # lands in e2e/playwright-report, and a failing suite still writes it before
 # make fails.
-e2e-ci: e2e/node_modules celld/localrt/node_modules
+e2e-ci: e2e/node_modules bundle celld/localrt/node_modules
 	cd e2e && npx playwright install --with-deps chromium webkit
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
@@ -117,4 +130,4 @@ data-dir-perms:
 # Screenshots accumulate across runs, so a renamed flow leaves a directory the
 # report would list as unmatched. Removing them is how a local run starts clean.
 clean:
-	rm -rf bin data e2e/playwright-report e2e/test-results
+	rm -rf bin data celld/dist e2e/playwright-report e2e/test-results

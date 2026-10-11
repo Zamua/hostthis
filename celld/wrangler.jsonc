@@ -3,7 +3,8 @@
   // `celld deploy` to the same bucket replaces this one, silently, so this
   // fleet's bucket is hostthis's alone (docs/design/celld-port-audit.md).
   "name": "hostthis",
-  "main": "src/index.js",
+  // celld loads one module: `make bundle` builds it from src/.
+  "main": "dist/index.js",
   "no_bundle": true,
   "compatibility_date": "2025-01-01",
   // Paste and site payloads, stored under r2/payloads/ in the fleet bucket.
