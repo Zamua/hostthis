@@ -14,9 +14,10 @@ import (
 
 // The push surface of RoomRepo. Every room-scoped op is one POST to the Room
 // cell addressed like the KV ops; the VAPID key lives with the app's Paste
-// cell. The Go domain validates before any call, so a cell 400, or a 413
-// whose error code is not the cap the caller can act on, is a contract
-// disagreement and surfaces as a plain error.
+// cell. The Go domain validates before any call, but the cell is the last
+// judge of a write (it alone knows which zones exist), so its 400 is invalid
+// input carrying its reason. A 413 whose error code is not the cap the caller
+// can act on is a contract disagreement and surfaces as a plain error.
 
 // PushKey asks the app cell for its VAPID public key, generated on first use.
 func (r *RoomRepo) PushKey(app domain.Slug) (string, error) {
@@ -46,12 +47,22 @@ func (r *RoomRepo) PutPushSubscription(app domain.Slug, id domain.RoomID, sub do
 	switch {
 	case status == http.StatusNotFound:
 		return domain.ErrNotFound
+	case status == http.StatusBadRequest:
+		return pushRefused(code)
 	case status == http.StatusRequestEntityTooLarge && code == "too-many-subscriptions":
 		return domain.ErrPushFull
 	case status >= 300:
 		return fmt.Errorf("celld: push subscription put: unexpected status %d (%s)", status, code)
 	}
 	return nil
+}
+
+// pushRefused is the cell's 400 as domain.ErrPushInvalid naming its rule.
+func pushRefused(code string) error {
+	if code == "" {
+		return domain.ErrPushInvalid
+	}
+	return fmt.Errorf("%w: %s", domain.ErrPushInvalid, code)
 }
 
 // pushPut posts one body to a Room cell push op and returns the status with
@@ -110,6 +121,8 @@ func (r *RoomRepo) PutPushSchedule(app domain.Slug, id domain.RoomID, sched doma
 	switch {
 	case status == http.StatusNotFound:
 		return domain.ErrNotFound
+	case status == http.StatusBadRequest:
+		return pushRefused(code)
 	case status == http.StatusRequestEntityTooLarge && code == "too-many-items":
 		return domain.ErrPushFull
 	case status >= 300:
