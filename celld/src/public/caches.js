@@ -99,24 +99,31 @@ export function lockstepTee(source) {
   return { copies: [copy(0), copy(1)], release };
 }
 
+// An edge fill must end within this long of the read that began it: hostthisd
+// purges a slug again 15 s after every purge, and that second purge has to
+// find any entry a read begun before the write stored.
+export const EDGE_FILL_WINDOW_MS = 10_000;
+
 // copy as a cache put's body, erroring (so the put stores nothing) once it
-// runs past maxBytes.
-function bounded(copy, maxBytes) {
+// runs past maxBytes, or when a chunk or its end arrives after deadline (ms,
+// by now).
+function bounded(copy, { maxBytes, deadline = Infinity, now = Date.now }) {
   const reader = copy.getReader();
   let seen = 0;
   return new ReadableStream({
     async pull(controller) {
       const next = await reader.read();
+      seen += next.done ? 0 : next.value.byteLength;
+      const late = now() > deadline;
+      if (seen > maxBytes || late) {
+        reader.cancel().catch(() => {});
+        throw new Error(late ? "cache fill: past its deadline" : `cache fill: past ${maxBytes} bytes`);
+      }
       if (next.done) {
         controller.close();
-        return;
+      } else {
+        controller.enqueue(next.value);
       }
-      seen += next.value.byteLength;
-      if (seen > maxBytes) {
-        reader.cancel().catch(() => {});
-        throw new Error(`cache fill: past ${maxBytes} bytes`);
-      }
-      controller.enqueue(next.value);
     },
     cancel(reason) {
       return reader.cancel(reason);
@@ -124,11 +131,11 @@ function bounded(copy, maxBytes) {
   }, { highWaterMark: 0 });
 }
 
-// Stores the tee's second copy under key in the background, abandoned past
-// maxBytes. However the put ends, the copy is released, so a put that stops
-// reading never stalls the client.
-function keep(ctx, cache, key, tee, init, maxBytes) {
-  const put = cache.put(key, new Response(bounded(tee.copies[1], maxBytes), init))
+// Stores the tee's second copy under key in the background, within limits
+// (bounded's). However the put ends, the copy is released, so a put that
+// stops reading never stalls the client.
+function keep(ctx, cache, key, tee, init, limits) {
+  const put = cache.put(key, new Response(bounded(tee.copies[1], limits), init))
     .catch(() => {})
     .finally(() => tee.release(1));
   ctx?.waitUntil?.(put);
@@ -166,8 +173,10 @@ function forBrowser(stored, method) {
 // conditional requests (the cache answers the conditionals itself). Only an
 // unconditional GET fills it, and only with a 200 carrying the content
 // posture and at most maxBytes: never an error, a 404, or a pending or failed
-// page. build names the code and shells serving the reads.
-export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_MAX_BYTES }) {
+// page. A fill that would end more than EDGE_FILL_WINDOW_MS after its read
+// began (by now, in ms) is abandoned. build names the code and shells serving
+// the reads.
+export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_MAX_BYTES, now = Date.now }) {
   return async function cachedRead(request, env, ctx, target) {
     const { method } = request;
     if (method !== "GET" && method !== "HEAD") {
@@ -184,6 +193,8 @@ export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_M
     if (hit) {
       return forBrowser(hit, method);
     }
+    // Taken before the read's cell call, so the window never starts late.
+    const deadline = now() + EDGE_FILL_WINDOW_MS;
     const res = await read(request, env, ctx, target);
     const fills = method === "GET" && Object.keys(conditional).length === 0;
     if (!fills || res.status !== 200 || res.headers.get("Cache-Control") !== CONTENT_CACHE_CONTROL || !res.body) {
@@ -198,7 +209,7 @@ export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_M
     const headers = new Headers(res.headers);
     headers.set("Cache-Control", `public, max-age=${ttl}`);
     headers.set("Cache-Tag", target.slug);
-    keep(ctx, cache, key, tee, { status: 200, headers }, maxBytes);
+    keep(ctx, cache, key, tee, { status: 200, headers }, { maxBytes, deadline, now });
     return new Response(tee.copies[0], { status: res.status, headers: res.headers });
   };
 }
@@ -217,7 +228,7 @@ export function withBlobCache(open, { cache, maxBytes, origin }) {
       return hit.body ?? new ReadableStream({ start: (c) => c.close() });
     }
     const tee = lockstepTee(await open(env, entry, ctx));
-    keep(ctx, cache, key, tee, { headers: { "Cache-Control": IMMUTABLE } }, maxBytes);
+    keep(ctx, cache, key, tee, { headers: { "Cache-Control": IMMUTABLE } }, { maxBytes });
     return tee.copies[0];
   };
 }
