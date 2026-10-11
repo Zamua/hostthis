@@ -134,7 +134,7 @@ func main() {
 	// Decorators, so a write invalidates the edge cache for its slug while the
 	// verb and deploy services stay cache-unaware (SPEC "Active invalidation:
 	// CachePurger"). Noop unless a CDN is configured.
-	cachePurger := buildCachePurger(logger, *apexDomain, *urlMode)
+	cachePurger, purgerShutdown := buildCachePurger(logger, *apexDomain, *urlMode)
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 	siteDeployer := service.NewSiteCacheInvalidating(deploySvc, cachePurger)
 
@@ -255,6 +255,10 @@ func main() {
 	); err != nil {
 		logger.Printf("shutdown: %v", err)
 	}
+	// Last: the drain above can still queue purges.
+	if err := purgerShutdown(shutdownCtx); err != nil {
+		logger.Printf("shutdown: cache purger: %v", err)
+	}
 }
 
 const (
@@ -302,13 +306,14 @@ func buildBlobStore(logger *log.Logger) (*storage.CompressedBlobStore, error) {
 }
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
-// CachePurger, defaulting to Noop. apex/mode let the cloudflare adapter name a
-// slug's host (or path prefix), so a purge covers every URL the slug answers.
-func buildCachePurger(logger *log.Logger, apex, mode string) service.CachePurger {
+// CachePurger, defaulting to Noop, and the shutdown that sends what it still
+// has queued. apex/mode let the cloudflare adapter name a slug's host (or path
+// prefix), so a purge covers every URL the slug answers.
+func buildCachePurger(logger *log.Logger, apex, mode string) (service.CachePurger, func(context.Context) error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_CACHE_BACKEND", "noop"))
 	switch backend {
 	case "", "noop":
-		return cache.Noop{}
+		return cache.Noop{}, func(context.Context) error { return nil }
 	case "cloudflare":
 		zone := os.Getenv("HOSTTHIS_CF_ZONE_ID")
 		token := os.Getenv("HOSTTHIS_CF_PURGE_TOKEN")
@@ -316,10 +321,11 @@ func buildCachePurger(logger *log.Logger, apex, mode string) service.CachePurger
 			logger.Fatalf("HOSTTHIS_CACHE_BACKEND=cloudflare requires HOSTTHIS_CF_ZONE_ID and HOSTTHIS_CF_PURGE_TOKEN")
 		}
 		logger.Printf("cache: cloudflare purger enabled for zone %s", zone)
-		return &cache.Cloudflare{ZoneID: zone, Token: token, Apex: apex, Mode: mode, Logger: logger}
+		cf := &cache.Cloudflare{ZoneID: zone, Token: token, Apex: apex, Mode: mode, Logger: logger}
+		return cf, cf.Shutdown
 	default:
 		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
-		return nil
+		return nil, nil
 	}
 }
 

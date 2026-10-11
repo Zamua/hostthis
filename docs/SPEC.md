@@ -3873,17 +3873,17 @@ Three implementations ship:
 | Impl | When used | Behavior |
 | --- | --- | --- |
 | `noop` (default) | No CDN, or one that revalidates every request | No-op |
-| `cloudflare` | Cloudflare in front | POSTs the slug's hostname to `/zones/<id>/purge_cache` |
+| `cloudflare` | Cloudflare in front | Queues the slug's hostname and POSTs batches to `/zones/<id>/purge_cache` |
 | `fastly` (not shipped, easy add) | Fastly in front | POSTs to Fastly's purge API |
 
 **Purge the slug's whole host.** A slug answers at many cache keys: the
 bare URL, `?raw=1` (the bytes a render shell fetches), `?files=1` (a knowledge
 base's file list), every file of a site or knowledge base, and any other
-query a client sends. The Cloudflare adapter purges them all in one call, by
-hostname:
+query a client sends. The Cloudflare adapter purges them all by naming the
+slug's hostname:
 
 ```
-{"hosts": ["<slug>.<apex>"]}
+{"hosts": ["<slug>.<apex>", ...]}
 ```
 
 so no list of variants has to stay in step with what the shells fetch. A
@@ -3894,6 +3894,19 @@ adapter purges the path prefix `<apex>/p/<slug>` instead
 slug. A port on the apex is dropped: purges name hosts, not origins. The
 scope policy lives in the adapter (which owns the apex and URL-mode config);
 the service layer only ever names the slug.
+
+**Coalesced and paced.** Below the enterprise plan, hostname and prefix
+purges have tighter API rate limits than URL purges and take at most 30
+entries per call. So a purge only queues the slug's hostname (once, however
+many writes name it before it is sent), and one loop sends the queue in
+calls of at most 30 entries, at most one call every 2 seconds; a call after
+an idle spell goes out at once. A 429, a 5xx or a transport failure is
+retried with backoff doubling from 1 second (longer when `Retry-After` asks),
+for at most 5 calls; a batch still failing, or refused outright (another
+4xx), is logged and dropped, bounded by the edge TTL. Every call is logged
+with its hosts and its outcome. A write never waits for its purge. At
+shutdown the queue is sent within the process's shutdown bound (see
+"Process shutdown"); what is left at the deadline is dropped.
 
 Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
 
@@ -4160,10 +4173,12 @@ whose connection was force-closed or lost may still be inside metadata work, so
 both graceful shutdown and force close return only after every admitted handler
 has finished. A handshake accepted before shutdown that completes afterward is
 refused before its command dispatches. Upload finalizers are waited only after
-SSH can no longer start one. The whole sequence has a 35-second hard bound. Work still
-blocked at that point is left to the documented pending-state and startup
-recovery protocols. The 20-second and 35-second limits are product constants,
-not operator knobs.
+SSH can no longer start one. CDN purges still queued are sent last, since
+the drain before them can still queue some. The whole sequence has a
+35-second hard bound. Work still blocked at that point is left to the
+documented pending-state and startup recovery protocols (a purge still queued
+is dropped, bounded by the edge TTL). The 20-second and 35-second limits are
+product constants, not operator knobs.
 
 ### What's hardcoded
 
