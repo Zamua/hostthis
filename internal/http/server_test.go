@@ -170,6 +170,19 @@ func TestPasteRead_Conditional304(t *testing.T) {
 	}
 }
 
+// RFC 9110 13.2.2: If-Modified-Since is ignored when If-None-Match is present.
+func TestPasteRead_IfNoneMatchOverridesIfModifiedSince(t *testing.T) {
+	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
+	srv := readyHTMLServer([]byte("body"), updatedAt)
+	w := getPaste(srv, map[string]string{
+		"If-None-Match":     `"some-other-key"`,
+		"If-Modified-Since": updatedAt.Add(time.Hour).UTC().Format(stdhttp.TimeFormat),
+	})
+	if w.Code != 200 || w.Body.String() != "body" {
+		t.Fatalf("status %d body %q, want 200 with the content", w.Code, w.Body.String())
+	}
+}
+
 // /healthz answers on any Host, uncached, and names the replica color only
 // when one is configured.
 func TestHealthz(t *testing.T) {

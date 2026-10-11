@@ -474,15 +474,19 @@ func setSandboxHeaders(h http.Header) {
 }
 
 // notModified sets the response validators (ETag, Last-Modified) and answers
-// a conditional GET with a bodiless 304 when either client validator matches.
-// True means the response is written.
+// a conditional GET with a bodiless 304 when the client's validator matches.
+// If-Modified-Since counts only without If-None-Match (RFC 9110 13.2.2). True
+// means the response is written.
 func notModified(w http.ResponseWriter, r *http.Request, etag string, updatedAt time.Time) bool {
 	h := w.Header()
 	h.Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
 	h.Set("ETag", etag)
-	if etagMatches(r.Header.Get("If-None-Match"), etag) {
-		w.WriteHeader(http.StatusNotModified)
-		return true
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		if etagMatches(inm, etag) {
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
+		return false
 	}
 	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
 		if since, err := http.ParseTime(ims); err == nil && !updatedAt.UTC().Truncate(time.Second).After(since) {
