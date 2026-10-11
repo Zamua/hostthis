@@ -1,16 +1,23 @@
 // The read path's caches, as decorators around it (docs/SPEC.md "The public
-// surface"): whole responses keyed by URL, and decoded payloads keyed by
-// object key. Each takes the runtime's Cache API as a port.
+// surface"): whole responses keyed by what the read path answers from, and
+// decoded payloads keyed by object key. Each takes the runtime's Cache API as
+// a port.
+import { statedLength } from "./length.js";
 import { CONTENT_CACHE_CONTROL } from "./reads.js";
 
 const IMMUTABLE = "public, max-age=31536000, immutable";
 const CONDITIONALS = ["If-None-Match", "If-Modified-Since"];
 
+// The largest response the edge cache stores when the deployment names none.
+export const EDGE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+
 // Two copies of source that read it in step: a chunk is read only once every
 // live copy has taken the last one, so neither copy holds more than one chunk
-// however slowly the other is read. A cancelled copy drops out; the source is
-// cancelled with the last one. release(i) drops copy i the same way, for a
-// consumer that stops reading without cancelling it (a failed cache put).
+// however slowly the other is read. The first copy leads: cancelling it
+// cancels the source and errors the second, so a copy kept for a cache never
+// outlives its reader nor ends as if whole. Cancelling the second, or
+// release(1) for a consumer that stops reading without cancelling it (a
+// failed cache put), leaves the first to read alone.
 export function lockstepTee(source) {
   const reader = source.getReader();
   const copies = [];
@@ -49,14 +56,31 @@ export function lockstepTee(source) {
     });
   }
 
+  function drop(c, error) {
+    c.cancelled = true;
+    if (error) {
+      try {
+        c.controller.error(error);
+      } catch {
+        // already closed or errored
+      }
+    }
+    c.waiter?.();
+    c.waiter = null;
+  }
+
   function release(i, reason) {
     const c = copies[i];
     if (c.cancelled) {
       return Promise.resolve();
     }
-    c.cancelled = true;
-    c.waiter?.();
-    c.waiter = null;
+    drop(c);
+    if (i === 0) {
+      if (!copies[1].cancelled) {
+        drop(copies[1], new Error("tee: the leading copy was cancelled"));
+      }
+      return reader.cancel(reason).catch(() => {});
+    }
     return live().length === 0 ? reader.cancel(reason).catch(() => {}) : step();
   }
 
@@ -75,23 +99,51 @@ export function lockstepTee(source) {
   return { copies: [copy(0), copy(1)], release };
 }
 
-// Stores the tee's second copy under key in the background. However the put
-// ends, the copy is released, so a put that stops reading never stalls the
-// client.
-function keep(ctx, cache, key, tee, init) {
-  const put = cache.put(key, new Response(tee.copies[1], init))
+// copy as a cache put's body, erroring (so the put stores nothing) once it
+// runs past maxBytes.
+function bounded(copy, maxBytes) {
+  const reader = copy.getReader();
+  let seen = 0;
+  return new ReadableStream({
+    async pull(controller) {
+      const next = await reader.read();
+      if (next.done) {
+        controller.close();
+        return;
+      }
+      seen += next.value.byteLength;
+      if (seen > maxBytes) {
+        reader.cancel().catch(() => {});
+        throw new Error(`cache fill: past ${maxBytes} bytes`);
+      }
+      controller.enqueue(next.value);
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  }, { highWaterMark: 0 });
+}
+
+// Stores the tee's second copy under key in the background, abandoned past
+// maxBytes. However the put ends, the copy is released, so a put that stops
+// reading never stalls the client.
+function keep(ctx, cache, key, tee, init, maxBytes) {
+  const put = cache.put(key, new Response(bounded(tee.copies[1], maxBytes), init))
     .catch(() => {})
     .finally(() => tee.release(1));
   ctx?.waitUntil?.(put);
 }
 
-// The key a response is stored under: the request's URL on the public host,
-// so a hostname purge of <slug>.<apex> reaches it.
-function responseKey(request, host) {
-  const url = new URL(request.url);
-  url.hostname = host;
-  url.port = "";
-  return url.toString();
+// The key a response is stored under. Its host is the public host, so a
+// hostname purge of <slug>.<apex> reaches it (and in path mode, through
+// mount, a prefix purge of <apex>/p/<slug>). The rest names what the read
+// path answers from: the decoded path and the parsed flags, never the
+// client's query.
+function responseKey(target) {
+  const params = new URLSearchParams({ path: target.path });
+  if (target.flags.raw) params.set("raw", "1");
+  if (target.flags.files) params.set("files", "1");
+  return `https://${target.host}${target.mount}/?${params}`;
 }
 
 const NULL_BODY_STATUSES = new Set([204, 205, 304]);
@@ -113,14 +165,15 @@ function forBrowser(stored, method) {
 // Whole read responses for ttl seconds. A hit answers GET, HEAD and
 // conditional requests (the cache answers the conditionals itself). Only an
 // unconditional GET fills it, and only with a 200 carrying the content
-// posture: never an error, a 404, or a pending or failed page.
-export function withEdgeCache(read, { cache, ttl }) {
+// posture and at most maxBytes: never an error, a 404, or a pending or failed
+// page.
+export function withEdgeCache(read, { cache, ttl, maxBytes = EDGE_CACHE_MAX_BYTES }) {
   return async function cachedRead(request, env, ctx, target) {
     const { method } = request;
     if (method !== "GET" && method !== "HEAD") {
       return read(request, env, ctx, target);
     }
-    const key = responseKey(request, target.host);
+    const key = responseKey(target);
     const conditional = {};
     for (const name of CONDITIONALS) {
       const value = request.headers.get(name);
@@ -136,11 +189,16 @@ export function withEdgeCache(read, { cache, ttl }) {
     if (!fills || res.status !== 200 || res.headers.get("Cache-Control") !== CONTENT_CACHE_CONTROL || !res.body) {
       return res;
     }
+    // A stated size over the cap starts no fill; an unstated one is cut off
+    // at the cap.
+    if ((statedLength(res.headers) ?? 0) > maxBytes) {
+      return res;
+    }
     const tee = lockstepTee(res.body);
     const headers = new Headers(res.headers);
     headers.set("Cache-Control", `public, max-age=${ttl}`);
     headers.set("Cache-Tag", target.slug);
-    keep(ctx, cache, key, tee, { status: 200, headers });
+    keep(ctx, cache, key, tee, { status: 200, headers }, maxBytes);
     return new Response(tee.copies[0], { status: res.status, headers: res.headers });
   };
 }
@@ -159,7 +217,7 @@ export function withBlobCache(open, { cache, maxBytes, origin }) {
       return hit.body ?? new ReadableStream({ start: (c) => c.close() });
     }
     const tee = lockstepTee(await open(env, entry, ctx));
-    keep(ctx, cache, key, tee, { headers: { "Cache-Control": IMMUTABLE } });
+    keep(ctx, cache, key, tee, { headers: { "Cache-Control": IMMUTABLE } }, maxBytes);
     return tee.copies[0];
   };
 }

@@ -108,5 +108,7 @@ request carrying the token and `X-Hostthis-Forwarded-Host: <host under the
 apex>` is served by the public router as that host. Left unset, the Worker
 routes as above whatever the Host. `HOSTTHIS_EDGE_CACHE_TTL_S` and
 `HOSTTHIS_BLOB_CACHE_MAX_BYTES` turn on the read caches where the runtime has a
-Cache API; leave them unset on celld, whose cache always misses. See
+Cache API; leave them unset on celld, whose cache always misses.
+`HOSTTHIS_EDGE_CACHE_MAX_BYTES` (default 8 MiB) caps what the edge cache
+stores. See
 `docs/SPEC.md`, "Public and internal hosts" and "The public surface".

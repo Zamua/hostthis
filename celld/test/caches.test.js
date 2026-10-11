@@ -3,7 +3,8 @@ import test from "node:test";
 
 import { lockstepTee, withEdgeCache } from "../src/public/caches.js";
 import { publicReads } from "../src/public/surface.js";
-import { at, documentRow, FORWARDED, headersOf, hiRow, SLUG, TOKEN, world } from "./public-world.js";
+import { decoderStats } from "../src/public/zstd.js";
+import { APEX, at, documentRow, FORWARDED, headersOf, hiRow, SLUG, TOKEN, world } from "./public-world.js";
 import { stored } from "./stored.js";
 
 // A Cache API double: put reads the whole body (and fails when it errors), and
@@ -93,9 +94,9 @@ test("a GET fills the edge cache, and a hit answers GET, HEAD and conditionals a
     assert.equal(await miss.text(), "<h1>hi</h1>");
     await settle(w);
 
-    const key = `https://${SLUG}.paste.test/?raw`;
-    const entry = cache.entries.get(key);
-    assert.ok(entry, [...cache.entries.keys()].join());
+    assert.equal(cache.entries.size, 1);
+    const [[key, entry]] = cache.entries;
+    assert.equal(new URL(key).hostname, `${SLUG}.paste.test`, "a hostname purge reaches it");
     const kept = new Headers(entry.headers);
     assert.equal(kept.get("Cache-Control"), "public, max-age=86400");
     assert.equal(kept.get("Cache-Tag"), SLUG);
@@ -179,7 +180,7 @@ test("errors, misses and lifecycle pages are never stored", async () => {
   assert.ok(!cache.calls.some((c) => c.startsWith("put")));
 });
 
-test("a forwarded read is stored under the public host", async () => {
+test("a forwarded read is stored under the public host, where a direct read finds it", async () => {
   const cache = new FakeCache();
   const w = htmlWorld(TTL);
   await withCaches(cache, async () => {
@@ -188,8 +189,100 @@ test("a forwarded read is stored under the public host", async () => {
     });
     assert.equal(await res.text(), "<h1>hi</h1>");
     await settle(w);
+    assert.equal(await (await w.fetch(at("/"))).text(), "<h1>hi</h1>");
   });
-  assert.deepEqual([...cache.entries.keys()], [`http://${SLUG}.paste.test/`]);
+  assert.deepEqual([...cache.entries.keys()].map((k) => new URL(k).hostname), [`${SLUG}.paste.test`]);
+  assert.equal(w.cellRequests.length, 1);
+});
+
+test("the edge key is the slug, path and parsed flags: a client's query adds no entries", async () => {
+  const cache = new FakeCache();
+  const w = world({ ...TTL, HOSTTHIS_URL_MODE: "path" });
+  w.row(SLUG, documentRow("markdown", "ready", 3));
+  w.blob("uploads/a/0", "# x");
+  w.row("xyz23456", documentRow("markdown", "ready", 3));
+  await withCaches(cache, async () => {
+    const shell = ["/", "/?utm=1", "/?x=1&y", "/?RAW", "/?raw;x", `/?${crypto.randomUUID()}`];
+    const raw = ["/?raw", "/?raw=0&z=9", "/?r%61w", `/?${crypto.randomUUID()}&raw`];
+    for (const query of [...shell, ...raw]) {
+      await (await w.fetch(at(query))).arrayBuffer();
+      await settle(w);
+    }
+    assert.equal(cache.entries.size, 2, [...cache.entries.keys()].join("\n"));
+    assert.equal(w.cellRequests.length, 2, "every request after the first of each key is a hit");
+    // Path mode keys each slug apart under the one apex host.
+    await (await w.fetch(`http://${APEX}/p/${SLUG}/`)).arrayBuffer();
+    await (await w.fetch(`http://${APEX}/p/xyz23456/`)).arrayBuffer();
+    await settle(w);
+    assert.equal(cache.entries.size, 4);
+  });
+});
+
+test("a client that stops reading stops the edge fill, the decoder and the payload read", async () => {
+  for (const vars of [TTL, { ...TTL, HOSTTHIS_BLOB_CACHE_MAX_BYTES: String(8 * 1024 * 1024) }]) {
+    const cache = new FakeCache();
+    const w = world(vars);
+    const content = new Uint8Array(3 * 1024 * 1024).fill(0x62);
+    w.row(SLUG, documentRow("html", "ready", content.length));
+    w.blob("uploads/a/0", content);
+    await withCaches(cache, async () => {
+      const reader = (await w.fetch(at("/"))).body.getReader();
+      assert.ok((await reader.read()).value.length > 0);
+      await reader.cancel();
+      await settle(w);
+    });
+    assert.equal(cache.entries.size, 0, "a partial body is never stored");
+    assert.equal(decoderStats().busy, 0, "the decoder went back");
+    assert.equal(w.payloadBodies.length, 1);
+    const [body] = w.payloadBodies;
+    assert.ok(body.cancelled, "the payload body was cancelled");
+    assert.ok(body.sent < 1024 * 1024, `${body.sent} payload bytes read`);
+  }
+});
+
+const putHosts = (cache) => cache.calls.filter((c) => c.startsWith("put ")).map((c) => new URL(c.slice(4)).hostname);
+
+test("an edge fill is capped by the response's size", async () => {
+  const cache = new FakeCache();
+  const w = world({ ...TTL, HOSTTHIS_EDGE_CACHE_MAX_BYTES: "11" });
+  w.row(SLUG, hiRow());
+  w.blob("uploads/a/0", "<h1>hi</h1>");
+  w.row("xyz23456", { ...hiRow(), manifest: { Files: { "/": { Key: "uploads/b/0", Size: 12 } } } });
+  w.blob("uploads/b/0", "<h1>hi!</h1>");
+  // A shell states no size, and is far over the cap.
+  w.row("mnp23456", documentRow("markdown"));
+  await withCaches(cache, async () => {
+    for (const slug of [SLUG, "xyz23456", "mnp23456"]) {
+      assert.equal((await (await w.fetch(at("/", slug))).arrayBuffer()).byteLength > 0, true, slug);
+      await settle(w);
+    }
+  });
+  // A stated size over the cap starts no fill; an unstated one is abandoned past it.
+  assert.deepEqual(putHosts(cache), [`${SLUG}.paste.test`, "mnp23456.paste.test"]);
+  assert.deepEqual([...cache.entries.keys()].map((k) => new URL(k).hostname), [`${SLUG}.paste.test`]);
+});
+
+test("the edge fill cap defaults to 8 MiB", async () => {
+  const cache = new FakeCache();
+  const w = world(TTL);
+  for (const [slug, size] of [[SLUG, 8 * 1024 * 1024], ["xyz23456", 8 * 1024 * 1024 + 1]]) {
+    w.row(slug, { ...documentRow("html", "ready", size), manifest: { Files: { "/": { Key: `k-${slug}`, Size: size } } } });
+    w.blob(`k-${slug}`, "short");
+  }
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    await withCaches(cache, async () => {
+      for (const slug of [SLUG, "xyz23456"]) {
+        await (await w.fetch(at("/", slug))).arrayBuffer().catch(() => {});
+        await settle(w);
+      }
+    });
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(putHosts(cache), [`${SLUG}.paste.test`]);
+  assert.equal(cache.entries.size, 0, "a short body is never stored");
 });
 
 test("a cache that fails is a miss", async () => {
@@ -281,18 +374,23 @@ test("a lockstep copy runs at most one chunk ahead of the other", async () => {
   const [x, y] = await Promise.all([ra.read(), rb.read()]);
   x.value[0] = 99;
   assert.equal(y.value[0], 3);
-  // Cancelling one leaves the other to read alone; cancelling both cancels the source.
-  await ra.cancel();
-  assert.equal((await rb.read()).value[0], 4);
-  assert.equal((await rb.read()).value[0], 5);
-  assert.equal((await rb.read()).done, true);
+  // Cancelling the second leaves the first to read alone.
+  await rb.cancel();
+  assert.equal((await ra.read()).value[0], 4);
+  assert.equal((await ra.read()).value[0], 5);
+  assert.equal((await ra.read()).done, true);
+});
 
+test("cancelling the first copy cancels the source and errors the second", async () => {
   let cancelled = false;
   const [c, d] = lockstepTee(chunks(5, () => { cancelled = true; }).stream).copies;
-  await c.cancel();
-  assert.ok(!cancelled);
-  await d.cancel();
+  const rc = c.getReader();
+  const rd = d.getReader();
+  await Promise.all([rc.read(), rd.read()]);
+  const waiting = rd.read();
+  await rc.cancel();
   assert.ok(cancelled);
+  await assert.rejects(waiting);
 });
 
 test("a released copy no longer holds the other back", async () => {

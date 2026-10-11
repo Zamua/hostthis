@@ -3,7 +3,7 @@
 // runtime's FixedLengthStream, where it has one, holds each body to its
 // stated length.
 import { openPayload } from "./blobs.js";
-import { withBlobCache, withEdgeCache } from "./caches.js";
+import { EDGE_CACHE_MAX_BYTES, withBlobCache, withEdgeCache } from "./caches.js";
 import { normalizeHost } from "./host.js";
 import { withFixedLength } from "./length.js";
 import { readPath } from "./reads.js";
@@ -32,7 +32,8 @@ export function publicReads(
   }
   let read = readPath(open);
   if (cache && ttl) {
-    read = withEdgeCache(read, { cache, ttl });
+    const maxBytes = positive(env.HOSTTHIS_EDGE_CACHE_MAX_BYTES) || EDGE_CACHE_MAX_BYTES;
+    read = withEdgeCache(read, { cache, ttl, maxBytes });
   }
   if (fixedLengthStream) {
     read = withFixedLength(read, fixedLengthStream);

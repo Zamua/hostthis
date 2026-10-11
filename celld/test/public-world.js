@@ -58,6 +58,7 @@ export function world(vars = {}) {
     storageOf,
     cellRequests,
     payloadCalls,
+    payloadBodies: payloads.bodies,
     assetCalls,
     row(slug, row) {
       storageOf(slug).data.set("row", structuredClone(row));
