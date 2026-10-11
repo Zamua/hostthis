@@ -3684,8 +3684,12 @@ off unless configured, and used only where the runtime has a Cache API
 (celld's always misses, so a celld deployment leaves them off):
 
 - `HOSTTHIS_EDGE_CACHE_TTL_S` (default `0`, off) caches whole read responses
-  in the data center's cache, keyed by the request URL on the public host. An
-  unconditional GET that misses fills it: the stored copy carries
+  in the data center's cache. An entry's key is on the public host, so a
+  hostname purge of the slug's host reaches it (in path mode, so does a prefix
+  purge of `<apex>/p/<slug>`), and names only what the read path answers
+  from: the decoded path and the `raw` and `files` flags as parsed. Any other
+  query shares the entry, so a client's random query neither adds an entry
+  nor misses. An unconditional GET that misses fills it: the stored copy carries
   `Cache-Control: public, max-age=<ttl>` and `Cache-Tag: <slug>`, while the
   client gets the browser headers. A hit answers GET, HEAD and conditional
   requests (the cache answers `If-None-Match` and `If-Modified-Since` with a
@@ -3694,8 +3698,11 @@ off unless configured, and used only where the runtime has a Cache API
   answer to a HEAD, carries no body. A conditional request or a HEAD that
   misses goes to the read path and fills nothing. Only a `200` with the
   content posture is stored: never a 5xx, a 404, or a pending or failed page.
-  A write purges the slug's host (see "Active invalidation"), which also
-  drops these entries; the TTL bounds a missed purge.
+  A fill is capped by `HOSTTHIS_EDGE_CACHE_MAX_BYTES` (default 8 MiB): a
+  response whose `Content-Length` (the manifest's size) is over it starts no
+  fill, and one that states none (a shell, a file list) is abandoned once it
+  runs past it. A write purges the slug's host (see "Active invalidation"),
+  which also drops these entries; the TTL bounds a missed purge.
 - `HOSTTHIS_BLOB_CACHE_MAX_BYTES` (default `0`, off) caches the decoded bytes
   of each object whose decoded size (the manifest's) is at most that many
   bytes, keyed by the object key. A key never names different bytes, so these
@@ -3706,7 +3713,11 @@ off unless configured, and used only where the runtime has a Cache API
 
 A response stored while it streams to the client is split in lockstep: the
 source is read only when both the client and the cache have taken the last
-chunk, so neither copy is buffered whatever the client's pace.
+chunk, so neither copy is buffered whatever the client's pace. The client's
+copy leads: a client that stops reading before the end cancels the source,
+which stops the decoder and the payload read, and fails the cache's copy, so
+no partial body is stored and no fill outlives its client. A fill that fails
+leaves the client to read alone.
 
 ## Edge caching
 
@@ -4186,6 +4197,7 @@ HOSTTHIS_CELLD_TOKEN   bearer token for the internal routes; required with an ap
 HOSTTHIS_URL_MODE      path also serves /p/<slug> on the apex host (dev only)   (subdomain)
 ASSETS                 static assets binding for /_hostthis/; absent serves them from PAYLOADS
 HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      (0)
+HOSTTHIS_EDGE_CACHE_MAX_BYTES  largest read response the edge cache stores      (8388608)
 HOSTTHIS_BLOB_CACHE_MAX_BYTES  largest decoded payload cached; 0 is off         (0)
 ```
 

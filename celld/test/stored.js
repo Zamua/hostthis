@@ -24,24 +24,32 @@ export function stored(content) {
 }
 
 // A payload bucket over a map of key to stored bytes, recording every call.
+// bodies records each body handed out: its key, how far it was read and
+// whether it was cancelled.
 export function bucket(objects = new Map(), calls = []) {
+  const bodies = [];
   return {
     objects,
     calls,
+    bodies,
     async get(key) {
       calls.push(`get ${key}`);
       const bytes = objects.get(key);
       if (bytes === undefined) return null;
-      let sent = false;
+      const stats = { key, sent: 0, cancelled: false };
+      bodies.push(stats);
+      // 4 KiB chunks, read on demand, as a real bucket sends them.
       const body = new ReadableStream({
         pull(controller) {
-          if (sent) {
+          if (stats.sent >= bytes.length) {
             controller.close();
             return;
           }
-          sent = true;
-          // A few chunks, as a real bucket sends them.
-          for (let off = 0; off < bytes.length; off += 4096) controller.enqueue(bytes.slice(off, off + 4096));
+          controller.enqueue(bytes.slice(stats.sent, stats.sent + 4096));
+          stats.sent = Math.min(stats.sent + 4096, bytes.length);
+        },
+        cancel() {
+          stats.cancelled = true;
         },
       });
       return { body, size: bytes.length };

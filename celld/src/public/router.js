@@ -29,11 +29,12 @@ function badRequest() {
   });
 }
 
-// The app a request addresses, { slug, path } with path decoded, or null.
+// The app a request addresses, { slug, path, mount } with path decoded and
+// mount the URL path it is served under ("" on its own host), or null.
 function appOf(host, apex, urlMode, path) {
   const slug = slugOfHost(host, apex);
   if (slug) {
-    return { slug, path };
+    return { slug, path, mount: "" };
   }
   if (urlMode !== "path" || host !== apex || !path.startsWith("/p/")) {
     return null;
@@ -41,7 +42,7 @@ function appOf(host, apex, urlMode, path) {
   const after = path.slice(3);
   const slash = after.indexOf("/");
   const pathSlug = parseSlug(slash < 0 ? after : after.slice(0, slash));
-  return pathSlug && { slug: pathSlug, path: `/${slash < 0 ? "" : after.slice(slash + 1)}` };
+  return pathSlug && { slug: pathSlug, path: `/${slash < 0 ? "" : after.slice(slash + 1)}`, mount: `/p/${pathSlug}` };
 }
 
 const CLIENT_IP_SOURCES = ["cf-connecting-ip", "xff-rightmost"];
@@ -112,6 +113,7 @@ async function route(request, env, host, forwarded, surface) {
     slug: app.slug,
     path: goText(byteStringBytes(app.path)),
     host,
+    mount: app.mount,
     flags: queryFlags(url.search.slice(1)),
   });
 }
