@@ -2811,7 +2811,8 @@ identical whichever adapter wrote them. Reads inspect the first 4 bytes and
 zstd-decode the rest. An object that does not start with the magic, an empty
 one included, is damaged: its read fails before any byte is served (the HTTP
 read surface logs the slug and answers 500, `get` exits 1), while every other
-object stays readable.
+object stays readable. The Worker's read path decodes the same format (see
+"The public surface").
 
 ### Entries without an object key
 
@@ -3488,7 +3489,8 @@ with celld's state and lease writes, and a quota that fills would refuse those
 as well.
 
 One fleet bucket serves one Worker application. `hostthisd` serves all public
-content. The Worker's internal routes accept an optional shared token: when the Worker
+content unless a deployment routes public hosts to the Worker's public surface
+(see "Public and internal hosts"). The Worker's internal routes accept an optional shared token: when the Worker
 has `HOSTTHIS_CELLD_TOKEN` set, every route except `/healthz` (the cell
 routes, `/blob`, and the room join) requires `Authorization: Bearer <token>`
 and answers 401 without it, compared in constant time. `hostthisd` sends the
@@ -3535,26 +3537,114 @@ Hosts compare after normalization: lowercase, no port, no trailing dot. The
 apex value is normalized the same way, so `Example.COM.:443` names
 `example.com`.
 
-The public router serves an app on a slug host, `<slug>.<apex>` whose one
-label parses as a slug, and, with `HOSTTHIS_URL_MODE=path` (dev and tests
-only; `subdomain` is the default), under `/p/<slug>/` on the apex host. For an
-app it first does what Go's server and `ServeMux` do before `hostthisd`
-routes: a malformed percent escape is a 400, a path that cleaning changes (a
-doubled slash, a `.` or `..` segment; a trailing slash is kept) is redirected
-307 to its cleaned form with the query kept, and the path is percent-decoded
-once. It then serves the rooms API, room push and the room WebSocket
-(`/api/rooms[/...]` and `/api/push/key`, see "Rooms", "Real-time room relay"
-and "Room push"). It builds every cell request from parsed values: the slug
-from the host or the path-mode prefix, the room from the parsed UUID, the key
-from the decoded path, and a body it decoded, checked and encoded again.
-Neither the client's URL nor its query, headers or body reaches a cell, so
-no request can choose a cell op. Its other Worker settings are
+The public router first does what Go's server and `ServeMux` do before
+`hostthisd` routes, for every request: a malformed percent escape is a 400;
+`/_hostthis` without its slash is redirected 307 to `/_hostthis/`; a path that
+cleaning changes (a doubled slash, a `.` or `..` segment; a trailing slash is
+kept) is redirected 307 to its cleaned form with the query kept; and the path
+is percent-decoded once. On every host it then answers the renderer assets
+under `/_hostthis/` and `/healthz` and `/readyz` (see "The public surface").
+
+It serves an app on a slug host, `<slug>.<apex>` whose one label parses as a
+slug, and, with `HOSTTHIS_URL_MODE=path` (dev and tests only; `subdomain` is
+the default), under `/p/<slug>/` on the apex host. An app's rooms API, room
+push and room WebSocket (`/api/rooms[/...]` and `/api/push/key`, see "Rooms",
+"Real-time room relay" and "Room push") come first, as in `hostthisd`; every
+other path is the app's read path (see "The public surface"). It builds every
+cell request from parsed values: the slug from the host or the path-mode
+prefix, the room from the parsed UUID, the key or read path from the decoded
+path, the read flags from the parsed query, and a body it decoded, checked and
+encoded again. Neither the client's URL nor its query, headers or body reaches
+a cell, so no request can choose a cell op. Its other Worker settings are
 `HOSTTHIS_PUBLIC_SCHEME` (the push `sub`) and `HOSTTHIS_CLIENT_IP_SOURCE`
 (the room creation limit's client address, see "Quota and abuse").
 
 Every other request answers 404 with `404 page not found`,
 `Content-Type: text/plain; charset=utf-8` and `X-Content-Type-Options:
-nosniff`, the 404 `hostthisd` gives an unknown slug.
+nosniff`, the 404 `hostthisd` gives an unknown slug. The apex `/` is one: the
+landing page stays `hostthisd`'s. The Worker never redirects between schemes;
+that is the front door's job.
+
+### The public surface
+
+With an apex set, the Worker answers paste and site reads itself, by the
+rules `hostthisd`'s read path follows, so the same URL gives the same answer
+from either server (statuses, the content headers, bodies byte for byte).
+Nothing changes for a deployment until it routes public traffic to the Worker
+(a Workers route, or forwarded mode); `hostthisd` keeps its own read path.
+
+The URL parser resolves `.` and `..` segments (`%2e` included) before the
+Worker sees the path, so such a request is served at the resolved path where
+`hostthisd` redirects it.
+
+**The read path.** Reads answer GET and HEAD; any other method gets `405`
+with `Allow: GET, HEAD`. Each request makes one call to the slug's Paste cell,
+the read-only `resolve` op, built from parsed values only: the slug from the
+host (or the path, in path mode), the decoded path, and the `raw` and `files`
+flags. The flags are read as Go's `URL.Query().Has` reads them: pairs split on
+`&`, a pair holding `;` dropped, keys percent-decoded, any value (`?raw`,
+`?raw=0` and `?r%61w` all ask for raw bytes). The client's URL and query are
+never forwarded. The answer maps to a response as `hostthisd` maps the same
+case:
+
+| answer | response |
+| --- | --- |
+| no row, `notfound` | 404 |
+| `pending` | 200 loading page, `no-store`, `Retry-After: 1` |
+| `failed` | 410 error page, `no-store` |
+| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the object key |
+| `shell`, `kbshell` | 200, the kind's shell with its CSP, ETag the shell version |
+| `files` | 200, the sorted path list as `json.Encoder` writes it, ETag `files-<upload id>` |
+| a kind with no shell | 500 `unsupported kind` |
+| a metadata or blob failure | 500 `internal error` |
+
+Content responses carry the sandbox headers (see "HTML sandboxing"),
+`Cache-Control: public, no-cache`, `ETag` and `Last-Modified`, and answer
+conditional requests before any payload is read (see "Cache-Control
+posture"). Raw bytes take the kind's raw type (`text/plain; charset=utf-8`
+when it has none), a site or knowledge base file its stored type
+(`application/octet-stream` when empty). Every 500 logs one warning naming the
+slug and the cause, and nothing else (see "5xx observability on the read
+surface").
+
+The bytes stream from `PAYLOADS` through a check of the at-rest magic and a
+zstd decoder (see "On-disk format"), never held whole: libzstd's decompressor
+compiled to WASM, vendored with its build in `celld/vendor/zstd`. It decodes
+only as the client reads, at most 128 KiB per step, refuses a frame whose
+window exceeds 8 MiB before allocating it, and verifies the frame checksum.
+The first chunk is decoded before the response starts, so a missing object, a
+missing magic or a damaged frame header is a 500. Damage found later (the
+checksum sits at the end of the frame) errors the response's body stream and
+logs one warning naming the slug; the body ends short of the stored bytes,
+and how a client sees that end (an aborted connection, or a short body) is the
+runtime's. A HEAD never opens the object.
+
+**Renderer assets.** On Cloudflare, the build's static assets answer every
+known `/_hostthis/<name>` before the Worker runs. A request that reaches the
+Worker resolves the name as `hostthisd` does, by the path's last segment, so
+`/_hostthis/mdshell/md.js` serves `md.js`; an unknown name is the 404. A name
+too large for static assets (listed in `static-r2.json`) streams from
+`PAYLOADS` at `static/<shell version>/<name>`, stored as is; so does every
+asset when the Worker has no `ASSETS` binding. Either way the response carries
+the asset's Content-Type and `public, max-age=31536000, immutable`. Assets
+answer GET and HEAD, and a HEAD reads nothing.
+
+**Deliberate differences** from `hostthisd`, each where the Worker is
+stricter or the runtime decides:
+
+- Reads and assets answer only GET and HEAD (405 otherwise).
+- A HEAD never opens the object, so a damaged object is 200 to HEAD, 500 to
+  GET.
+- `If-None-Match` compares weakly (RFC 9110): an edge that compresses a
+  response turns its ETag into `W/"..."`, which must still match.
+- A 500 carries only its text: no validators or cache headers, which
+  `hostthisd` leaves on a 500 raised after it set them. A stored kind with no
+  shell is a 500 even to a conditional request.
+- Damage found mid-body errors the body stream rather than ending it as
+  complete, and is logged; an object holding the magic and no zstd frame is
+  damaged.
+- Hosts compare lowercased, and `/p/` is served only on the apex host.
+- `.` and `..` segments are resolved by the URL parser rather than redirected.
 
 ## Edge caching
 
@@ -3867,7 +3957,9 @@ The HTTP listener serves two process-health endpoints ahead of Host-based routin
   cells on demand.
 
 Both answer on any Host without authentication. They expose no metadata, storage
-counters, or operator controls.
+counters, or operator controls. The Worker's public router answers both on every
+public host with the same bodies and headers (it has no color to echo); its
+internal router keeps its own `/healthz`.
 
 ## Metrics
 
@@ -3981,6 +4073,8 @@ runtime's equivalent), separate from `hostthisd`'s:
 ```
 HOSTTHIS_APEX_DOMAIN   public apex; turns on the public/internal host split     (unset: off)
 HOSTTHIS_CELLD_TOKEN   bearer token for the internal routes; required with an apex   (unset)
+HOSTTHIS_URL_MODE      path also serves /p/<slug> on the apex host (dev only)   (subdomain)
+ASSETS                 static assets binding for /_hostthis/; absent serves them from PAYLOADS
 ```
 
 See "Public and internal hosts". A deployment runs the bundled Worker,
