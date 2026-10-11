@@ -37,7 +37,7 @@ build:
 
 # Every runtime, local or deployed, runs the one bundled module celld/dist/index.js,
 # built with the static assets beside it from celld/src and web/shells.
-CELLD_SRC := $(shell find celld/src celld/build web/shells -type f)
+CELLD_SRC := $(shell find celld/src celld/build celld/vendor web/shells -type f)
 
 bundle: celld/dist/index.js
 
