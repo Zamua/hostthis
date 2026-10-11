@@ -209,6 +209,12 @@ from `PARITY_HOSTTHISD_URL`, `PARITY_WORKER_URL`, `PARITY_TOKEN_FILE` and
 (`internal/parity/external_test.go`). `TestParityAgainstURLs` drives that mode
 against the local servers on every run.
 
+A release that deploys the Worker before hostthisd compares the new Worker
+against the previous hostthisd with `PARITY_REFERENCE=previous`. That mode also
+factors out what the release changed on purpose and what each server's front
+door does to a path before the server sees it (`previous_test.go`, each rule
+with its reason), and still fails on any other status or body difference.
+
 Quick smoke from another terminal once it's live:
 
 ```

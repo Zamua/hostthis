@@ -21,6 +21,8 @@ import (
 //	PARITY_SLUGS          the slugs to read, separated by commas or spaces
 //	PARITY_ALLOW_WRITES   1 to run the room and socket checks, which write
 //	PARITY_WRITE_SLUG     the dedicated test paste those writes are confined to
+//	PARITY_REFERENCE      previous when hostthisd runs the release before the
+//	                      Worker's (previous_test.go); unset when both run one
 //
 // Without PARITY_ALLOW_WRITES=1 the run only reads.
 type externalConfig struct {
@@ -29,6 +31,7 @@ type externalConfig struct {
 	token     string
 	slugs     []string
 	writeSlug string
+	previous  bool
 	// pin, when set, is the address every hostthisd request dials.
 	pin string
 }
@@ -73,6 +76,13 @@ func readExternalConfig(t *testing.T) (externalConfig, bool) {
 			t.Fatal("PARITY_ALLOW_WRITES=1 needs PARITY_WRITE_SLUG naming the test paste")
 		}
 	}
+	switch ref := os.Getenv("PARITY_REFERENCE"); ref {
+	case "":
+	case "previous":
+		cfg.previous = true
+	default:
+		t.Fatalf("PARITY_REFERENCE %q is not previous", ref)
+	}
 	return cfg, true
 }
 
@@ -101,6 +111,7 @@ func externalWorld(t *testing.T, cfg externalConfig) *world {
 		}},
 		writable: cfg.writeSlug != "",
 		writeApp: cfg.writeSlug,
+		previous: cfg.previous,
 	}
 	for _, slug := range cfg.slugs {
 		w.slugs = append(w.slugs, slugCase{slug: slug, label: slug, targets: w.discover(t, slug)})
