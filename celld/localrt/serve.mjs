@@ -27,12 +27,13 @@ function mtime(path) {
     return -1;
   }
 }
-const sources = readdirSync(join(celld, "src"), { recursive: true, withFileTypes: true })
+const sources = [join(celld, "src"), join(celld, "build"), join(celld, "..", "web", "shells")]
+  .flatMap((dir) => readdirSync(dir, { recursive: true, withFileTypes: true }))
   .filter((entry) => entry.isFile())
   .map((entry) => mtime(join(entry.parentPath, entry.name)));
 const built = mtime(join(celld, config.main));
 if (built < Math.max(mtime(join(celld, "package.json")), ...sources)) {
-  process.stderr.write(`celld runtime: ${config.main} is ${built < 0 ? "missing" : "older than celld/src"}; run \`make bundle\`\n`);
+  process.stderr.write(`celld runtime: ${config.main} is ${built < 0 ? "missing" : "older than its sources"}; run \`make bundle\`\n`);
   process.exit(1);
 }
 
