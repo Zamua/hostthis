@@ -3500,14 +3500,6 @@ class binding reaches them:
   image answers 400 `invalid-image` before any write. The entries and the alarm
   commit in one transaction, at most 128 entries per put, so a write the
   storage refuses answers 500 `restore-failed` and leaves the cell blank.
-- `POST /__cell/adopt`, on an Identity cell only, folds a whole image into a
-  cell that may already hold state: index entries and subnet notes merge member
-  by member (a subnet keeps its earliest sighting), `firstSeen` and the alarm
-  keep the earlier time, and any other key absent here is added. A key or index
-  entry both sides hold with different values answers 409 `{ adopted: false,
-  reason: "conflict" }` before any write; a paged image answers 400. It exists
-  to rejoin an owner's index restored under another name with the cell the
-  owner's name addresses.
 
 A cell too large for one image (a site with hundreds of versions holds tens of
 megabytes of manifests, past what one isolate can hold as JSON) moves in parts:
