@@ -586,6 +586,60 @@ async function cellRoute(state, request) {
   return CELL_ROUTES[name].run(state, request);
 }
 
+const ADOPT_PATH = "/__cell/adopt";
+
+function sameValue(a, b) {
+  return JSON.stringify(encodeValue(a)) === JSON.stringify(encodeValue(b));
+}
+
+// Folds another Identity cell's image into this one, which may already hold
+// state. The index and the subnet notes merge member by member, each subnet
+// keeping its earliest sighting; firstSeen and the alarm keep the earlier
+// time. Any other key, or index entry, both sides hold with different values
+// refuses the whole image, so nothing either side recorded is overwritten.
+async function adoptIdentity(state, request) {
+  let image;
+  try {
+    image = decodeImage(await request.json());
+  } catch (error) {
+    return Response.json({ error: "invalid-image", detail: String(error?.message ?? error) }, { status: 400 });
+  }
+  if (image.part) {
+    return Response.json({ error: "invalid-image", detail: "adopt takes a whole image" }, { status: 400 });
+  }
+  return state.blockConcurrencyWhile(() => state.storage.transaction(async (tx) => {
+    const writes = [];
+    for (const [key, value] of image.entries) {
+      const held = await tx.get(key);
+      if (held === undefined) {
+        writes.push([key, value]);
+      } else if (key === "entries" || key === "subnets") {
+        const merged = { ...held };
+        for (const [member, incoming] of Object.entries(value)) {
+          if (!Object.hasOwn(merged, member)) {
+            merged[member] = incoming;
+          } else if (key === "subnets") {
+            merged[member] = Math.min(merged[member], incoming);
+          } else if (!sameValue(merged[member], incoming)) {
+            return Response.json({ adopted: false, reason: "conflict", key, member }, { status: 409 });
+          }
+        }
+        writes.push([key, merged]);
+      } else if (key === "firstSeen") {
+        writes.push([key, Math.min(held, value)]);
+      } else if (!sameValue(held, value)) {
+        return Response.json({ adopted: false, reason: "conflict", key }, { status: 409 });
+      }
+    }
+    await putInBatches(tx, writes);
+    if (image.alarm !== null) {
+      const held = await tx.getAlarm();
+      await tx.setAlarm(Math.max(Date.now(), held === null ? image.alarm : Math.min(held, image.alarm)));
+    }
+    return Response.json({ adopted: true, entries: image.entries.length });
+  }));
+}
+
 const IDENTITY_OPS = {
   bytes: read((self) => self.bytes()),
   list: read((self) => self.list()),
@@ -610,6 +664,11 @@ export class Identity {
   }
 
   async fetch(request) {
+    if (new URL(request.url).pathname === ADOPT_PATH) {
+      return request.method === "POST"
+        ? adoptIdentity(this.state, request)
+        : new Response("method not allowed\n", { status: 405 });
+    }
     return (await cellRoute(this.state, request))
       ?? (await dispatch(this, IDENTITY_OPS, request))
       ?? new Response("unknown op\n", { status: 404 });
