@@ -121,6 +121,7 @@ test("a path naming a cell's internal surface is never routed", async () => {
     "/__cell/restore",
     "/paste/__cell/image?slug=abc12345",
     "/identity/__cell/restore?scope=owner1",
+    "/identity/__cell/adopt?scope=owner1",
     "/room/__cell/name?room=app12345%2Fr1",
     "/subnet/__cell/image?subnet=10.0.0.0",
     "/paste/%5F%5Fcell/image?slug=abc12345",

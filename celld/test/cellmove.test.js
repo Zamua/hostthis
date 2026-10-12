@@ -485,3 +485,78 @@ test("an image may not carry the restore progress key", async () => {
     assert.equal(bad.status, 400, JSON.stringify(part));
   }
 });
+
+// An owner whose cell holds one confirmed paste, first seen at `now`, with one
+// subnet note, and no outstanding intent or alarm.
+async function ownerWith(w, name, slug, now, subnet) {
+  const owner = () => w.cell("IDENTITY", name);
+  await ok(owner(), `/identity/reserve?scope=${name}`, {
+    slug, generation: `gen-${slug}`, size: 5, userCap: 1000, status: "pending", now, updatedAt: now,
+    intent: {
+      id: `create:${slug}:gen-${slug}`, kind: "create_paste", subject: slug,
+      fingerprint: `fp-${slug}`, reached: ["identity"], guard: b64("guard"), startedAt: now,
+    },
+  });
+  await ok(owner(), `/identity/confirm?scope=${name}`, {
+    slug, generation: `gen-${slug}`, status: "ready", intentId: `create:${slug}:gen-${slug}`,
+  });
+  await ok(owner(), `/identity/notesubnet?scope=${name}`, { subnet, now });
+  await owner().state.storage.deleteAlarm();
+  return owner;
+}
+
+test("an identity image adopted into a cell holding state keeps both indexes", async () => {
+  const w = world();
+  const old = await ownerWith(w, "old", "oldslug1", 10, "10.0.0.0/24");
+  const live = await ownerWith(w, "live", "newslug1", 50, "10.0.0.0/24");
+  await ok(live(), "/identity/notesubnet?scope=live", { subnet: "10.9.0.0/24", now: 60 });
+  const image = await call(old(), "/__cell/image");
+
+  const adopted = await call(live(), "/__cell/adopt", image.text);
+  assert.equal(adopted.status, 200, adopted.text);
+  assert.equal(adopted.body.adopted, true);
+
+  const listed = (await ok(live(), "/identity/list?scope=live")).map((e) => e.slug).sort();
+  assert.deepStrictEqual(listed, ["newslug1", "oldslug1"]);
+  assert.equal((await ok(live(), "/identity/bytes?scope=live")).bytes, 10);
+  assert.deepStrictEqual((await ok(live(), "/identity/firstSeen?scope=live")), { firstSeen: 10 });
+  const data = live().state.storage.data;
+  assert.deepStrictEqual(data.get("subnets"), { "10.0.0.0/24": 10, "10.9.0.0/24": 60 });
+  assert.ok(data.has("artifact-account:oldslug1:gen-oldslug1"));
+  assert.ok(data.has("artifact-account:newslug1:gen-newslug1"));
+});
+
+test("adopt refuses an index entry the cell holds differently and writes nothing", async () => {
+  const w = world();
+  const old = await ownerWith(w, "old", "sameslug", 10, "10.0.0.0/24");
+  const live = await ownerWith(w, "live", "sameslug", 50, "10.1.0.0/24");
+  const before = structuredClone([...live().state.storage.data]);
+
+  const adopted = await call(live(), "/__cell/adopt", (await call(old(), "/__cell/image")).text);
+  assert.equal(adopted.status, 409, adopted.text);
+  assert.equal(adopted.body.reason, "conflict");
+  assert.deepStrictEqual([...live().state.storage.data], before);
+});
+
+test("adopt keeps the earlier alarm and takes no parts", async () => {
+  const w = world();
+  const old = await ownerWith(w, "old", "oldslug1", 10, "10.0.0.0/24");
+  const live = await ownerWith(w, "live", "newslug1", 50, "10.1.0.0/24");
+  const image = (await call(old(), "/__cell/image")).body;
+  const later = Date.now() + 3_600_000;
+  await live().state.storage.setAlarm(later + 1000);
+
+  assert.equal((await call(live(), "/__cell/adopt", { ...image, alarm: later })).status, 200);
+  assert.equal(live().state.storage.alarm, later);
+
+  const part = { ...image, part: { id: "p", index: 0, count: 1 } };
+  assert.equal((await call(live(), "/__cell/adopt", part)).status, 400);
+  assert.equal((await call(live(), "/__cell/adopt", undefined, "GET")).status, 405);
+});
+
+test("only an identity cell answers adopt", async () => {
+  for (const Cls of [Paste, Room, Subnet]) {
+    const res = await call(new Cls(cellState(new FakeStorage(), "x"), {}), "/__cell/adopt", "{}");
+    assert.equal(res.status, 404, Cls.name);
+  }
+});
