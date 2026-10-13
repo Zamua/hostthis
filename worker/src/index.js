@@ -3260,6 +3260,21 @@ async function deleteBlobPrefix(bucket, prefix) {
   }
 }
 
+// One closed byte range, the only form the Go adapter sends. Anything else is
+// null.
+function blobRange(header) {
+  const match = /^bytes=(\d+)-(\d+)$/.exec(header ?? "");
+  if (!match) {
+    return null;
+  }
+  const offset = Number(match[1]);
+  const end = Number(match[2]);
+  if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(end) || end < offset) {
+    return null;
+  }
+  return { offset, length: end - offset + 1 };
+}
+
 async function handleBlob(request, env, url) {
   if (url.pathname === "/blob" && request.method === "DELETE") {
     const prefix = url.searchParams.get("prefix");
@@ -3282,9 +3297,29 @@ async function handleBlob(request, env, url) {
     return new Response(null, { status: 204 });
   }
   if (request.method === "GET") {
-    const object = await env.PAYLOADS.get(key);
+    const range = request.headers.has("Range") ? blobRange(request.headers.get("Range")) : undefined;
+    if (range === null) {
+      return new Response("invalid range\n", { status: 400 });
+    }
+    const object = await env.PAYLOADS.get(key, range ? { range } : undefined);
     if (object === null) {
       return new Response("not found\n", { status: 404 });
+    }
+    if (range) {
+      // A pack member: exactly the recorded slice, which must lie inside the
+      // object.
+      if (range.offset + range.length > object.size) {
+        await object.body?.cancel();
+        return new Response("range outside object\n", { status: 416 });
+      }
+      return new Response(object.body, {
+        status: 206,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(range.length),
+          "X-Blob-Size": String(range.length),
+        },
+      });
     }
     // The runtime streams a body chunked and drops Content-Length, so the
     // size travels in its own header.

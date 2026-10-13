@@ -381,6 +381,36 @@ test("the blob cache keeps decoded payloads under the size cap, by object key", 
   });
 });
 
+test("members of one pack are cached apart and each serves its own slice", async () => {
+  const cache = new FakeCache();
+  const w = world({ HOSTTHIS_BLOB_CACHE_MAX_BYTES: "100" });
+  const a = stored("alpha");
+  const b = stored("bravo!");
+  const pack = new Uint8Array(a.length + b.length);
+  pack.set(a);
+  pack.set(b, a.length);
+  w.row(SLUG, {
+    kind: "site", status: "ready", updatedAt: 1, uploadId: "us",
+    manifest: { Files: {
+      "index.html": { Key: "k-pack", Offset: 0, Length: a.length, Size: 5, DecodedSize: 5 },
+      "b.txt": { Key: "k-pack", Offset: a.length, Length: b.length, Size: 6, DecodedSize: 6 },
+    } },
+  });
+  w.object("k-pack", pack);
+  await withCaches(cache, async () => {
+    for (let i = 0; i < 2; i++) {
+      const first = await w.fetch(at("/"));
+      assert.equal(await first.text(), "alpha");
+      assert.equal(first.headers.get("ETag"), "\"k-pack@0\"");
+      const second = await w.fetch(at("/b.txt"));
+      assert.equal(await second.text(), "bravo!");
+      assert.equal(second.headers.get("ETag"), `"k-pack@${a.length}"`);
+      await settle(w);
+    }
+    assert.equal(cache.entries.size, 2);
+  });
+});
+
 test("a payload that fails to decode is not kept", async () => {
   const cache = new FakeCache();
   const w = world({ HOSTTHIS_BLOB_CACHE_MAX_BYTES: "1000000", ...TTL });

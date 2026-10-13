@@ -1,6 +1,7 @@
 // The read path: one slug's answer from its Paste cell, mapped to the response
 // hostthisd gives for the same case (docs/SPEC.md "The public surface").
 import { reportingErrors } from "./blobs.js";
+import { entryValidator } from "../read.js";
 import { notModified } from "./conditional.js";
 import { goStringList } from "./gojson.js";
 import { formatHTTPDate } from "./httpdate.js";
@@ -84,7 +85,7 @@ export function readPath(openBlob) {
     const unchanged = (headers) => notModified(request.headers, headers.ETag, updatedAt);
 
     const stored = async (contentType, what) => {
-      const headers = content(`"${entry.key}"`);
+      const headers = content(`"${entryValidator(entry)}"`);
       if (unchanged(headers)) {
         return new Response(null, { status: 304, headers });
       }

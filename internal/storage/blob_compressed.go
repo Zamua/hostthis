@@ -63,6 +63,8 @@ type CompressedBlobStore struct {
 type InnerBlobStore interface {
 	Put(key string, r io.Reader, size int64) error
 	GetReader(key string) (io.ReadCloser, int64, error)
+	// GetRange streams length bytes of key starting at offset.
+	GetRange(key string, offset, length int64) (io.ReadCloser, error)
 	DeletePrefix(prefix string) error
 }
 
@@ -109,7 +111,8 @@ func (c *CompressedBlobStore) StageEncoding(ctx context.Context, key string, r i
 	return int(total) - len(zstdenc.Magic), nil
 }
 
-// Read streams the UNCOMPRESSED bytes at an entry's key. The caller MUST Close
+// Read streams the UNCOMPRESSED bytes an entry names, whole object or pack
+// slice. The caller MUST Close
 // it: Close releases both the zstd decoder and the inner reader. The int64 is
 // the inner COMPRESSED length, so it must not be used as a Content-Length. An
 // entry without a key never reaches the store (docs/SPEC.md "Entries without
@@ -118,15 +121,90 @@ func (c *CompressedBlobStore) Read(_ context.Context, entry domain.ManifestEntry
 	if entry.Key == "" {
 		return nil, 0, domain.ErrNotFound
 	}
-	inner, size, err := c.Inner.GetReader(entry.Key)
+	ref := entry.Ref()
+	var inner io.ReadCloser
+	var size int64
+	var err error
+	if ref.Length > 0 {
+		inner, err = c.Inner.GetRange(ref.Key, ref.Offset, ref.Length)
+		size = ref.Length
+	} else {
+		inner, size, err = c.Inner.GetReader(ref.Key)
+	}
 	if err != nil {
 		return nil, 0, err
 	}
-	dec, err := decodeCompressedStream(inner, entry.Key)
+	dec, err := decodeCompressedStream(inner, entry.Validator())
 	if err != nil {
 		return nil, 0, err
 	}
 	return dec, size, nil
+}
+
+// OpenPack starts a pack spilled to disk, so the store receives one known
+// length without the pack being held in memory.
+func (c *CompressedBlobStore) OpenPack(key string) (domain.BlobPack, error) {
+	spill, err := os.CreateTemp("", "hostthis-pack-*")
+	if err != nil {
+		return nil, fmt.Errorf("create pack spill: %w", err)
+	}
+	return &blobPack{inner: c.Inner, key: key, spill: spill}, nil
+}
+
+// blobPack is a pack being built. Each member is a complete at-rest blob, so a
+// slice decodes exactly like a whole object.
+type blobPack struct {
+	inner InnerBlobStore
+	key   string
+	spill *os.File
+	n     int64
+}
+
+// Append encodes r as the next member and returns its stored span.
+func (p *blobPack) Append(r io.Reader) (int64, int64, error) {
+	off := p.n
+	cw := &countingWriter{w: p.spill}
+	enc, err := zstdenc.NewWriter(cw)
+	if err != nil {
+		return 0, 0, fmt.Errorf("pack member write magic: %w", err)
+	}
+	if _, err := io.Copy(enc, r); err != nil {
+		_ = enc.Close()
+		return 0, 0, fmt.Errorf("pack member encode: %w", err)
+	}
+	if err := enc.Close(); err != nil {
+		return 0, 0, fmt.Errorf("pack member close encoder: %w", err)
+	}
+	p.n += cw.n
+	return off, cw.n, nil
+}
+
+// Len is the stored length so far.
+func (p *blobPack) Len() int64 { return p.n }
+
+// Commit writes the pack as one object.
+func (p *blobPack) Commit(context.Context) error {
+	if _, err := p.spill.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind pack spill: %w", err)
+	}
+	return p.inner.Put(p.key, p.spill, p.n)
+}
+
+// Close removes the spill.
+func (p *blobPack) Close() error {
+	_ = p.spill.Close()
+	return os.Remove(p.spill.Name())
+}
+
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(b []byte) (int, error) {
+	n, err := c.w.Write(b)
+	c.n += int64(n)
+	return n, err
 }
 
 // DeleteUpload deletes every object under the upload's prefix.

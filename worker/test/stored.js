@@ -83,10 +83,12 @@ export function bucket(objects = new Map(), calls = []) {
     objects,
     calls,
     bodies,
-    async get(key) {
+    async get(key, options) {
       calls.push(`get ${key}`);
-      const bytes = objects.get(key);
-      if (bytes === undefined) return null;
+      const whole = objects.get(key);
+      if (whole === undefined) return null;
+      const range = options?.range;
+      const bytes = range ? whole.slice(range.offset, range.offset + range.length) : whole;
       const stats = { key, sent: 0, cancelled: false };
       bodies.push(stats);
       // 4 KiB chunks, read on demand, as a real bucket sends them.
@@ -103,7 +105,7 @@ export function bucket(objects = new Map(), calls = []) {
           stats.cancelled = true;
         },
       });
-      return { body, size: bytes.length };
+      return { body, size: whole.length };
     },
     async put(key) {
       calls.push(`put ${key}`);

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { listAssets, REPO } from "../build/shells.mjs";
+import { entryValidator } from "../src/read.js";
 import { goStringList } from "../src/public/gojson.js";
 import { cleanRedirect } from "../src/public/path.js";
 import { rawContentType, renderShell } from "../src/public/shells.js";
@@ -129,7 +130,7 @@ function expectFor(v, row) {
         body: entryBytes(want.entry),
         blob: want.entry.key,
         length: want.entry.decodedSize > 0 ? String(want.entry.decodedSize) : null,
-        headers: { ...validators(`"${want.entry.key}"`), "content-type": types[want.action] },
+        headers: { ...validators(`"${entryValidator(want.entry)}"`), "content-type": types[want.action] },
       };
     }
     case "shell":
@@ -163,7 +164,14 @@ for (const v of vectors.vectors) {
     if (row) {
       w.row(SLUG, row);
     }
-    if (v.want.entry?.key) {
+    if (v.want.entry?.length > 0) {
+      // A pack member: its stored bytes at its offset among other members'.
+      const member = stored(entryBytes(v.want.entry));
+      assert.equal(member.length, v.want.entry.length, "the vector's length is its member's");
+      const pack = new Uint8Array(v.want.entry.offset + member.length + 17).fill(0xee);
+      pack.set(member, v.want.entry.offset);
+      w.object(v.want.entry.key, pack);
+    } else if (v.want.entry?.key) {
       w.blob(v.want.entry.key, entryBytes(v.want.entry));
     }
     const want = expectFor(v, row);

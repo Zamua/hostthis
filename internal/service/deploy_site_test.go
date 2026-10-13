@@ -90,7 +90,7 @@ func TestDeploySite_HappyPath(t *testing.T) {
 	if want := domain.UploadPrefix(got.UploadID); got.UploadID == "" || !strings.HasPrefix(e.Key, want) {
 		t.Fatalf("entry key %q is not under the deploy's prefix %q", e.Key, want)
 	}
-	body, err := readObject(t, blobs, e.Key)
+	body, err := readEntry(t, blobs, e)
 	if err != nil {
 		t.Fatalf("get blob: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestDeploySite_UploadsShareNothing(t *testing.T) {
 	if err := d.Blob.DeleteUpload(context.Background(), r1.Site.UploadID); err != nil {
 		t.Fatalf("delete deploy 1 bytes: %v", err)
 	}
-	if body, err := readObject(t, blobs, r2.Site.Manifest.Files["index.html"].Key); err != nil || string(body) != shared {
+	if body, err := readEntry(t, blobs, r2.Site.Manifest.Files["index.html"]); err != nil || string(body) != shared {
 		t.Fatalf("deploy 2 after deleting deploy 1 = (%q, %v), want %q", body, err, shared)
 	}
 }
@@ -562,7 +562,7 @@ func TestDeployToSlug_RefusedRedeployDeletesItsUpload(t *testing.T) {
 	if after := objectsUnder(t, root); after != before {
 		t.Fatalf("objects after refused redeploy = %d, want the %d v1 holds", after, before)
 	}
-	if body, err := readObject(t, blobs, r1.Site.Manifest.Files["index.html"].Key); err != nil || string(body) != "<h1>v1</h1>" {
+	if body, err := readEntry(t, blobs, r1.Site.Manifest.Files["index.html"]); err != nil || string(body) != "<h1>v1</h1>" {
 		t.Fatalf("v1 after refused redeploy = (%q, %v)", body, err)
 	}
 }
@@ -604,6 +604,32 @@ func (b *countingBlobUnit) StageEncoding(_ context.Context, _ string, r io.Reade
 	n, err := io.Copy(io.Discard, r)
 	return int(n), err
 }
+
+func (b *countingBlobUnit) OpenPack(string) (domain.BlobPack, error) {
+	return &countingPack{unit: b}, nil
+}
+
+// countingPack counts a committed pack as one stage.
+type countingPack struct {
+	unit *countingBlobUnit
+	n    int64
+}
+
+func (p *countingPack) Append(r io.Reader) (int64, int64, error) {
+	n, err := io.Copy(io.Discard, r)
+	off := p.n
+	p.n += n + 1
+	return off, n + 1, err
+}
+
+func (p *countingPack) Len() int64 { return p.n }
+
+func (p *countingPack) Commit(context.Context) error {
+	p.unit.stages++
+	return nil
+}
+
+func (p *countingPack) Close() error { return nil }
 
 func (b *countingBlobUnit) DeleteUpload(_ context.Context, uploadID string) error {
 	b.deletes = append(b.deletes, uploadID)

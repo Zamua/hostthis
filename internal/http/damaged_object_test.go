@@ -36,6 +36,14 @@ func (o rawObjects) GetReader(key string) (io.ReadCloser, int64, error) {
 
 func (o rawObjects) DeletePrefix(string) error { return nil }
 
+func (o rawObjects) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	b, ok := o[key]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(b[offset : offset+length])), nil
+}
+
 // encoded returns body in the at-rest format.
 func encoded(t *testing.T, body []byte) []byte {
 	t.Helper()

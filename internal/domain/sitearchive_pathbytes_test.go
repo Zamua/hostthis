@@ -12,12 +12,12 @@ import (
 // and reports a per-path sha.
 type stubSink struct{}
 
-func (stubSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
+func (stubSink) Store(p string, r io.Reader, _ int64) (BlobRef, int, error) {
 	n, err := io.Copy(io.Discard, r)
 	if err != nil {
-		return "", 0, err
+		return BlobRef{}, 0, err
 	}
-	return "sha-" + p, int(n), nil
+	return BlobRef{Key: "sha-" + p}, int(n), nil
 }
 
 func addFile(t *testing.T, e *SiteExtractor, name, body string) error {

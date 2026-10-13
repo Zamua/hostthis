@@ -62,6 +62,10 @@ func (g *GatedBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 	return g.Inner.GetReader(key)
 }
 
+func (g *GatedBlobStore) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	return g.Inner.GetRange(key, offset, length)
+}
+
 func (g *GatedBlobStore) DeletePrefix(prefix string) error {
 	return g.Inner.DeletePrefix(prefix)
 }

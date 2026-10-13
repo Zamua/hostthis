@@ -2697,6 +2697,8 @@ three operations:
 
 - `Put(key)` streams one object in.
 - `GetReader(key)` streams it back out.
+- `GetRange(key, offset, length)` streams one slice of an object, for a file
+  stored inside a pack.
 - `DeletePrefix(prefix)` deletes every object under a prefix. An absent prefix
   deletes nothing and succeeds.
 
@@ -2711,8 +2713,8 @@ uploads/<upload-id>/<n>
 
 - `upload-id` is a random id minted when an upload starts, before any bytes
   are written.
-- `n` is the file's position in the upload: a document is `0`, a site's files
-  are `0..N-1`.
+- `n` numbers the upload's objects from `0`: a document is `0`, and a site's
+  objects are its packs and its unpacked files, in the order they are written.
 - Each manifest entry stores its object key, so a reader never derives one. A
   version records its upload id, which is how a delete finds its bytes.
 - The key carries no slug or generation. A site deploy stages every file before
@@ -2720,8 +2722,36 @@ uploads/<upload-id>/<n>
 - Storage involves no hashing, and uploads share nothing: an identical
   re-upload writes new objects under new keys.
 
-A stored file's ETag is its object key (see "Edge caching"). An upload's
-objects never change, so the key is a stable validator.
+A stored file's ETag is its object key, plus its offset when it lives in a
+pack (see "Edge caching"). An upload's objects never change, so that is a
+stable validator.
+
+### Site packs: small files share an object
+
+A site deploy writes its small files into shared objects called packs, so the
+number of object writes follows a deploy's bytes rather than its file count.
+A site of hundreds of small files costs a handful of writes, not one per file.
+
+- **Which files pack:** a file whose declared size is at most 1 MiB joins the
+  open pack. A larger file is its own object, as before. The declared size is
+  only the routing hint: the quota guard still meters the bytes actually read.
+- **When a pack closes:** once its stored length reaches 8 MiB, the pack is
+  written as one object and the next small file opens a new one. The last open
+  pack is written when extraction finishes, before any metadata commits.
+- **Member format:** each member is a complete at-rest blob (the magic, then
+  its zstd frame), so a slice decodes exactly like a whole object.
+- **The manifest entry** records `Key`, `Offset` and `Length` (stored bytes).
+  An entry without a `Length` names the whole object, which is every entry
+  written before packs and every unpacked file. Old sites need no migration.
+- **Quota:** a packed entry's `CompressedSize` is its `Length`, the same
+  stored bytes an unpacked file would charge.
+- **Reads** fetch exactly the entry's slice with one ranged request, so a
+  packed file costs the same single read as an unpacked one.
+- **Staging spills to disk:** a pack is built in a temporary file and sent
+  with its length, so memory does not grow with it.
+- **Deletes are unchanged:** packs live under the upload's prefix, so deleting
+  a version still deletes one prefix. No object is shared across uploads, so
+  nothing needs reference counting or a sweeper.
 
 ### Deleting bytes
 
@@ -3697,7 +3727,7 @@ case:
 | no row, `notfound` | 404 |
 | `pending` | 200 loading page, `no-store`, `Retry-After: 1` |
 | `failed` | 410 error page, `no-store` |
-| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the object key, `Content-Length` the entry's decoded size when it has one |
+| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the entry's validator (its key, plus its offset when packed), `Content-Length` the entry's decoded size when it has one |
 | `shell`, `kbshell` | 200, the kind's shell with its CSP, ETag the shell version |
 | `files` | 200, the sorted path list as `json.Encoder` writes it, ETag `files-<upload id>` |
 | a kind with no shell | 500 `unsupported kind` |

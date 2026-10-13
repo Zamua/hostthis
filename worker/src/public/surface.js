@@ -10,7 +10,6 @@ import { normalizeHost } from "./host.js";
 import { withFixedLength } from "./length.js";
 import { readPath } from "./reads.js";
 
-const openStored = (env, entry) => openPayload(env, entry.key);
 
 function positive(value) {
   const n = Number(value);
@@ -27,7 +26,7 @@ export function publicReads(
   const cache = cacheStorage?.default;
   const ttl = positive(env.HOSTTHIS_EDGE_CACHE_TTL_S);
   const blobMax = positive(env.HOSTTHIS_BLOB_CACHE_MAX_BYTES);
-  let open = openStored;
+  let open = openPayload;
   if (cache && blobMax) {
     const origin = `https://${normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? "")}/_blobs`;
     open = withBlobCache(open, { cache, maxBytes: blobMax, origin });

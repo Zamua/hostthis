@@ -2,6 +2,7 @@
 // surface"): whole responses keyed by what the read path answers from, and
 // decoded payloads keyed by object key. Each takes the runtime's Cache API as
 // a port.
+import { entryValidator } from "../read.js";
 import { statedLength } from "./length.js";
 import { CONTENT_CACHE_CONTROL } from "./reads.js";
 
@@ -214,8 +215,9 @@ export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_M
   };
 }
 
-// Decoded payloads whose recorded decoded size is at most maxBytes, by object
-// key. A key never names different bytes, so an entry needs no invalidation.
+// Decoded payloads whose recorded decoded size is at most maxBytes, by entry
+// validator. A validator never names different bytes, so an entry needs no
+// invalidation.
 // origin is a URL prefix no read path is keyed under.
 export function withBlobCache(open, { cache, maxBytes, origin }) {
   return async function cachedOpen(env, entry, ctx) {
@@ -223,7 +225,7 @@ export function withBlobCache(open, { cache, maxBytes, origin }) {
     if (!(Number.isSafeInteger(size) && size > 0 && size <= maxBytes)) {
       return open(env, entry, ctx);
     }
-    const key = `${origin}/${encodeURIComponent(entry.key)}`;
+    const key = `${origin}/${encodeURIComponent(entryValidator(entry))}`;
     const hit = await cache.match(key).catch(() => undefined);
     if (hit?.status === 200) {
       return hit.body ?? new ReadableStream({ start: (c) => c.close() });
