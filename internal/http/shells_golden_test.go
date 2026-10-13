@@ -18,7 +18,7 @@ import (
 
 var updateShellGolden = flag.Bool("update-shell-golden", false, "rewrite "+shellGoldenPath)
 
-// Shared with celld's tests, which hold the Worker's shells and assets to the
+// Shared with the Worker's tests, which hold the Worker's shells and assets to the
 // same bytes and headers.
 const shellGoldenPath = "../../testdata/shells-golden.json"
 

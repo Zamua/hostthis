@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 // scriptedAppendRepo is a real repo whose append answers with a scripted error.
 type scriptedAppendRepo struct {
-	*celld.PasteRepo
+	*worker.PasteRepo
 	appendErr error
 }
 
@@ -38,7 +38,7 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 		{"over quota", domain.ErrOverUserQuota, ErrOverQuota, false},
 		{"not found", domain.ErrNotFound, domain.ErrNotFound, false},
 		{"another change settling", domain.ErrBusy, domain.ErrBusy, false},
-		{"outcome unknown", errors.New("celld: /paste/append: connection reset"), nil, true},
+		{"outcome unknown", errors.New("worker: /paste/append: connection reset"), nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := newRepo(t)
@@ -85,9 +85,9 @@ func (c appendAnswerCell) RoundTrip(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// Over the celld adapter only an explicit absent answer deletes the staged
+// Over the worker adapter only an explicit absent answer deletes the staged
 // object; an answer the adapter cannot identify keeps it.
-func TestUpdate_CelldAppendAnswerDecidesTheObjects(t *testing.T) {
+func TestUpdate_WorkerAppendAnswerDecidesTheObjects(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		status   int
@@ -102,7 +102,7 @@ func TestUpdate_CelldAppendAnswerDecidesTheObjects(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			blobs, root := realBlobsAt(t)
-			repo := celld.NewPasteRepo("https://cell", &http.Client{Transport: appendAnswerCell{tc.status, tc.body}})
+			repo := worker.NewPasteRepo("https://cell", &http.Client{Transport: appendAnswerCell{tc.status, tc.body}})
 			m := NewManage(repo, blobs)
 			if _, err := m.Update("slugone1", "key:owner", strings.NewReader("<!doctype html><p>v2</p>"), ""); err == nil {
 				t.Fatal("update = nil, want the append's failure")

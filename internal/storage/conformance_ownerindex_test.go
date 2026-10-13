@@ -10,7 +10,7 @@ package storage_test
 // The property that matters across backends is not how the index is stored but
 // that it AGREES with the pastes: everything inserted appears, nothing failed
 // appears, and an entry whose paste has vanished can be repaired away. The
-// celld adapter keeps a denormalized summary in the identity cell.
+// worker adapter keeps a denormalized summary in the identity cell.
 
 import (
 	"context"
@@ -124,9 +124,9 @@ func conformOwnerListReflectsMutation(t *testing.T, r ownerIndexRepo) {
 // It does NOT pin release itself being idempotent. A resolver replaying after a
 // crash calls release directly, below the guard, and no port-level assertion
 // can see that. Verified the hard way: an arithmetic-release sabotage in the
-// celld adapter PASSED this test, because the guard stopped the second call
+// worker adapter PASSED this test, because the guard stopped the second call
 // before it reached the sabotaged code. The internal invariant is pinned in
-// internal/celld instead, where the release can be driven directly.
+// internal/worker instead, where the release can be driven directly.
 //
 // Creation reserves and confirms; deletion RELEASES, and release carries an
 // idempotency requirement reservation does not. A resolver gives at-least-once,

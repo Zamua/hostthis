@@ -22,9 +22,9 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
-	"github.com/Zamua/hostthis/internal/celld"
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/worker"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 // The apex both servers serve locally, in production's shape (subdomain URLs,
@@ -55,7 +55,7 @@ func localServers(t *testing.T) *world {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build hostthisd: %v\n%s", err, out)
 	}
-	rt := celldtest.StartPublic(t, celldtest.Public{
+	rt := workertest.StartPublic(t, workertest.Public{
 		Apex:           localApex,
 		Scheme:         "http",
 		ClientIPSource: "xff-rightmost",
@@ -118,7 +118,7 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-func startDaemon(t *testing.T, bin string, rt *celldtest.PublicRuntime) *daemon {
+func startDaemon(t *testing.T, bin string, rt *workertest.PublicRuntime) *daemon {
 	t.Helper()
 	addrs := freeAddrs(t, 3)
 	cmd := exec.Command(bin)
@@ -136,8 +136,8 @@ func startDaemon(t *testing.T, bin string, rt *celldtest.PublicRuntime) *daemon 
 		"HOSTTHIS_SSH_ADDR="+addrs[1],
 		"HOSTTHIS_METRICS_ADDR="+addrs[2],
 		"HOSTTHIS_DATA_DIR="+t.TempDir(),
-		"HOSTTHIS_CELLD_ENDPOINT="+rt.URL,
-		"HOSTTHIS_CELLD_TOKEN="+rt.Token,
+		"HOSTTHIS_WORKER_ENDPOINT="+rt.URL,
+		"HOSTTHIS_WORKER_TOKEN="+rt.Token,
 		// The client address comes from X-Forwarded-For on both servers, so
 		// requests can choose their room creation bucket.
 		"HOSTTHIS_HTTP_TRUST_XFF=true",
@@ -267,17 +267,17 @@ func (w *world) waitReady(t *testing.T, slug string) {
 type cellAPI struct {
 	base   string
 	client *http.Client
-	pastes *celld.PasteRepo
+	pastes *worker.PasteRepo
 }
 
 func newCellAPI(t *testing.T, base, token string) *cellAPI {
 	t.Helper()
-	rt, err := celld.Authorize(nil, base, token)
+	rt, err := worker.Authorize(nil, base, token)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := &http.Client{Timeout: 30 * time.Second, Transport: rt}
-	return &cellAPI{base: base, client: client, pastes: celld.NewPasteRepo(base, client)}
+	return &cellAPI{base: base, client: client, pastes: worker.NewPasteRepo(base, client)}
 }
 
 func (c *cellAPI) call(t *testing.T, method, path string, body io.Reader) []byte {

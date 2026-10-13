@@ -345,7 +345,7 @@ var (
 func isStaticAsset(target string) bool {
 	staticOnce.Do(func() {
 		staticNames = map[string]bool{}
-		entries, _ := os.ReadDir(filepath.Join(repoRoot(), "celld", "dist", "assets", "_hostthis"))
+		entries, _ := os.ReadDir(filepath.Join(repoRoot(), "worker", "dist", "assets", "_hostthis"))
 		for _, e := range entries {
 			staticNames[e.Name()] = true
 		}

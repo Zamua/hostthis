@@ -6,14 +6,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 type generationSwapSiteRepo struct {
-	*celld.PasteRepo
+	*worker.PasteRepo
 	old         domain.Paste
 	replacement domain.Paste
 }
@@ -39,7 +39,7 @@ func siteManifest(key string) domain.Manifest {
 // A redeploy authorized for one site incarnation cannot append to its replacement.
 func TestSitesReplaceFencesReplacementIncarnation(t *testing.T) {
 	at := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	inner := celld.NewPasteRepo(celldtest.Endpoint(t), nil)
+	inner := worker.NewPasteRepo(workertest.Endpoint(t), nil)
 	sites := storage.NewSites(inner)
 	initial := domain.Site{
 		Slug: "site2345", Identity: "key:owner", Kind: domain.KindSite,

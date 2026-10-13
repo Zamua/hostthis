@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
+	"github.com/Zamua/hostthis/internal/worker"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 // liveAppSiteReader treats EVERY parseable slug as a live site, standing in
@@ -45,9 +45,9 @@ func buildRoomServer(t *testing.T) *Server {
 }
 
 // newRoomRepo is the room surface over the test's cells on the local runtime.
-func newRoomRepo(t *testing.T) *celld.RoomRepo {
+func newRoomRepo(t *testing.T) *worker.RoomRepo {
 	t.Helper()
-	rooms := celld.NewRoomRepo(celldtest.Endpoint(t), nil)
+	rooms := worker.NewRoomRepo(workertest.Endpoint(t), nil)
 	rooms.PushSubject = "https://hostthis.test"
 	return rooms
 }

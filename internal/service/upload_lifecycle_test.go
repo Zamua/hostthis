@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 // fakeBlobs is a controllable raw object store for the lifecycle tests: it can
@@ -97,7 +97,7 @@ func fakeBlobUnit() BlobUnit { return storage.NewCompressedBlobStore(newFakeBlob
 // newStackWithBlobs wires the real metadata repo with a caller-supplied raw
 // blob store under the production encoding, plus a finalize-done signal so
 // tests can wait deterministically.
-func newStackWithBlobs(t *testing.T, blobs storage.InnerBlobStore) (*Upload, *celld.PasteRepo, chan struct{}) {
+func newStackWithBlobs(t *testing.T, blobs storage.InnerBlobStore) (*Upload, *worker.PasteRepo, chan struct{}) {
 	t.Helper()
 	repo := newRepo(t)
 	u := NewUpload(repo, storage.NewCompressedBlobStore(blobs))

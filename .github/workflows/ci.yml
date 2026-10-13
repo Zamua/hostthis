@@ -19,15 +19,15 @@ jobs:
           go-version: '1.27'
           cache: true
 
-      # Go tests run the celld Worker bundle under Miniflare (celld/localrt);
+      # Go tests run the Worker bundle under Miniflare (worker/localrt);
       # `make test` builds the bundle and installs both from these lockfiles.
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: |
-            celld/package-lock.json
-            celld/localrt/package-lock.json
+            worker/package-lock.json
+            worker/localrt/package-lock.json
 
       # Formatting: every file must be gofmt-clean.
       - name: gofmt
@@ -72,17 +72,17 @@ jobs:
             experimental-features = nix-command flakes
 
       - name: rebuild zd.wasm from source
-        run: celld/vendor/zstd/build.sh
+        run: worker/vendor/zstd/build.sh
 
       - name: the committed module is the rebuilt one
         run: |
-          if ! git diff --exit-code --stat -- celld/vendor/zstd/; then
-            echo "celld/vendor/zstd/zd.wasm does not match its source; run celld/vendor/zstd/build.sh and commit the result."
+          if ! git diff --exit-code --stat -- worker/vendor/zstd/; then
+            echo "worker/vendor/zstd/zd.wasm does not match its source; run worker/vendor/zstd/build.sh and commit the result."
             exit 1
           fi
 
-  # The celld suites run in the go job against the Worker under Miniflare, and
-  # again here against a real celld node backed by MinIO, the production shape.
+  # The Worker suites run in the go job against the Worker under Miniflare, and
+  # again here against a real celld node backed by MinIO, the self-hosted shape.
   # A separate operator gate qualifies object-store restore behavior.
   celld:
     runs-on: ubuntu-latest
@@ -132,7 +132,7 @@ jobs:
             'mc alias set local http://127.0.0.1:9000 admin supersecret >/dev/null && mc mb local/ci-fleet'
 
           export AWS_ACCESS_KEY_ID=admin AWS_SECRET_ACCESS_KEY=supersecret
-          celld deploy ./celld --bucket s3://ci-fleet --endpoint http://127.0.0.1:9000
+          celld deploy ./worker --bucket s3://ci-fleet --endpoint http://127.0.0.1:9000
           celld --bucket s3://ci-fleet --endpoint http://127.0.0.1:9000 \
             --listen 127.0.0.1:8087 >"$RUNNER_TEMP/celld-node.log" 2>&1 &
           celld_pid=$!
@@ -155,12 +155,12 @@ jobs:
             exit 1
           fi
 
-          CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
-            go test -count=1 ./internal/storage -run 'TestConformance_Celld|TestCelldBlobContract'
-          CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
+          WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
+            go test -count=1 ./internal/storage -run 'TestConformance_Worker|TestWorkerBlobContract'
+          WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/http -run 'TestLiveRoom'
-          CELLD_TEST_ENDPOINT=http://127.0.0.1:8087 \
-            go test -count=1 ./internal/celld -run 'TestReleaseReplay'
+          WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
+            go test -count=1 ./internal/worker -run 'TestReleaseReplay'
 
       # The node's own log is the only diagnostic when it dies mid-suite,
       # which presents as connection-refused test noise.

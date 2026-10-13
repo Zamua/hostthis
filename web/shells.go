@@ -2,7 +2,7 @@
 //
 // shells/ holds the client render shells, one directory each: the page
 // template (shell.html, never served) and the renderer assets, described by
-// shells/shells.json. The celld Worker build reads the same files, so both
+// shells/shells.json. The Worker build reads the same files, so both
 // servers render the same pages from the same versions.
 package web
 

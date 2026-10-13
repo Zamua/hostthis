@@ -1,0 +1,14 @@
+{
+  "name": "hostthis-worker-localrt",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node serve.mjs"
+  },
+  "devDependencies": {
+    "miniflare": "^4.20260730.0"
+  },
+  "overrides": {
+    "sharp": "0.35.5"
+  }
+}

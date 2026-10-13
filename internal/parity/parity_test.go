@@ -1,5 +1,5 @@
 // Package parity holds the response parity suite: every request goes to
-// hostthisd's HTTP surface and to the celld Worker's public surface, and the
+// hostthisd's HTTP surface and to the Worker's public surface, and the
 // two answers must agree (docs/SPEC.md "The public surface") on status, the
 // content headers and the body, but for the differences in allowances_test.go.
 //

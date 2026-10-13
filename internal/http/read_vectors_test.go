@@ -1,6 +1,6 @@
 package http
 
-// testdata/read-vectors.json pins the read rules. celld/src/read.js answers the
+// testdata/read-vectors.json pins the read rules. worker/src/read.js answers the
 // same vectors, so the Go read path and the Worker's cannot drift apart.
 
 import (
@@ -17,8 +17,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 type readVectorFile struct {
@@ -90,7 +90,7 @@ func loadReadVectors(t *testing.T) readVectorFile {
 	return f
 }
 
-// TestReadVectors runs each vector's row through the celld adapter's decode, as
+// TestReadVectors runs each vector's row through the worker adapter's decode, as
 // the cell would serve it, and its request through serveSlug, then reads the
 // answer back from the response.
 func TestReadVectors(t *testing.T) {
@@ -110,7 +110,7 @@ func TestReadVectors(t *testing.T) {
 				}
 			}
 			blobs := &servedEntryBlobs{}
-			srv := &Server{Pastes: celld.NewPasteRepo("https://cell", storedRowCell(stored)), Blobs: blobs}
+			srv := &Server{Pastes: worker.NewPasteRepo("https://cell", storedRowCell(stored)), Blobs: blobs}
 			var query []string
 			if v.Request.Raw {
 				query = append(query, "raw=1")

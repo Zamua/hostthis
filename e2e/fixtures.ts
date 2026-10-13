@@ -10,7 +10,7 @@ export type UploadOpts = { type?: string; name?: string };
 export type Paste = { slug: string; url: string };
 
 // E2E_READS picks what the browser reads from: hostthisd (the default), or
-// the celld Worker's public surface, whose host hostthisd's URLs then name.
+// the Worker's public surface, whose host hostthisd's URLs then name.
 const reads = process.env.E2E_READS || 'hostthisd';
 if (reads !== 'hostthisd' && reads !== 'worker') {
   throw new Error(`E2E_READS is ${JSON.stringify(reads)}, not hostthisd or worker`);
@@ -128,7 +128,7 @@ export class Server {
   }
 }
 
-// Runtime is the celld Worker under Miniflare (celld/localrt), one per worker,
+// Runtime is the Worker under Miniflare (worker/localrt), one per worker,
 // so each daemon owns its cells. It exits when its stdin closes. It requires a
 // bearer token, so every flow the suite drives also proves the daemon sends it.
 // In worker mode its public surface is on, in path mode, at localhost: a host
@@ -155,14 +155,14 @@ class Runtime {
       });
     }
     const proc = spawn('node', ['serve.mjs'], {
-      cwd: join(process.env.HOSTTHIS_E2E_ROOT!, 'celld', 'localrt'),
-      env: { ...env, HOSTTHIS_CELLD_TOKEN: token },
+      cwd: join(process.env.HOSTTHIS_E2E_ROOT!, 'worker', 'localrt'),
+      env: { ...env, HOSTTHIS_WORKER_TOKEN: token },
       stdio: ['pipe', 'pipe', 'inherit'],
     });
     let out = '';
     const url = await new Promise<string>((res, rej) => {
-      const timer = setTimeout(() => rej(new Error(`celld runtime not ready after ${timeoutMs}ms`)), timeoutMs);
-      proc.on('exit', (code) => rej(new Error(`celld runtime exited ${code} before serving`)));
+      const timer = setTimeout(() => rej(new Error(`worker runtime not ready after ${timeoutMs}ms`)), timeoutMs);
+      proc.on('exit', (code) => rej(new Error(`worker runtime exited ${code} before serving`)));
       proc.stdout!.on('data', (d) => {
         out += d;
         const m = out.match(/^LISTENING (\S+)$/m);
@@ -258,8 +258,8 @@ export const test = base.extend<TestFixtures, { server: Server }>({
           HOSTTHIS_SSH_ADDR: `127.0.0.1:${ports[1]}`,
           HOSTTHIS_METRICS_ADDR: `127.0.0.1:${ports[2]}`,
           HOSTTHIS_DATA_DIR: dataDir,
-          HOSTTHIS_CELLD_ENDPOINT: runtime.url,
-          HOSTTHIS_CELLD_TOKEN: runtime.token,
+          HOSTTHIS_WORKER_ENDPOINT: runtime.url,
+          HOSTTHIS_WORKER_TOKEN: runtime.token,
           HOSTTHIS_LANDING: join(process.env.HOSTTHIS_E2E_ROOT!, 'web', 'landing.html'),
         },
       });

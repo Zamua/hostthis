@@ -1,7 +1,7 @@
 package storage_test
 
-// The raw object store contract, run against celld on the local runtime or
-// the node CELLD_TEST_ENDPOINT names.
+// The raw object store contract, run against the Worker on the local runtime or
+// the node WORKER_TEST_ENDPOINT names.
 
 import (
 	"bytes"

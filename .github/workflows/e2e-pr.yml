@@ -3,7 +3,7 @@ name: e2e report (PR)
 # Publishes Playwright's HTML report for every pull request at one URL a
 # reviewer can open on a phone: results per browser, the screenshots the tests
 # attach, and traces for failures. Runs the `e2e-ci` make target twice: reading
-# from hostthisd, and with E2E_READS=worker from the celld Worker's public
+# from hostthisd, and with E2E_READS=worker from the Worker's public
 # surface, whose report is published under /worker/.
 on:
   pull_request:
@@ -40,8 +40,8 @@ jobs:
           cache: npm
           cache-dependency-path: |
             e2e/package-lock.json
-            celld/package-lock.json
-            celld/localrt/package-lock.json
+            worker/package-lock.json
+            worker/localrt/package-lock.json
 
       # A failing suite is the case a report matters most for, so the result is
       # recorded here and the job is failed at the very end instead.

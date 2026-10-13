@@ -12,9 +12,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 type countingBlobs struct{ reads int }
@@ -46,7 +46,7 @@ func TestServe_UndecodableManifestIsNotFound(t *testing.T) {
 				}))
 				defer cell.Close()
 				blobs := &countingBlobs{}
-				srv := &httpapi.Server{Pastes: celld.NewPasteRepo(cell.URL, cell.Client()), Blobs: blobs}
+				srv := &httpapi.Server{Pastes: worker.NewPasteRepo(cell.URL, cell.Client()), Blobs: blobs}
 				for _, target := range paths {
 					w := httptest.NewRecorder()
 					srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", target, nil))

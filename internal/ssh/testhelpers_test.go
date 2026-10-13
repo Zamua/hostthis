@@ -20,13 +20,13 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
-	"github.com/Zamua/hostthis/internal/celld"
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 // genEd25519 wraps crypto/ed25519.GenerateKey to a 2-tuple the test
@@ -54,7 +54,7 @@ type stack struct {
 	t          *testing.T
 	httpURL    string
 	sshAddr    string
-	repo       *celld.PasteRepo
+	repo       *worker.PasteRepo
 	upload     *service.Upload
 	keyGate    *service.KeyGate
 	keyed      *xssh.Client
@@ -66,7 +66,7 @@ type stackOpts struct {
 	keyGateCap int
 	sites      bool
 	proxyProto bool
-	manageRepo func(*celld.PasteRepo) service.PasteAdmin
+	manageRepo func(*worker.PasteRepo) service.PasteAdmin
 	rawBlobs   func(storage.InnerBlobStore) storage.InnerBlobStore
 	uploads    *hostssh.UploadAdmission
 	logOut     io.Writer
@@ -81,7 +81,7 @@ type stackOpt func(*stackOpts)
 
 // withManageRepo wraps the repo the manage service sees, so a test can script
 // one of its answers while everything else stays real.
-func withManageRepo(wrap func(*celld.PasteRepo) service.PasteAdmin) stackOpt {
+func withManageRepo(wrap func(*worker.PasteRepo) service.PasteAdmin) stackOpt {
 	return func(o *stackOpts) { o.manageRepo = wrap }
 }
 
@@ -117,8 +117,8 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	if o.proxyProto {
 		t.Setenv("HOSTTHIS_SSH_PROXY_PROTOCOL", "true")
 	}
-	endpoint := celldtest.Endpoint(t)
-	rawBlobs, err := storage.NewCelldBlobStore(endpoint, nil)
+	endpoint := workertest.Endpoint(t)
+	rawBlobs, err := storage.NewWorkerBlobStore(endpoint, nil)
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
@@ -129,7 +129,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		raw = o.rawBlobs(raw)
 	}
 	blobUnit := storage.NewCompressedBlobStore(raw)
-	repo := celld.NewPasteRepo(endpoint, nil)
+	repo := worker.NewPasteRepo(endpoint, nil)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	var admin service.PasteAdmin = repo
@@ -158,7 +158,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	}
 	var keyGate *service.KeyGate
 	if o.keyGateCap > 0 {
-		keyGate = service.NewKeyGate(celld.NewKeyGateRepo(endpoint, nil))
+		keyGate = service.NewKeyGate(worker.NewKeyGateRepo(endpoint, nil))
 		keyGate.MaxFreshKeysPerSubnet = o.keyGateCap
 		manage.KeyGate = keyGate
 		sshSrv.KeyGate = keyGate

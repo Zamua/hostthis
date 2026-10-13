@@ -22,12 +22,12 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/Zamua/hostthis/internal/celld"
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 const apexDomain = "paste.test"
@@ -150,13 +150,13 @@ func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 // those same repos with the real HTTP handler.
 func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	t.Helper()
-	endpoint := celldtest.Endpoint(t)
-	rawBlobs, err := storage.NewCelldBlobStore(endpoint, nil)
+	endpoint := workertest.Endpoint(t)
+	rawBlobs, err := storage.NewWorkerBlobStore(endpoint, nil)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobUnit := storage.NewCompressedBlobStore(rawBlobs)
-	pastes := celld.NewPasteRepo(endpoint, nil)
+	pastes := worker.NewPasteRepo(endpoint, nil)
 	sites := storage.NewSites(pastes)
 	deploy := service.NewDeploySite(sites, pastes, blobUnit)
 

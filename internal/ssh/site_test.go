@@ -7,10 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 const siteIndex = "<!doctype html><h1>home</h1>"
@@ -187,7 +187,7 @@ func TestSite_RedeployAndDeletePurge(t *testing.T) {
 
 // directoryBlindRepo hides directory artifacts from the manage service, so a
 // site delete takes the site-delete fallback.
-type directoryBlindRepo struct{ *celld.PasteRepo }
+type directoryBlindRepo struct{ *worker.PasteRepo }
 
 func (r directoryBlindRepo) Get(s domain.Slug) (domain.Paste, error) {
 	p, err := r.PasteRepo.Get(s)
@@ -202,7 +202,7 @@ func (r directoryBlindRepo) Get(s domain.Slug) (domain.Paste, error) {
 func TestSite_FallbackDeletePurges(t *testing.T) {
 	purger := &slugPurger{}
 	s := startStack(t, withSites(), withPurger(purger),
-		withManageRepo(func(r *celld.PasteRepo) service.PasteAdmin { return directoryBlindRepo{r} }))
+		withManageRepo(func(r *worker.PasteRepo) service.PasteAdmin { return directoryBlindRepo{r} }))
 	stdout, stderr, exit := s.run("", makeSiteArchive(t, map[string]string{"index.html": siteIndex}))
 	if exit != 0 {
 		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)

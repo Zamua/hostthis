@@ -23,7 +23,7 @@ go.work
 go.work.sum
 
 # celld dev state and work files
-/celld/.celld/
+/worker/.celld/
 
 # built binary
 /hostthisd

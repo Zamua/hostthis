@@ -12,17 +12,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
-// cellRowRepo answers the row reads and delete from the celld adapter, so the
+// cellRowRepo answers the row reads and delete from the worker adapter, so the
 // verbs meet that adapter's decoding of a stored row.
 type cellRowRepo struct {
-	*celld.PasteRepo
-	cell *celld.PasteRepo
+	*worker.PasteRepo
+	cell *worker.PasteRepo
 }
 
 func (r cellRowRepo) Get(s domain.Slug) (domain.Paste, error) { return r.cell.Get(s) }
@@ -55,9 +55,9 @@ func TestUndecodableManifest_GetNotFoundVersionsAndDeleteWork(t *testing.T) {
 		}
 	}))
 	t.Cleanup(cell.Close)
-	repo := celld.NewPasteRepo(cell.URL, cell.Client())
+	repo := worker.NewPasteRepo(cell.URL, cell.Client())
 
-	s := startStack(t, withManageRepo(func(m *celld.PasteRepo) service.PasteAdmin {
+	s := startStack(t, withManageRepo(func(m *worker.PasteRepo) service.PasteAdmin {
 		return cellRowRepo{PasteRepo: m, cell: repo}
 	}))
 	owner.Store(domain.IdentityFromKeyFingerprint(s.keyedOwner).String())

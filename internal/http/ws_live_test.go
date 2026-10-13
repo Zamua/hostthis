@@ -1,12 +1,12 @@
 package http
 
-// The realtime room contract against the celld Worker: handler -> proxy ->
+// The realtime room contract against the Worker: handler -> proxy ->
 // room cell, the production path end to end. These resurrect the guarantees
 // the hub-relay suite pinned before its deletion - broadcast fan-out, the
 // late-join splice, isolation, the admission cap - now stated against the
 // stack that actually ships.
 //
-// Runs against the local runtime, or the node CELLD_TEST_ENDPOINT names. Slugs
+// Runs against the local runtime, or the node WORKER_TEST_ENDPOINT names. Slugs
 // and rooms are namespaced per run: a node is durable and a rerun must not
 // inherit state.
 
@@ -26,27 +26,27 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/Zamua/hostthis/internal/celldtest"
+	"github.com/Zamua/hostthis/internal/workertest"
 
 	"github.com/coder/websocket"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
-func liveCelldServer(t *testing.T) (*httptest.Server, string) {
+func liveWorkerServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
-	base := celldtest.Target(t)
-	repo := celld.NewPasteRepo(base, nil)
+	base := workertest.Target(t)
+	repo := worker.NewPasteRepo(base, nil)
 	srv := &Server{
 		// Empty apex: path mode plus no origin verification, which is what a
 		// loopback harness needs and exactly how `make run` dev serves.
 		ApexDomain: "",
 		Pastes:     repo,
 		Sites:      liveAppSiteReader{},
-		Rooms:      service.NewRooms(celld.NewRoomRepo(base, nil)),
-		Relay:      celld.NewRoomProxy(base, nil),
+		Rooms:      service.NewRooms(worker.NewRoomRepo(base, nil)),
+		Relay:      worker.NewRoomProxy(base, nil),
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
@@ -126,7 +126,7 @@ func livePut(t *testing.T, ts *httptest.Server, slug, id, key, val string) {
 // no gaps: the fan-out that used to need a peer mesh, now a property of the
 // cell owning the room.
 func TestLiveRoom_BroadcastReachesEveryClientInOrder(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	id := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -163,7 +163,7 @@ func TestLiveRoom_BroadcastReachesEveryClientInOrder(t *testing.T) {
 
 // Ephemeral frames reach peers byte-identically without echoing to their sender.
 func TestLiveRoom_EphemeralFrameReachesPeersOnly(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	id := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -197,7 +197,7 @@ func TestLiveRoom_EphemeralFrameReachesPeersOnly(t *testing.T) {
 // A late joiner's snapshot carries a seq, and the live frames that follow
 // start strictly after it: the splice contract, with no gap and no duplicate.
 func TestLiveRoom_LateJoinSpliceNoGapNoDup(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	id := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -223,7 +223,7 @@ func TestLiveRoom_LateJoinSpliceNoGapNoDup(t *testing.T) {
 // interleave: isolation is structural (the cell IS the room), and this pins
 // that no layer above un-structures it.
 func TestLiveRoom_IsolationAcrossRooms(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	a := liveCreateRoom(t, ts, slug)
 	b := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -244,7 +244,7 @@ func TestLiveRoom_IsolationAcrossRooms(t *testing.T) {
 
 // A durable DELETE mirrors as a delete frame with the next seq.
 func TestLiveRoom_DeleteFrameArrives(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	id := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -335,7 +335,7 @@ func liveReadRaw(t *testing.T, ctx context.Context, c *websocket.Conn) []byte {
 // re-serialization of it (which turns 1e400 into null and -0 into 0, and
 // reorders an object's integer-like names).
 func TestLiveRoom_FramesCarryTheBytesTheGETServes(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	id := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -401,7 +401,7 @@ func TestLiveRoom_FramesCarryTheBytesTheGETServes(t *testing.T) {
 // UTF-8 from the whole-room GET, the snapshot and the put frame, so no client
 // decoder is left to replace the bytes its own way.
 func TestLiveRoom_ScanAndFramesCarryOneWireValue(t *testing.T) {
-	ts, slug := liveCelldServer(t)
+	ts, slug := liveWorkerServer(t)
 	id := liveCreateRoom(t, ts, slug)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

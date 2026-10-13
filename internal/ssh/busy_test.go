@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 // busyAppendRepo refuses every append because another change is settling.
-type busyAppendRepo struct{ *celld.PasteRepo }
+type busyAppendRepo struct{ *worker.PasteRepo }
 
 func (busyAppendRepo) AppendVersionWithQuotaCheck(context.Context, domain.Slug, string, domain.ContentKind,
 	string, domain.Manifest, int, int64, time.Time,
@@ -26,7 +26,7 @@ func (busyAppendRepo) AppendVersionWithQuotaCheck(context.Context, domain.Slug, 
 
 // A busy paste tells the user to retry, without the storage sentinel's prefix.
 func TestUpdate_BusyPasteSaysRetry(t *testing.T) {
-	s := startStack(t, withManageRepo(func(r *celld.PasteRepo) service.PasteAdmin { return busyAppendRepo{r} }))
+	s := startStack(t, withManageRepo(func(r *worker.PasteRepo) service.PasteAdmin { return busyAppendRepo{r} }))
 	stdout, _, _ := s.run("", []byte("<!doctype html><p>v1</p>"))
 	slug := extractSlug(stdout)
 

@@ -1,6 +1,6 @@
 {
   "about": [
-    "Read rules shared by the Go read path (internal/http) and the Worker's celld/src/read.js.",
+    "Read rules shared by the Go read path (internal/http) and the Worker's worker/src/read.js.",
     "Each vector runs request (path already percent-decoded; raw and files flags) against rows[row] as the Paste cell holds it; null is no row.",
     "extensions is the known-extension table's asset flag: a miss on an asset extension is a 404, any other a route.",
     "entry.decodedSize is the stored entry's DecodedSize, 0 for an entry without one; only a positive one is a response's Content-Length, whatever the entry's Size."
