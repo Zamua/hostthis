@@ -35,17 +35,24 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 		KnownAlready bool `json:"knownAlready"`
 		Admitted     bool `json:"admitted"`
 	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/subnet/admit", "subnet", subnet,
-		map[string]any{
-			"identity": identity, "now": now.UTC().UnixMilli(),
-			"window": window.Milliseconds(), "limit": limitPerSubnet,
-		}, &res); err != nil {
+	body := map[string]any{
+		"identity": identity, "now": now.UTC().UnixMilli(),
+		"window": window.Milliseconds(), "limit": limitPerSubnet,
+	}
+	status, err := r.call(context.Background(), http.MethodPost, "/subnet/admit", "subnet", subnet, body, &res)
+	// A status of 0 is a transport failure, which may have landed: the replay
+	// then reads the key as known, so the note below must not depend on it.
+	retried := status == 0 && err != nil
+	if retried {
+		_, err = r.call(context.Background(), http.MethodPost, "/subnet/admit", "subnet", subnet, body, &res)
+	}
+	if err != nil {
 		return false, err
 	}
 	if !res.Admitted {
 		return false, domain.ErrTooManyNewKeys
 	}
-	if !res.KnownAlready {
+	if !res.KnownAlready || retried {
 		if _, err := r.call(context.Background(), http.MethodPost, "/identity/notesubnet",
 			"scope", identity, map[string]any{"subnet": subnet, "now": now.UTC().UnixMilli()}, nil); err != nil {
 			return false, err
