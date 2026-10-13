@@ -1867,8 +1867,8 @@ deleted is charged for two while still displaying `v3`.
 Lists BOTH text pastes AND deployed **directories** (a directory shows its
 own kind - `site` or `knowledgebase` - and its stored byte total; one
 carrying no version timeline shows `-` in `VERS`). This matters because a site counts against the
-same 100 MiB per-identity quota as pastes: if `list` omitted sites, an owner
-could hit `would exceed your 100 MiB total quota` with no visible way to see
+same 1 GiB per-identity quota as pastes: if `list` omitted sites, an owner
+could hit `would exceed your 1 GiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
 `delete`. Sorted most recently updated first. `NAME` column shows the user-supplied
@@ -2285,7 +2285,7 @@ STATIC SITES
 
 LIMITS
 
-    100 MiB per identity, counting post-compression bytes across all
+    1 GiB per identity, counting post-compression bytes across all
     your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
@@ -2482,23 +2482,23 @@ room byte ceiling, and is bounded only by its own caps.
 ## Limits
 
 A per-identity quota and an SSH-handshake gate, each enforced atomically
-at the app layer. Storage is bounded per identity (100 MiB) and, for rooms,
+at the app layer. Storage is bounded per identity (1 GiB) and, for rooms,
 per room and per app; hostthis carries no service-wide total-bytes cap.
 Room push adds its own caps (16 subscriptions and 16 schedule items per
 room, 2 KiB payload, 8 sends per subscription per local day, one test per
 minute); see "Room push".
 
-### Per-identity quota: 100 MiB (compressed)
+### Per-identity quota: 1 GiB (compressed)
 
 The sum of an identity's active pastes' COMPRESSED bytes (counting
 EVERY non-deleted version of an updated paste) cannot exceed
-`UserQuotaBytes` (100 MiB; not operator-configurable). "Identity" is
+`UserQuotaBytes` (1 GiB; not operator-configurable). "Identity" is
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
 get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
-error with `would exceed your 100 MiB total quota`.
+error with `would exceed your 1 GiB total quota`.
 
-The per-identity quota and per-paste cap are distinct: 100 MiB total and
+The per-identity quota and per-paste cap are distinct: 1 GiB total and
 10 MiB for one paste. The per-paste cap bounds one request's compressed
 payload; the per-identity quota bounds accumulated logical storage.
 
@@ -4334,7 +4334,7 @@ product constants, not operator knobs.
 ### What's hardcoded
 
 Everything not in the table above is a product opinion, not a knob: the
-per-paste cap (10 MiB compressed), the per-identity quota (100 MiB
+per-paste cap (10 MiB compressed), the per-identity quota (1 GiB
 compressed), the raw-input fast-fail (100 MiB, prevents unbounded reads),
 blob compression (zstd level 3, all blobs), the sandbox headers
 (X-Frame-Options, Referrer-Policy, Permissions-Policy), and the slug

@@ -185,9 +185,9 @@ device per day; one test per minute. `push` and `push/...` are reserved keys.
 
 ## LIMITS
 
-100 MiB per identity, counting post-compression bytes across every
-active version of every active paste. Text compresses 5-10x under
-zstd, so the real raw-payload ceiling is typically 50-100 MiB.
+1 GiB per identity, counting post-compression bytes across every
+active version of every active paste and site. Text compresses 5-10x
+under zstd, so text can use several GiB of raw payload before the cap.
 
 Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV
 or JSON document, folded stacks as a flame graph, NDJSON logs, or plain
