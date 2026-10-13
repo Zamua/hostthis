@@ -13,7 +13,7 @@
 help:
 	@echo "Developer targets:"
 	@echo "  make build         build ./bin/hostthisd (local Go)"
-	@echo "  make bundle        build the celld Worker bundle (celld/dist)"
+	@echo "  make bundle        build the Worker bundle (worker/dist)"
 	@echo "  make test          run all unit + integration tests"
 	@echo "  make parity        diff hostthisd against the Worker's public surface"
 	@echo "  make e2e           run the browser suite (needs Chrome)"
@@ -36,39 +36,39 @@ help:
 build:
 	go build -o bin/hostthisd ./cmd/hostthisd
 
-# Every runtime, local or deployed, runs the one bundled module celld/dist/index.js,
-# built with the static assets beside it from celld/src and web/shells.
-CELLD_SRC := $(shell find celld/src celld/build celld/vendor web/shells -type f)
+# Every runtime, local or deployed, runs the one bundled module worker/dist/index.js,
+# built with the static assets beside it from worker/src and web/shells.
+WORKER_SRC := $(shell find worker/src worker/build worker/vendor web/shells -type f)
 
-bundle: celld/dist/index.js
+bundle: worker/dist/index.js
 
-celld/dist/index.js: $(CELLD_SRC) celld/package.json celld/node_modules
-	npm --prefix celld run build
+worker/dist/index.js: $(WORKER_SRC) worker/package.json worker/node_modules
+	npm --prefix worker run build
 
-celld/node_modules: celld/package-lock.json
-	npm ci --prefix celld
+worker/node_modules: worker/package-lock.json
+	npm ci --prefix worker
 	@touch $@
 
-# Go tests run the celld Worker bundle locally (internal/celldtest), so they
+# Go tests run the Worker bundle locally (internal/workertest), so they
 # need it built and its runtime installed. The parity suite runs as its own
 # target, once.
-test: bundle celld/localrt/node_modules
+test: bundle worker/localrt/node_modules
 	go test $$(go list ./... | grep -v '/internal/parity$$')
 	$(MAKE) parity
-	npm --prefix celld test
+	npm --prefix worker test
 	./scripts/test-repo-contracts.sh
 
 # The response parity suite (internal/parity): every request to hostthisd and
 # to the Worker's public surface, diffed. Locally by default; against a
 # deployed environment when PARITY_HOSTTHISD_URL, PARITY_WORKER_URL,
 # PARITY_TOKEN_FILE and PARITY_SLUGS are set (internal/parity/external_test.go).
-parity: bundle celld/localrt/node_modules
+parity: bundle worker/localrt/node_modules
 	go test -count=1 -v -run '^TestParity' ./internal/parity/
 
 # Run locally (no container) - useful for fast iteration. Defaults to
-# path mode so wildcard DNS isn't required. The celld Worker runs beside the
-# daemon under Miniflare, persisting under ./data/celld.
-dev run: bundle celld/localrt/node_modules
+# path mode so wildcard DNS isn't required. The Worker runs beside the
+# daemon under Miniflare, persisting under ./data/worker.
+dev run: bundle worker/localrt/node_modules
 	HOSTTHIS_URL_MODE=path \
 	HOSTTHIS_PUBLIC_SCHEME=http \
 	HOSTTHIS_APEX_DOMAIN=localhost:8080 \
@@ -76,8 +76,8 @@ dev run: bundle celld/localrt/node_modules
 	HOSTTHIS_LANDING=./web/landing.html \
 	./scripts/dev.sh
 
-celld/localrt/node_modules: celld/localrt/package-lock.json
-	cd celld/localrt && npm ci
+worker/localrt/node_modules: worker/localrt/package-lock.json
+	cd worker/localrt && npm ci
 	@touch $@
 
 # Standalone smoke target - runs against whatever HOSTTHIS_HOST is set
@@ -91,15 +91,15 @@ smoke:
 # The browser suite is a Playwright project under e2e/, run in Chromium and
 # WebKit. E2E_FLAGS passes through to `playwright test`, e.g.
 # make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'.
-# E2E_READS=worker reads every paste from the celld Worker's public surface
+# E2E_READS=worker reads every paste from the Worker's public surface
 # instead of hostthisd, into e2e/playwright-report-worker.
-e2e: e2e/node_modules bundle celld/localrt/node_modules
+e2e: e2e/node_modules bundle worker/localrt/node_modules
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
 # CI installs the browsers with their system libraries first. The HTML report
 # lands in e2e/playwright-report, and a failing suite still writes it before
 # make fails.
-e2e-ci: e2e/node_modules bundle celld/localrt/node_modules
+e2e-ci: e2e/node_modules bundle worker/localrt/node_modules
 	cd e2e && npx playwright install --with-deps chromium webkit
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
@@ -143,4 +143,4 @@ data-dir-perms:
 # Screenshots accumulate across runs, so a renamed flow leaves a directory the
 # report would list as unmatched. Removing them is how a local run starts clean.
 clean:
-	rm -rf bin data celld/dist e2e/playwright-report e2e/test-results e2e/playwright-report-worker e2e/test-results-worker
+	rm -rf bin data worker/dist e2e/playwright-report e2e/test-results e2e/playwright-report-worker e2e/test-results-worker

@@ -121,8 +121,8 @@ upgrade while looking like an upstream bug.
 cmd/hostthisd/       single binary entry point
 internal/
   domain/            pure types + invariants (no I/O)
-  celld/             metadata adapters over the celld Worker
-  celldtest/         runs the Worker locally for tests
+  worker/             metadata adapters over the Worker
+  workertest/         runs the Worker locally for tests
   storage/           site view, blob store layers, storage contract tests
   service/           use cases (upload, manage, deploy, rooms)
   ssh/               gliderlabs ssh server + verb dispatch
@@ -130,7 +130,7 @@ internal/
 e2e/                 Playwright browser suite (Chromium + WebKit)
 web/landing.html     embedded apex landing page
 web/shells/          render shells, their assets and shells.json; read by Go
-                     (package web) and the celld Worker build
+                     (package web) and the Worker build
 docs/SPEC.md         product spec; source of truth for behavior
 Dockerfile           multi-stage build; distroless static image
 Makefile             build / test / run / docker-up / smoke targets
@@ -142,28 +142,28 @@ README.md            user-facing manpage
 
 Go 1.27+ (per `go.mod`), Node 24+, and Docker required.
 
-The Go tests and `make run` run the celld Worker locally under Miniflare, from
-`celld/localrt`. They run the bundle `celld/dist/index.js`, which esbuild builds
-from the modules under `celld/src` and which is not committed. `make test`,
+The Go tests and `make run` run the Worker locally under Miniflare, from
+`worker/localrt`. They run the bundle `worker/dist/index.js`, which esbuild builds
+from the modules under `worker/src` and which is not committed. `make test`,
 `make run` and `make e2e` build it and install the runtime on first use; a bare
 `go test ./...` needs both done first, and the bundle rebuilt after every change
-under `celld/src` or `web/shells` (the runtime refuses a stale one):
+under `worker/src` or `web/shells` (the runtime refuses a stale one):
 
 ```
 make bundle
-npm ci --prefix celld/localrt
+npm ci --prefix worker/localrt
 ```
 
-`internal/celldtest` starts one runtime per test binary and hands each test its
-own cell namespace (`celldtest.Endpoint(t)`), so a test builds the production
-adapters (`celld.NewPasteRepo`, `storage.NewCelldBlobStore`, ...) against real
+`internal/workertest` starts one runtime per test binary and hands each test its
+own cell namespace (`workertest.Endpoint(t)`), so a test builds the production
+adapters (`worker.NewPasteRepo`, `storage.NewWorkerBlobStore`, ...) against real
 Worker code with no shared state.
 
 ```
 make build         # local Go build → ./bin/hostthisd
 make test          # run all tests (domain unit + storage + service + ssh/http e2e)
 make run           # run locally, no container; ssh :2222 http :8080, path-mode,
-                   # beside the Worker under Miniflare (state in ./data/celld)
+                   # beside the Worker under Miniflare (state in ./data/worker)
 
 make docker-build  # build the container image
 make docker-up     # docker compose up; same ports; data persists in ./data
@@ -172,15 +172,15 @@ make docker-down   # tear down
 
 ### Storage: one domain, in the Worker
 
-The domain lives once, in the celld Worker (`celld/src`): metadata in its
-cells, payloads in its R2 binding, both reached at `HOSTTHIS_CELLD_ENDPOINT`
+The domain lives once, in the Worker (`worker/src`): metadata in its
+cells, payloads in its R2 binding, both reached at `HOSTTHIS_WORKER_ENDPOINT`
 (see `docs/SPEC.md` "Metadata storage backends"). There is no Go copy of it to
-keep in step. Production runs the Worker on celld; `make run`, the Go tests and
+keep in step. Production runs the Worker on Cloudflare; `make run`, the Go tests and
 the browser suite run the same code under Miniflare.
 
 The conformance suite pins the adapters' contract: it runs against the local
 runtime on every `go test ./...`, and against a real celld node when
-`CELLD_TEST_ENDPOINT` names one (the CI `celld` job), along with the blob
+`WORKER_TEST_ENDPOINT` names one (the CI `celld` job), along with the blob
 contract and the live room suite.
 
 ### Response parity
@@ -188,7 +188,7 @@ contract and the live room suite.
 Until hostthisd's read path is gone, two servers answer the public surface:
 hostthisd, and the Worker with an apex set. `internal/parity` holds them to one
 answer. It builds hostthisd, starts it beside a Worker whose public surface is
-on (`celldtest.StartPublic`), uploads a corpus over SSH (every kind, forced
+on (`workertest.StartPublic`), uploads a corpus over SSH (every kind, forced
 pending and failed rows, versions, the site fixtures, a knowledge base, damaged
 data, and rows forced in the shape written before entries recorded a decoded
 size), and sends every request to both, the Worker directly and in forwarded
@@ -254,9 +254,9 @@ while uploads still go through hostthisd. That run writes
 `e2e/playwright-report-worker`. CI runs both modes.
 
 The harness is `e2e/fixtures.ts`. A run builds `hostthisd` once and mints one
-SSH key; each Playwright worker starts its own celld Worker under Miniflare and
+SSH key; each Playwright worker starts its own Worker under Miniflare and
 its own daemon against it, on ephemeral ports, and tests upload over SSH the way
-a user does. No staging, no celld fleet, no network dependency. The `pageErrors` fixture
+a user does. No staging, no network dependency. The `pageErrors` fixture
 records uncaught exceptions, `console.error`, and failed or erroring
 sub-resources, so a test that ends in `pageErrors.expectNone()` fails on a
 blank page even when every response is a 200.

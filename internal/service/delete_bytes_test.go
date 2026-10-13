@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 const bytesOwner = "key:delete-bytes"
 
-func bytesStack(t *testing.T) (*Upload, *Manage, *celld.PasteRepo, *storage.CompressedBlobStore, *keyLedger) {
+func bytesStack(t *testing.T) (*Upload, *Manage, *worker.PasteRepo, *storage.CompressedBlobStore, *keyLedger) {
 	t.Helper()
 	repo := newRepo(t)
 	blobs, root := realBlobsAt(t)
@@ -170,7 +170,7 @@ func TestDelete_ByteFailureDoesNotFailTheDelete(t *testing.T) {
 // remintOnDeleteRepo re-creates the slug the instant a delete commits, the way
 // a concurrent upload can.
 type remintOnDeleteRepo struct {
-	*celld.PasteRepo
+	*worker.PasteRepo
 	remint domain.Paste
 }
 

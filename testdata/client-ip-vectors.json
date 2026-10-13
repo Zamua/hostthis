@@ -1,5 +1,5 @@
 {
-  "about": "The room creation limit's client address and subnet, run by internal/http (hostthisd with HOSTTHIS_HTTP_TRUST_XFF=true) and celld/test/rooms-policy.test.js (the Worker with HOSTTHIS_CLIENT_IP_SOURCE=xff-rightmost). `xff`: the X-Forwarded-For header lines a request carries, in order, and the address taken from them, the right-most value across every line; an empty address is none. `subnets`: an address and the subnet it counts against.",
+  "about": "The room creation limit's client address and subnet, run by internal/http (hostthisd with HOSTTHIS_HTTP_TRUST_XFF=true) and worker/test/rooms-policy.test.js (the Worker with HOSTTHIS_CLIENT_IP_SOURCE=xff-rightmost). `xff`: the X-Forwarded-For header lines a request carries, in order, and the address taken from them, the right-most value across every line; an empty address is none. `subnets`: an address and the subnet it counts against.",
   "xff": [
     { "name": "one value", "lines": ["203.0.113.9"], "address": "203.0.113.9" },
     { "name": "a list", "lines": ["10.0.0.1, 203.0.113.9"], "address": "203.0.113.9" },

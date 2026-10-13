@@ -10,20 +10,20 @@
 # Production: drop these mappings, run with --network=host, and
 # have a TLS-terminating reverse proxy front 127.0.0.1:8080.
 #
-# The celld service builds the Worker bundle and runs it under Miniflare, the
-# same runtime the tests use; production runs it on celld instead. Its port is
+# The worker service builds the Worker bundle and runs it under Miniflare, the
+# same runtime the tests use; production runs it on Cloudflare. Its port is
 # not published.
 
 services:
-  celld:
+  worker:
     image: node:24-slim
-    working_dir: /celld/localrt
+    working_dir: /worker/localrt
     command:
       - sh
       - -c
       - >-
-        npm ci --prefix /celld --no-audit --no-fund &&
-        npm --prefix /celld run build &&
+        npm ci --prefix /worker --no-audit --no-fund &&
+        npm --prefix /worker run build &&
         npm ci --no-audit --no-fund &&
         exec node serve.mjs
     environment:
@@ -31,12 +31,12 @@ services:
       PORT: "8787"
       PERSIST_DIR: /data
     volumes:
-      - ./celld:/celld
+      - ./worker:/worker
       # Linux modules and the bundle stay in volumes, apart from the host's own.
-      - celld-modules:/celld/node_modules
-      - celld-dist:/celld/dist
-      - localrt-modules:/celld/localrt/node_modules
-      - ./data/celld:/data
+      - worker-modules:/worker/node_modules
+      - worker-dist:/worker/dist
+      - localrt-modules:/worker/localrt/node_modules
+      - ./data/worker:/data
     restart: unless-stopped
 
   hostthis:
@@ -54,15 +54,15 @@ services:
       HOSTTHIS_APEX_DOMAIN: localhost:18080
       HOSTTHIS_URL_MODE: path
       HOSTTHIS_PUBLIC_SCHEME: http
-      HOSTTHIS_CELLD_ENDPOINT: http://celld:8787
+      HOSTTHIS_WORKER_ENDPOINT: http://worker:8787
     depends_on:
-      - celld
+      - worker
     restart: unless-stopped
     # Distroless's nonroot uid is 65532. The host's ./data dir must be
     # writable by that uid; `make data-dir-perms` handles it.
     user: "65532:65532"
 
 volumes:
-  celld-modules:
-  celld-dist:
+  worker-modules:
+  worker-dist:
   localrt-modules:

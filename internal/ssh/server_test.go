@@ -15,11 +15,11 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 // TestUploadAndServe pins the end-to-end round trip: a real ssh client pipes
@@ -176,7 +176,7 @@ func (r *blockingPasteRepo) MarkReady(domain.Paste) error          { return nil 
 func (r *blockingPasteRepo) MarkFailed(domain.Paste) error         { return nil }
 
 func TestServerForceCloseWaitsForActiveUploadHandler(t *testing.T) {
-	rawBlobs, err := storage.NewCelldBlobStore(celldtest.Endpoint(t), nil)
+	rawBlobs, err := storage.NewWorkerBlobStore(workertest.Endpoint(t), nil)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}

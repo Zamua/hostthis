@@ -12,7 +12,7 @@ import (
 )
 
 // GatedBlobStore admits Puts to Inner through a byte-weighted FIFO queue, so
-// the bytes in flight to Inner never exceed the budget (docs/SPEC.md "Celld
+// the bytes in flight to Inner never exceed the budget (docs/SPEC.md "Worker
 // upload admission"). Reads and deletes pass straight through.
 type GatedBlobStore struct {
 	Inner  InnerBlobStore

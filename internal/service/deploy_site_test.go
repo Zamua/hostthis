@@ -528,7 +528,7 @@ func TestDeploySite_FailedInsertObjects(t *testing.T) {
 		wantKept  bool
 	}{
 		{"refused", domain.ErrOverUserQuota, false},
-		{"outcome unknown", errors.New("celld: /paste/put: connection reset"), true},
+		{"outcome unknown", errors.New("worker: /paste/put: connection reset"), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, _, blobs, root := deployStack(t)

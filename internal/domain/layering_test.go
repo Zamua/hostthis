@@ -47,9 +47,9 @@ var layerPolicy = map[string][]string{
 	"http":     {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
 	"ssh":      {"archive", "domain", "mime", "service", "zstdenc"},
 
-	// The celld adapters implement domain-shaped ports directly, beside storage
+	// The worker adapters implement domain-shaped ports directly, beside storage
 	// rather than on top of it.
-	"celld": {"domain", "roomwire"},
+	"worker": {"domain", "roomwire"},
 
 	// Test-only harness: the importable package is empty and must stay so. Its
 	// _test.go files wire whole stacks, which is why the graph is production-only.
@@ -57,9 +57,9 @@ var layerPolicy = map[string][]string{
 	// Test-only like sitevalidation: the response parity suite.
 	"parity": {},
 
-	// Test-only: runs the celld Worker locally for other packages' tests. A
+	// Test-only: runs the Worker locally for other packages' tests. A
 	// leaf, so any test may use it, and in no production package's allowed set.
-	"celldtest": {},
+	"workertest": {},
 }
 
 // domainBannedStd are the stdlib packages the domain may not reach, even
