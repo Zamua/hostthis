@@ -1104,7 +1104,7 @@ func helpText(apex string) string {
 // derived from the domain constant so raising the cap cannot leave the number
 // users read behind.
 func quotaSentence() string {
-	return fmt.Sprintf("%d MiB", domain.UserQuotaBytes>>20)
+	return domain.QuotaLabel()
 }
 
 // -- helpers ----------------------------------------------------------------
