@@ -8,8 +8,8 @@
 //   { status: "pending" | "failed" }       a document still writing, or never written
 //   { action, kind, updatedAt, uploadId, entry?, shell?, files? }
 // action is html | shell | raw | file | kbshell | kbraw | files | notfound.
-// entry ({ key, contentType, decodedSize }) is the stored entry whose bytes to
-// stream; decodedSize is its recorded decoded length, 0 when it has none (its
+// entry ({ key, contentType, decodedSize }, plus offset and length for a pack
+// member) is the stored entry whose bytes to stream; decodedSize is its recorded decoded length, 0 when it has none (its
 // Size is for display and may be wrong, so it never leaves the cell). Which
 // Content-Type serves it is the caller's choice per action. shell names
 // the kind whose template renders; a kind without one is the caller's 500.
@@ -204,6 +204,8 @@ class Undecodable extends Error {}
 
 const ENTRY_FIELDS = {
   KEY: ["key", "string"],
+  OFFSET: ["offset", "int"],
+  LENGTH: ["length", "int"],
   SIZE: [null, "int"],
   DECODEDSIZE: ["decodedSize", "int"],
   COMPRESSEDSIZE: [null, "int"],
@@ -220,6 +222,12 @@ function decodeManifest(value) {
     }
     throw error;
   }
+}
+
+// An entry's validator, the same as Go's ManifestEntry.Validator: its key,
+// plus its offset when several files share one pack.
+export function entryValidator(entry) {
+  return entry.length > 0 ? `${entry.key}@${entry.offset}` : entry.key;
 }
 
 function decodeFiles(value) {
@@ -243,11 +251,8 @@ function decodeFiles(value) {
 }
 
 function decodeEntry(value) {
-  const entry = { key: "", contentType: "", decodedSize: 0 };
-  if (value === undefined || value === null) {
-    return entry;
-  }
-  for (const [name, field] of Object.entries(asObject(value))) {
+  const entry = { key: "", offset: 0, length: 0, contentType: "", decodedSize: 0 };
+  for (const [name, field] of Object.entries(value === undefined || value === null ? {} : asObject(value))) {
     const known = ENTRY_FIELDS[foldName(name)];
     if (!known || field === undefined || field === null) {
       continue;
@@ -257,6 +262,12 @@ function decodeEntry(value) {
     if (as) {
       entry[as] = decoded;
     }
+  }
+  // A span exists only for a pack member; a whole object carries none. Go
+  // omits a zero Offset, so the first member arrives with none.
+  if (!(entry.length > 0)) {
+    delete entry.offset;
+    delete entry.length;
   }
   return entry;
 }

@@ -97,6 +97,10 @@ func (m memObjects) GetReader(key string) (io.ReadCloser, int64, error) {
 
 func (m memObjects) DeletePrefix(string) error { return nil }
 
+func (m memObjects) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(m[key][offset : offset+length])), nil
+}
+
 // runConcurrentGETs stands in for N concurrent clients on one large paste.
 func runConcurrentGETs(b *testing.B, srv *Server, r *http.Request) {
 	b.Helper()

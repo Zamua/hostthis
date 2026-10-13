@@ -56,9 +56,9 @@ export function reportingErrors(stream, onError) {
   }, { highWaterMark: 0 });
 }
 
-// The decoded bytes of the object at key.
-export async function openPayload(env, key) {
-  const object = await env.PAYLOADS.get(key);
+// The decoded bytes an entry names: its whole object, or its pack slice.
+export async function openPayload(env, { key, offset, length }) {
+  const object = await env.PAYLOADS.get(key, length > 0 ? { range: { offset, length } } : undefined);
   if (object === null) {
     throw new BlobError(`object ${key} missing`);
   }

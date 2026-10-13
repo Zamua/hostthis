@@ -18,8 +18,12 @@ type BlobUnit interface {
 	// their quota-relevant stored size.
 	StageEncoding(ctx context.Context, key string, r io.Reader) (storedSize int, err error)
 
-	// Read streams the decompressed bytes at an entry's object key. An entry
-	// without a key is ErrNotFound.
+	// OpenPack starts a pack to be stored at key. Nothing is written until
+	// Commit.
+	OpenPack(key string) (domain.BlobPack, error)
+
+	// Read streams the decompressed bytes an entry names: its whole object, or
+	// its slice of a pack. An entry without a key is ErrNotFound.
 	Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error)
 
 	// DeleteUpload deletes every object under the upload's prefix. An upload

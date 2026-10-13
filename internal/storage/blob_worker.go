@@ -104,6 +104,39 @@ func (s *WorkerBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 	return resp.Body, size, nil
 }
 
+// GetRange streams length bytes of key from offset. The Worker answers 206
+// with the slice's length in X-Blob-Size.
+func (s *WorkerBlobStore) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	if err := checkKey(key); err != nil {
+		return nil, err
+	}
+	if offset < 0 || length <= 0 {
+		return nil, fmt.Errorf("blob worker: get %s: bad range %d+%d", key, offset, length)
+	}
+	req, err := http.NewRequest(http.MethodGet, s.objectURL(key), nil)
+	if err != nil {
+		return nil, fmt.Errorf("blob worker: get %s: %w", key, err)
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("blob worker: get %s: %w", key, err)
+	}
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		discardBody(resp)
+		return nil, ErrNotFound
+	case resp.StatusCode != http.StatusPartialContent:
+		return nil, statusError(resp, "get range "+key)
+	}
+	if got := resp.Header.Get(blobSizeHeader); got != strconv.FormatInt(length, 10) {
+		discardBody(resp)
+		return nil, fmt.Errorf("blob worker: get %s: range answered %s %q, want %d", key, blobSizeHeader, got, length)
+	}
+	return resp.Body, nil
+}
+
 // DeletePrefix asks the Worker to delete every object under prefix.
 func (s *WorkerBlobStore) DeletePrefix(prefix string) error {
 	if err := checkPrefix(prefix); err != nil {

@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,9 +30,12 @@ type Site struct {
 // path's extension alone, no I/O.
 type ManifestEntry struct {
 	// Key is the object holding the file's bytes, under its upload's prefix.
-	// Objects never change, so it doubles as an HTTP validator. An entry
-	// without one names no bytes.
+	// An entry without one names no bytes.
 	Key string
+	// Offset and Length locate the file's stored bytes inside a pack. A zero
+	// Length is the whole object.
+	Offset int64 `json:",omitempty"`
+	Length int64 `json:",omitempty"`
 	// Size is the decoded bytes, for display. Entries written before
 	// DecodedSize existed may hold 0 or the stored length here, so no read
 	// trusts it.
@@ -47,6 +51,20 @@ type ManifestEntry struct {
 	// single-document paste keeps its detected kind; a file inside a directory
 	// leaves it empty and is served raw.
 	Kind string
+}
+
+// Ref is where the entry's stored bytes live.
+func (e ManifestEntry) Ref() BlobRef {
+	return BlobRef{Key: e.Key, Offset: e.Offset, Length: e.Length}
+}
+
+// Validator is the entry's HTTP validator. Objects never change, so the key
+// suffices, plus the offset when several files share one pack.
+func (e ManifestEntry) Validator() string {
+	if e.Length > 0 {
+		return e.Key + "@" + strconv.FormatInt(e.Offset, 10)
+	}
+	return e.Key
 }
 
 // DecodedLength is the entry's recorded decoded length, and whether it has

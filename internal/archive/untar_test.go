@@ -26,23 +26,23 @@ type recordingSink struct {
 
 func newRecordingSink() *recordingSink { return &recordingSink{files: map[string][]byte{}} }
 
-func (s *recordingSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
+func (s *recordingSink) Store(p string, r io.Reader, _ int64) (domain.BlobRef, int, error) {
 	var buf bytes.Buffer
 	n, err := io.Copy(&buf, r)
 	s.total += n
 	if err != nil {
 		// Propagate the cap sentinel unchanged, like the production sink.
 		if errors.Is(err, domain.ErrArchiveTooLarge) {
-			return "", 0, domain.ErrArchiveTooLarge
+			return domain.BlobRef{}, 0, domain.ErrArchiveTooLarge
 		}
-		return "", 0, err
+		return domain.BlobRef{}, 0, err
 	}
 	body := buf.Bytes()
 	s.files[p] = body
 	key := "uploads/test/" + strconv.Itoa(s.next)
 	s.next++
 	// Test double doesn't compress; report the raw length as the "stored" size.
-	return key, len(body), nil
+	return domain.BlobRef{Key: key}, len(body), nil
 }
 
 type tarEntry struct {

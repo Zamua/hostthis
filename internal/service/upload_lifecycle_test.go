@@ -66,6 +66,16 @@ func (f *fakeBlobs) GetReader(key string) (io.ReadCloser, int64, error) {
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
 }
 
+func (f *fakeBlobs) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.stored[key]
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(b[offset : offset+length])), nil
+}
+
 func (f *fakeBlobs) DeletePrefix(prefix string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
