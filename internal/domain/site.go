@@ -85,7 +85,7 @@ const (
 	// quota. Its own value rather than an alias of UserQuotaBytes because that
 	// is a var and a const cannot reference one; MaxSiteBytesMatchesQuota pins
 	// the two equal.
-	MaxSiteBytes = 100 << 20 // 100 MiB, tracking UserQuotaBytes
+	MaxSiteBytes = 1 << 30 // 1 GiB, tracking UserQuotaBytes
 )
 
 // Errors the safe-untar surfaces. All abort the whole deploy: a

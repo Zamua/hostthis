@@ -633,7 +633,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"LIMITS\n" +
 	"\n" +
-	"    100 MiB per identity, counting post-compression bytes across all\n" +
+	"    1 GiB per identity, counting post-compression bytes across all\n" +
 	"    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,\n" +
 	"    folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.\n" +
 	"\n" +

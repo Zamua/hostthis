@@ -95,7 +95,7 @@ const archivePeek = 512
 // ErrOverQuota is returned when accepting the upload would push the identity's
 // total active COMPRESSED bytes above UserQuotaBytes. The number is derived
 // from the constant so the message cannot drift from the enforced limit.
-var ErrOverQuota = fmt.Errorf("service: would exceed your %d MiB total quota; delete a paste to free space", domain.UserQuotaBytes>>20)
+var ErrOverQuota = fmt.Errorf("service: would exceed your %s total quota; delete a paste to free space", domain.QuotaLabel())
 
 // ErrRawTooLarge is returned when the raw input exceeded the fast-fail cap.
 // The server stopped reading before any compression check could run.

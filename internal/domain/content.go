@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -83,7 +84,16 @@ const MaxPasteBytes = 10 << 20 // 10 MiB
 // A var, not a const, so tests can shrink it: driving a total over the real
 // limit would otherwise mean compressing 100+ MiB per test. Production never
 // writes to it.
-var UserQuotaBytes = 100 << 20 // 100 MiB
+var UserQuotaBytes = 1 << 30 // 1 GiB
+
+// QuotaLabel renders UserQuotaBytes for user-facing text, in GiB when it is a
+// whole number of them.
+func QuotaLabel() string {
+	if UserQuotaBytes >= 1<<30 && UserQuotaBytes%(1<<30) == 0 {
+		return fmt.Sprintf("%d GiB", UserQuotaBytes>>30)
+	}
+	return fmt.Sprintf("%d MiB", UserQuotaBytes>>20)
+}
 
 // HardRawByteCap fast-fails on RAW input bytes: the server stops reading after
 // this many uncompressed bytes regardless of how well they would compress.
