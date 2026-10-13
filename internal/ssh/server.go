@@ -356,6 +356,7 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 					_ = sess.Exit(ExitSybilRefuse)
 					return
 				}
+				s.Logger.Printf("ssh: key gate: %v", err)
 				fmt.Fprintf(sess.Stderr(), "hostthis: key gate: %v\n", err)
 				_ = sess.Exit(ExitErr)
 				return
