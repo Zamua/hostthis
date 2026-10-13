@@ -164,7 +164,12 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
 
 	uploadID := domain.NewUploadID()
-	man, err := archive.Untar(body, &blobSink{blob: d.Blob, uploadID: uploadID}, budget)
+	sink := &blobSink{blob: d.Blob, uploadID: uploadID}
+	defer sink.Close()
+	man, err := archive.Untar(body, sink, budget)
+	if err == nil {
+		err = sink.Flush()
+	}
 	switch {
 	case errors.Is(err, domain.ErrArchiveTooLarge):
 		err = ErrOverQuota
@@ -272,13 +277,16 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	}
 }
 
-// blobSink stores each archive file as the next object of one upload. A path
-// the archive repeats leaves its earlier object unreferenced in that same
-// prefix, which the upload's delete still covers.
+// blobSink stores an archive's files as objects of one upload: small files
+// into packs, others alone. A path the archive repeats leaves its earlier
+// bytes unreferenced in that same prefix, which the upload's delete still
+// covers.
 type blobSink struct {
 	blob     BlobUnit
 	uploadID string
 	next     int
+	pack     domain.BlobPack
+	packKey  string
 }
 
 // siteExtractBudget is the unallocated owner quota available to the next
@@ -287,9 +295,17 @@ func siteExtractBudget(cap, usedPaste, usedSite int64) int64 {
 	return domain.Allowance{Cap: cap, Used: usedPaste + usedSite}.Remaining()
 }
 
-func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
+func (s *blobSink) nextKey() string {
 	key := domain.UploadObjectKey(s.uploadID, s.next)
 	s.next++
+	return key
+}
+
+func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int, error) {
+	if domain.Packable(size) {
+		return s.storePacked(p, r)
+	}
+	key := s.nextKey()
 	// No buffer: the body streams through the compressor into the object store,
 	// so an in-flight file costs the compressor window and a copy buffer rather
 	// than its own size. The untar guard admits a single file up to the owner's
@@ -297,14 +313,63 @@ func (s *blobSink) Store(p string, r io.Reader, _ int64) (string, int, error) {
 	// QUOTA.
 	compressedSize, err := s.blob.StageEncoding(context.Background(), key, r)
 	if err != nil {
-		// The untar's cap sentinel has to survive so SafeUntar can tell a
-		// too-large archive from a real I/O failure.
-		if errors.Is(err, domain.ErrArchiveTooLarge) {
-			return "", 0, domain.ErrArchiveTooLarge
-		}
-		return "", 0, fmt.Errorf("blob put %q: %w", p, err)
+		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
-	return key, compressedSize, nil
+	return domain.BlobRef{Key: key}, compressedSize, nil
+}
+
+func (s *blobSink) storePacked(p string, r io.Reader) (domain.BlobRef, int, error) {
+	if s.pack == nil {
+		key := s.nextKey()
+		pack, err := s.blob.OpenPack(key)
+		if err != nil {
+			return domain.BlobRef{}, 0, fmt.Errorf("open pack: %w", err)
+		}
+		s.pack, s.packKey = pack, key
+	}
+	off, n, err := s.pack.Append(r)
+	if err != nil {
+		return domain.BlobRef{}, 0, storeErr(p, err)
+	}
+	ref := domain.BlobRef{Key: s.packKey, Offset: off, Length: n}
+	if domain.PackFull(s.pack.Len()) {
+		if err := s.Flush(); err != nil {
+			return domain.BlobRef{}, 0, err
+		}
+	}
+	return ref, int(n), nil
+}
+
+// Flush writes the open pack, if any. Every reference a manifest holds is
+// durable once the last Flush returns.
+func (s *blobSink) Flush() error {
+	if s.pack == nil {
+		return nil
+	}
+	err := s.pack.Commit(context.Background())
+	_ = s.pack.Close()
+	s.pack = nil
+	if err != nil {
+		return fmt.Errorf("blob put pack: %w", err)
+	}
+	return nil
+}
+
+// Close drops an unwritten pack's local state.
+func (s *blobSink) Close() {
+	if s.pack != nil {
+		_ = s.pack.Close()
+		s.pack = nil
+	}
+}
+
+// storeErr keeps the untar's cap sentinel intact, so SafeUntar can tell a
+// too-large archive from a real I/O failure.
+func storeErr(p string, err error) error {
+	if errors.Is(err, domain.ErrArchiveTooLarge) {
+		return domain.ErrArchiveTooLarge
+	}
+	return fmt.Errorf("blob put %q: %w", p, err)
 }
 
 // ArchiveAdapter presents DeploySite as the upload service's ArchiveDeployer,

@@ -139,7 +139,13 @@ func gzipTarEntries(t *testing.T, files [][2]string) []byte {
 // readObject drains one stored object through the production decoder.
 func readObject(t *testing.T, blobs *storage.CompressedBlobStore, key string) ([]byte, error) {
 	t.Helper()
-	rc, _, err := blobs.Read(context.Background(), domain.ManifestEntry{Key: key})
+	return readEntry(t, blobs, domain.ManifestEntry{Key: key})
+}
+
+// readEntry reads the bytes an entry names, whole object or pack slice.
+func readEntry(t *testing.T, blobs *storage.CompressedBlobStore, e domain.ManifestEntry) ([]byte, error) {
+	t.Helper()
+	rc, _, err := blobs.Read(context.Background(), e)
 	if err != nil {
 		return nil, err
 	}

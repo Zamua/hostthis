@@ -17,10 +17,10 @@ func HasGzipMagic(b []byte) bool { return bytes.HasPrefix(b, gzipMagic) }
 // FileSink receives one safe, fully-validated regular file from the archive
 // and stores it, so the extractor imports no storage code.
 type FileSink interface {
-	// Store consumes r and returns the object key the bytes were stored under
-	// and their stored (compressed) size. size is the header's declared size,
-	// advisory only: the bomb guard meters what r actually yields.
-	Store(p string, r io.Reader, size int64) (key string, compressedSize int, err error)
+	// Store consumes r and returns where the bytes were stored and their
+	// stored (compressed) size. size is the header's declared size, advisory
+	// only: the bomb guard meters what r actually yields.
+	Store(p string, r io.Reader, size int64) (ref BlobRef, compressedSize int, err error)
 }
 
 // isJunkPath reports whether rel is an OS-generated metadata file that must

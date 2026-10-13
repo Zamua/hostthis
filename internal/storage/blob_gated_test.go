@@ -48,6 +48,11 @@ func (p *gateProbe) GetReader(string) (io.ReadCloser, int64, error) {
 	return io.NopCloser(strings.NewReader("x")), 1, nil
 }
 
+func (p *gateProbe) GetRange(string, int64, int64) (io.ReadCloser, error) {
+	p.gets.Add(1)
+	return io.NopCloser(strings.NewReader("x")), nil
+}
+
 func (p *gateProbe) DeletePrefix(string) error {
 	p.deletes.Add(1)
 	return nil

@@ -15,6 +15,7 @@ import (
 
 func runBlobContract(t *testing.T, newStore func(t *testing.T) storage.InnerBlobStore) {
 	t.Run("RoundTrip", func(t *testing.T) { blobContractRoundTrip(t, newStore(t)) })
+	t.Run("RangeReadsExactlyTheSlice", func(t *testing.T) { blobContractRange(t, newStore(t)) })
 	t.Run("MissingIsNotFound", func(t *testing.T) { blobContractMissing(t, newStore(t)) })
 	t.Run("DeletePrefixRemovesOnlyThatUpload", func(t *testing.T) { blobContractDeletePrefix(t, newStore(t)) })
 	t.Run("DeleteAbsentPrefixSucceeds", func(t *testing.T) { blobContractDeleteAbsent(t, newStore(t)) })
@@ -62,6 +63,31 @@ func blobContractRoundTrip(t *testing.T, s storage.InnerBlobStore) {
 	}
 	if !bytes.Equal(got, body) || n != int64(len(body)) {
 		t.Fatalf("GetReader = %q (length %d), want %q (length %d)", got, n, body, len(body))
+	}
+}
+
+// A range read yields exactly the requested slice, at the start, the middle
+// and the end of the object.
+func blobContractRange(t *testing.T, s storage.InnerBlobStore) {
+	id := domain.NewUploadID()
+	deleteAfter(t, s, id)
+	key := domain.UploadObjectKey(id, 0)
+	body := []byte("0123456789abcdefghij")
+	put(t, s, key, body)
+
+	for _, r := range [][2]int64{{0, 4}, {7, 5}, {15, 5}, {0, 20}} {
+		rc, err := s.GetRange(key, r[0], r[1])
+		if err != nil {
+			t.Fatalf("GetRange(%d, %d): %v", r[0], r[1], err)
+		}
+		got, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if want := body[r[0] : r[0]+r[1]]; err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("GetRange(%d, %d) = %q, %v; want %q", r[0], r[1], got, err, want)
+		}
+	}
+	if _, err := s.GetRange(domain.UploadObjectKey(domain.NewUploadID(), 0), 0, 1); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("GetRange of an absent key = %v, want ErrNotFound", err)
 	}
 }
 

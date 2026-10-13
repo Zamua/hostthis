@@ -256,7 +256,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	// ETag is the stored file's object key for HTML and for any raw body: a key
 	// never names different bytes. The shell is content-INDEPENDENT, so it
 	// validates on its shell version instead.
-	etag := `"` + root.Key + `"`
+	etag := `"` + root.Validator() + `"`
 	if shell != nil && !rawWanted {
 		etag = `"` + shell.version + `"`
 	}
@@ -425,7 +425,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
 	h.Set("Cache-Control", contentCacheControl)
-	if notModified(w, r, `"`+entry.Key+`"`, updatedAt) {
+	if notModified(w, r, `"`+entry.Validator()+`"`, updatedAt) {
 		return
 	}
 

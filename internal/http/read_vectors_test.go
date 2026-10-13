@@ -173,15 +173,19 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 		if w.Code != stdhttp.StatusOK || body != "bytes of "+read.Key {
 			t.Fatalf("status %d body %q after reading %+v", w.Code, body, *read)
 		}
-		validated(`"` + read.Key + `"`)
+		validated(`"` + read.Validator() + `"`)
 		length := ""
 		if read.DecodedSize > 0 {
 			length = strconv.Itoa(read.DecodedSize)
 		}
 		header("Content-Length", length)
-		entry := map[string]any{"entry": map[string]any{
+		fields := map[string]any{
 			"key": read.Key, "contentType": read.ContentType, "decodedSize": read.DecodedSize,
-		}}
+		}
+		if read.Length > 0 {
+			fields["offset"], fields["length"] = read.Offset, read.Length
+		}
+		entry := map[string]any{"entry": fields}
 		switch {
 		case kind == domain.KindHTML:
 			header("Content-Type", "text/html; charset=utf-8")

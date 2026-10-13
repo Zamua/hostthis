@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -38,6 +39,19 @@ func (f *fakeDurable) GetReader(key string) (io.ReadCloser, int64, error) {
 		return nil, 0, ErrNotFound
 	}
 	return io.NopCloser(bytes.NewReader(b)), int64(len(b)), nil
+}
+
+func (f *fakeDurable) GetRange(key string, offset, length int64) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.objs[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if offset < 0 || length <= 0 || offset+length > int64(len(b)) {
+		return nil, fmt.Errorf("fake: range %d+%d outside %d bytes", offset, length, len(b))
+	}
+	return io.NopCloser(bytes.NewReader(b[offset : offset+length])), nil
 }
 
 func (f *fakeDurable) DeletePrefix(prefix string) error {
