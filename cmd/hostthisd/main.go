@@ -262,8 +262,8 @@ func main() {
 }
 
 const (
-	defaultCelldPutBudget    = 16 << 20
-	defaultCelldPutWait      = 30 * time.Second
+	defaultWorkerPutBudget   = 16 << 20
+	defaultWorkerPutWait     = 30 * time.Second
 	defaultUploadConcurrency = 8
 	defaultUploadWait        = 30 * time.Second
 )
@@ -281,27 +281,27 @@ func buildUploadAdmission(logger *log.Logger) (*hostssh.UploadAdmission, error) 
 	return gate, nil
 }
 
-// buildBlobStore returns the celld payload store under the compression layer.
-// Celld holds in-flight upload bytes in memory, so its writes queue by weight
-// (docs/SPEC.md "Celld upload admission").
+// buildBlobStore returns the Worker payload store under the compression layer.
+// The Worker holds in-flight upload bytes in memory, so its writes queue by weight
+// (docs/SPEC.md "Worker upload admission").
 func buildBlobStore(logger *log.Logger) (*storage.CompressedBlobStore, error) {
-	base := envOr("HOSTTHIS_CELLD_ENDPOINT", "")
-	rt, err := celldTransport(base, storage.CelldBlobTransport())
+	base := envOr("HOSTTHIS_WORKER_ENDPOINT", "")
+	rt, err := workerTransport(base, storage.WorkerBlobTransport())
 	if err != nil {
 		return nil, err
 	}
-	bs, err := storage.NewCelldBlobStore(base, &http.Client{Transport: rt})
+	bs, err := storage.NewWorkerBlobStore(base, &http.Client{Transport: rt})
 	if err != nil {
-		return nil, fmt.Errorf("HOSTTHIS_CELLD_ENDPOINT: %w", err)
+		return nil, fmt.Errorf("HOSTTHIS_WORKER_ENDPOINT: %w", err)
 	}
-	budget := envParse("HOSTTHIS_CELLD_PUT_BUDGET_BYTES", defaultCelldPutBudget,
+	budget := envParse("HOSTTHIS_WORKER_PUT_BUDGET_BYTES", defaultWorkerPutBudget,
 		func(v string) (int64, error) { return strconv.ParseInt(v, 10, 64) }, "an integer")
-	wait := envParse("HOSTTHIS_CELLD_PUT_WAIT", defaultCelldPutWait, time.ParseDuration, "a duration")
+	wait := envParse("HOSTTHIS_WORKER_PUT_WAIT", defaultWorkerPutWait, time.ParseDuration, "a duration")
 	gated, err := storage.NewGatedBlobStore(bs, budget, wait)
 	if err != nil {
-		return nil, fmt.Errorf("HOSTTHIS_CELLD_PUT_BUDGET_BYTES / HOSTTHIS_CELLD_PUT_WAIT: %w", err)
+		return nil, fmt.Errorf("HOSTTHIS_WORKER_PUT_BUDGET_BYTES / HOSTTHIS_WORKER_PUT_WAIT: %w", err)
 	}
-	logger.Printf("blobs: celld at %s (zstd-compressed at rest; put budget %d bytes, wait %s)", base, budget, wait)
+	logger.Printf("blobs: worker at %s (zstd-compressed at rest; put budget %d bytes, wait %s)", base, budget, wait)
 	return storage.NewCompressedBlobStore(gated), nil
 }
 

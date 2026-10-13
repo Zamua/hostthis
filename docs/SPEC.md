@@ -507,7 +507,7 @@ With* options. Refusal behavior is pinned by
   is rejected with `upload exceeds 10 MiB compressed cap; your bytes
   compress to <actual> - try removing binary data` and the spill file is
   discarded.
-- **Storage backend**: the celld Worker's payload binding, under the
+- **Storage backend**: the Worker's payload binding, under the
   upload's own `uploads/<upload-id>/<n>` keys. See "Blob storage backends"
   below.
   Markdown and diff are never rendered on the read path: such a read
@@ -1248,7 +1248,7 @@ so the API path and the static-file path do not collide. (In dev path
 mode the same routes live under `<apex>/p/<app-slug>/api/rooms/...`.)
 
 Two servers answer these routes with the same rules: `hostthisd`, and the
-celld Worker's public router once the Worker has `HOSTTHIS_APEX_DOMAIN` set
+Worker's public router once the Worker has `HOSTTHIS_APEX_DOMAIN` set
 (see "Public and internal hosts"). Both take the app from the host (or the
 path-mode prefix) and the room from the parsed UUID, never from a body or
 query. Unless a server is named, every rule in "Rooms", "Real-time room
@@ -1344,7 +1344,7 @@ The remaining rules, shared by every route above:
 ### Storage: a room-namespaced KV over the metadata backend
 
 Room data is small JSON/bytes blobs - app STATE, not files - so it lives
-in the **metadata backend** hostthis already runs (the celld cells), NOT
+in the **metadata backend** hostthis already runs (the Worker's cells), NOT
 in the BlobStore. The BlobStore holds the larger file bytes of pastes and
 sites; room values are small,
 mutable, and per-room, so they belong with the metadata. Large blobs are
@@ -1358,7 +1358,7 @@ The implementation follows the existing repo-behind-service pattern:
 - The `RoomRepo` port in `internal/service` exposes creation, point reads,
   snapshots, PUT, DELETE, and creation-ledger counts. The service applies use-case
   policy; HTTP only translates requests and responses.
-- The celld adapter implements the port. It stores one whole Room document per
+- The Worker adapter implements the port. It stores one whole Room document per
   Room cell and coordinates app-wide allocations through the app's Paste cell.
 - Every address includes `(app_slug, room_id)`, so cross-app isolation is
   structural rather than a filter. The conformance suite pins the observable
@@ -1650,7 +1650,7 @@ only on the `hostthisd` path. The canonical browser client also reconnects with
 exponential backoff and jitter, reconnects immediately on foreground recovery,
 and buffers only bounded durable actions while disconnected.
 
-The live celld harness is the acceptance gate: multiple clients receive durable
+The live Worker harness is the acceptance gate: multiple clients receive durable
 frames in sequence; a late join receives an exact snapshot splice; ephemeral
 text and binary frames reach peers only; room and app isolation hold; deletes
 mirror correctly; reconnect works; and admission slots are reclaimed.
@@ -1821,7 +1821,7 @@ described here. The slug and URL are unchanged either way. Failure modes
   the upload's bytes are deleted.
 - *busy storing other uploads; try again in a minute* (exit 1): the upload
   waited too long for a free upload slot (see "Upload admission") or for the
-  blob store to admit its bytes (see "Celld upload admission"). Nothing was
+  blob store to admit its bytes (see "Worker upload admission"). Nothing was
   saved.
 
 See "Exit codes" below for the canonical mapping.
@@ -2692,7 +2692,7 @@ its prior state, and concurrent admission cannot race a stale check.
 ## Blob storage backends
 
 Blob bytes are independent of metadata. The service uses one blob port,
-implemented over the celld Worker's payload binding (below). The port has
+implemented over the Worker's payload binding (below). The port has
 three operations:
 
 - `Put(key)` streams one object in.
@@ -2759,7 +2759,7 @@ accounting conflict the cell keeps pending, or any answer the metadata adapter
 does not positively identify may still publish the version, and deleting its
 bytes then would break a live read. A leak is always preferable to that.
 
-The celld adapter therefore maps only identified answers to the definitive
+The Worker adapter therefore maps only identified answers to the definitive
 errors: an over-quota (507), too-large (413), or operation-pending (423)
 status, a conflict whose body names `slug-taken`, `create-aborted`, or
 `generation-mismatch` (the paste was replaced, so it reads as not found), and a
@@ -2773,7 +2773,7 @@ is no sweep.
 
 Each object is stored at `r2/payloads/<key>` in the celld fleet bucket,
 through the Worker's `PAYLOADS` R2 binding (`bucket_name` `payloads`).
-`hostthisd` reaches it at `HOSTTHIS_CELLD_ENDPOINT` and needs no object-store
+`hostthisd` reaches it at `HOSTTHIS_WORKER_ENDPOINT` and needs no object-store
 credential of its own. The Worker exposes three stateless, cluster-internal
 routes, served outside any cell:
 
@@ -2796,11 +2796,11 @@ The celld fleet bucket must never carry a storage quota. Payloads share it with
 celld's own state and lease writes, so a full quota would refuse those too and
 stop the fleet, not just new uploads.
 
-### Celld upload admission: a byte-weighted queue
+### Worker upload admission: a byte-weighted queue
 
 The celld runtime holds an upload's bytes in memory while it forwards them to
 the bucket, so the bytes in flight across concurrent writes set its memory
-peak. Every `hostthisd` process therefore admits its celld writes through a
+peak. Every `hostthisd` process therefore admits its Worker writes through a
 byte-weighted queue, which gives that peak a fixed ceiling however many
 uploads arrive at once:
 
@@ -2809,7 +2809,7 @@ uploads arrive at once:
   alone and counts as the whole budget; an unknown size counts as the whole
   budget.
 - **Budget.** The admitted writes of one process never weigh more than the
-  budget together. The default is 16 MiB (`HOSTTHIS_CELLD_PUT_BUDGET_BYTES`).
+  budget together. The default is 16 MiB (`HOSTTHIS_WORKER_PUT_BUDGET_BYTES`).
   The queue is per process, so the bound the runtime sees is the budget times
   the number of `hostthisd` processes. The runtime's memory is paid on its
   node, which also runs the bucket and the app, so the default is sized for
@@ -2818,7 +2818,7 @@ uploads arrive at once:
   (FIFO) for earlier writes to finish. Waiting reads none of the body: it stays
   in the request's spill file.
 - **Bounded wait.** A write still waiting after the wait limit (default 30s,
-  `HOSTTHIS_CELLD_PUT_WAIT`) fails with the busy error and writes nothing. The
+  `HOSTTHIS_WORKER_PUT_WAIT`) fails with the busy error and writes nothing. The
   SSH user sees `hostthis: busy storing other uploads; try again in a minute`
   (exit 1) on an update or site deploy. A new paste has already returned its
   URL when its write runs (see "Paste lifecycle status"), so a busy write there
@@ -2850,7 +2850,7 @@ the encoders that produce them.
   holds the bytes on the client once the channel's receive window fills, and a
   waiting upload costs no encoder.
 - **Bounded wait.** An upload still waiting after the wait limit (default 30s,
-  `HOSTTHIS_UPLOAD_WAIT`) fails with the same busy error as a celld write:
+  `HOSTTHIS_UPLOAD_WAIT`) fails with the same busy error as a Worker write:
   `hostthis: busy storing other uploads; try again in a minute` (exit 1).
   Nothing is read or saved. A client that disconnects while waiting leaves the
   queue.
@@ -2940,27 +2940,27 @@ cannot affect `versions`, `pin`, or version deletes.
 
 ## Metadata storage backends
 
-The domain lives once, in the celld Worker (`celld/src`): Identity, Paste,
+The domain lives once, in the Worker (`worker/src`): Identity, Paste,
 Room, and Subnet cells own durable metadata over a celld fleet's object store,
-and the `internal/celld` adapters implement the application's metadata ports
+and the `internal/worker` adapters implement the application's metadata ports
 over HTTP. There is no second implementation of the domain in Go.
 
 ```text
-HOSTTHIS_CELLD_ENDPOINT=http://celld:8080         # required
+HOSTTHIS_WORKER_ENDPOINT=http://worker:8787         # required
 ```
 
 The same Worker runs everywhere: on celld, on Cloudflare Workers, and, for
 development, the Go tests and the browser suite, on this machine under
-Miniflare (workerd) from `celld/localrt`, with cells in memory or a local
+Miniflare (workerd) from `worker/localrt`, with cells in memory or a local
 persist directory and payloads in a local R2 store. On Cloudflare the
 `PAYLOADS` binding names an R2 bucket; on celld it lives inside the fleet
 bucket.
 
-Its source is split into modules under `celld/src`, entry `celld/src/index.js`.
+Its source is split into modules under `worker/src`, entry `worker/src/index.js`.
 celld loads a single module, so every runtime runs one bundled ES module,
-`celld/dist/index.js`, built by `make bundle` (esbuild, pinned in
-`celld/package.json`; unminified, names kept). `dist/` is a build output and is
-not committed; `celld/wrangler.jsonc` points `main` at it with `no_bundle`, so a
+`worker/dist/index.js`, built by `make bundle` (esbuild, pinned in
+`worker/package.json`; unminified, names kept). `dist/` is a build output and is
+not committed; `worker/wrangler.jsonc` points `main` at it with `no_bundle`, so a
 deploy builds the bundle first. The local runtime refuses to start on a missing
 bundle or one older than its sources.
 
@@ -2969,7 +2969,7 @@ conformance suite pins their behavior against the Worker.
 
 ### Atomicity contract
 
-The celld Worker serializes mutating events per cell and commits local
+The Worker serializes mutating events per cell and commits local
 multi-key transitions with one storage transaction or batch. Cross-cell invariants use the
 durable protocols specified in the celld section below; they are not one global
 transaction.
@@ -3097,7 +3097,7 @@ bytes").
 ### The conformance gate
 
 The conformance suite runs against the Worker under Miniflare on every
-`go test ./...`, and against a real celld node when `CELLD_TEST_ENDPOINT` names
+`go test ./...`, and against a real celld node when `WORKER_TEST_ENDPOINT` names
 one (CI runs that node against an object store, the production shape). The
 Worker code is the same in both; the second run pins celld itself.
 
@@ -3255,7 +3255,7 @@ There is no room-retention or full-room-delete interface. Rooms persist
 indefinitely. Creation-ledger entries are the only room records removed by
 elapsed time, because they are rate-limit state rather than user content.
 
-The celld adapter uses two cells:
+The Worker adapter uses two cells:
 
 - The **Room** cell owns one room's metadata, KV document, byte count, dense
   sequence, pending budget operation, recovery alarm, and hibernatable sockets.
@@ -3400,13 +3400,13 @@ and same-version/different-target coordinator calls.
 
 ---
 
-## Celld-backed metadata storage (production)
+## Worker-backed metadata storage (production)
 
-The production metadata adapter is a celld Worker reached over cluster-internal
+The production metadata adapter is a Worker reached over cluster-internal
 HTTP. Each named cell owns a private SQLite database, and celld fences ownership
 and durability through the fleet's object store. The public Go service remains
 the translation layer: it owns SSH/HTTP policy and calls service ports whose
-celld adapters translate to Worker requests.
+Worker adapters translate to Worker requests.
 
 ### Cell taxonomy
 
@@ -3585,15 +3585,15 @@ as well.
 One fleet bucket serves one Worker application. `hostthisd` serves all public
 content unless a deployment routes public hosts to the Worker's public surface
 (see "Public and internal hosts"). The Worker's internal routes accept an optional shared token: when the Worker
-has `HOSTTHIS_CELLD_TOKEN` set, every route except `/healthz` (the cell
+has `HOSTTHIS_WORKER_TOKEN` set, every route except `/healthz` (the cell
 routes, `/blob`, and the room join) requires `Authorization: Bearer <token>`
 and answers 401 without it, compared in constant time. `hostthisd` sends the
-header when its own `HOSTTHIS_CELLD_TOKEN` is set. A deployment whose Worker is
+header when its own `HOSTTHIS_WORKER_TOKEN` is set. A deployment whose Worker is
 reachable only inside its cluster may leave both unset and rely on
 NetworkPolicy; a Worker reachable across the internet sets both, and a Worker
 with a public apex (below) must set the token. Worker health and runtime health are
 separate: `/healthz` checks the hostthis Worker, while
-`/.well-known/celld/health` is the node lifecycle probe.
+`/.well-known/worker/health` is the node lifecycle probe.
 
 ### Public and internal hosts
 
@@ -3614,7 +3614,7 @@ each request is classified in this order:
    included. Nothing a public request carries reaches the internal router or
    the payload bucket, and it reaches a cell only as values the public router
    parsed (below).
-2. **No token, no internal router.** With `HOSTTHIS_CELLD_TOKEN` unset or
+2. **No token, no internal router.** With `HOSTTHIS_WORKER_TOKEN` unset or
    empty, every other request, `/healthz` included, answers 503: a Worker with
    a public surface never runs an open internal router.
 3. **Forwarded.** A request carrying `X-Hostthis-Forwarded-Host` and a valid
@@ -3716,7 +3716,7 @@ observability on the read surface").
 
 The bytes stream from `PAYLOADS` through a check of the at-rest magic and a
 zstd decoder (see "On-disk format"), never held whole: libzstd's decompressor
-compiled to WASM, vendored with its build in `celld/vendor/zstd`. It decodes
+compiled to WASM, vendored with its build in `worker/vendor/zstd`. It decodes
 only as the client reads, at most 128 KiB per step, refuses a frame whose
 window exceeds 8 MiB before allocating it, and verifies the frame checksum.
 Each isolate reuses up to four idle decoder instances; WASM memory never
@@ -4272,13 +4272,13 @@ file). Defaults in parens:
 --fresh-keys-window      / HOSTTHIS_FRESH_KEYS_WINDOW       sybil-gate rolling window               (24h)
 
 # Storage (metadata and blobs)
-                         / HOSTTHIS_CELLD_ENDPOINT          celld Worker base URL                  (required)
-                         / HOSTTHIS_CELLD_TOKEN             bearer token for Worker calls          (unset)
+                         / HOSTTHIS_WORKER_ENDPOINT          Worker base URL                  (required)
+                         / HOSTTHIS_WORKER_TOKEN             bearer token for Worker calls          (unset)
 
 # Limits
                          / HOSTTHIS_CREATE_ADMISSION_WIDTH  same-identity create admission width    (2)
-                         / HOSTTHIS_CELLD_PUT_BUDGET_BYTES  in-flight celld write bytes per process (16777216)
-                         / HOSTTHIS_CELLD_PUT_WAIT          max wait for celld write admission       (30s)
+                         / HOSTTHIS_WORKER_PUT_BUDGET_BYTES  in-flight Worker write bytes per process (16777216)
+                         / HOSTTHIS_WORKER_PUT_WAIT          max wait for Worker write admission      (30s)
                          / HOSTTHIS_UPLOAD_CONCURRENCY      concurrent uploads per process          (8)
                          / HOSTTHIS_UPLOAD_WAIT             max wait for an upload slot              (30s)
 
@@ -4292,12 +4292,12 @@ The runtime container reads the same env vars. The operator supplies
 a docker-compose (or equivalent) file out of band; this repo ships no
 sample production compose.
 
-The celld Worker reads its own variables (wrangler `vars` and secrets, or the
+The Worker reads its own variables (wrangler `vars` and secrets, or the
 runtime's equivalent), separate from `hostthisd`'s:
 
 ```
 HOSTTHIS_APEX_DOMAIN   public apex; turns on the public/internal host split     (unset: off)
-HOSTTHIS_CELLD_TOKEN   bearer token for the internal routes; required with an apex   (unset)
+HOSTTHIS_WORKER_TOKEN   bearer token for the internal routes; required with an apex   (unset)
 HOSTTHIS_URL_MODE      path also serves /p/<slug> on the apex host (dev only)   (subdomain)
 ASSETS                 static assets binding for /_hostthis/; absent serves them from PAYLOADS
 HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      (0)
@@ -4306,7 +4306,7 @@ HOSTTHIS_BLOB_CACHE_MAX_BYTES  largest decoded payload cached; 0 is off         
 ```
 
 See "Public and internal hosts". A deployment runs the bundled Worker,
-`celld/dist/index.js`: run `make bundle` before `celld deploy` or
+`worker/dist/index.js`: run `make bundle` before `celld deploy` or
 `wrangler deploy`.
 
 ### Process shutdown

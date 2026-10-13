@@ -59,7 +59,7 @@ type CompressedBlobStore struct {
 }
 
 // InnerBlobStore is the raw object store under the at-rest encoding. Known
-// lengths let celld send a Content-Length instead of a chunked body.
+// lengths let the Worker send a Content-Length instead of a chunked body.
 type InnerBlobStore interface {
 	Put(key string, r io.Reader, size int64) error
 	GetReader(key string) (io.ReadCloser, int64, error)

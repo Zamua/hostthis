@@ -42,7 +42,7 @@ content on the apex origin, which the SPEC says never happens (see 8, Q6).
 
 One head read decides a request: `PasteRepo.Get` calls `GET /paste/get?slug=`,
 which returns the whole row: served manifest, owner identity, name, generation
-(`internal/celld/pasterepo.go`). On not-found the router calls `SiteRepo.Get`,
+(`internal/worker/pasterepo.go`). On not-found the router calls `SiteRepo.Get`,
 the same call again. Bytes come from `GET /blob/<key>` (the Worker's stateless
 R2 route) through `CompressedBlobStore.Read`, which checks the `HZ\0\x01` magic
 and zstd-decodes (`internal/storage/blob_compressed.go`).
@@ -109,7 +109,7 @@ are SSH verbs that change what the head serves. Nothing version-specific moves.
 ### 1.5 Rooms HTTP and push
 
 `internal/http/rooms.go`, `rooms_push.go`, `internal/service/rooms.go`,
-`roompush.go`, `internal/celld/roomrepo.go`, `roompush.go`. Policy held in Go:
+`roompush.go`, `internal/worker/roomrepo.go`, `roompush.go`. Policy held in Go:
 
 - `Cache-Control: no-store` on every response under `/api/rooms`.
 - Room id is a UUIDv4 (400 if malformed); keys 1 to 256 bytes, `ws`, `push`
@@ -141,7 +141,7 @@ Worker calls per request today:
 
 ### 1.6 Room WebSocket
 
-`internal/http/ws.go`, `internal/celld/roomproxy.go`,
+`internal/http/ws.go`, `internal/worker/roomproxy.go`,
 `internal/roomwire/roomwire.go`:
 
 - Before the 101: app exists (404), room exists (404), per-process admission
@@ -194,7 +194,7 @@ return internalRouter(request)              # today's router, unchanged
 - Every host under the apex is public, including non-slugs (`www.<apex>`,
   `a.b.<apex>`), which get a 404 from the public router. No public hostname
   can reach a cell op, `/blob` or `/__cell`, whatever the path.
-- With `HOSTTHIS_APEX_DOMAIN` set and `HOSTTHIS_CELLD_TOKEN` unset, the
+- With `HOSTTHIS_APEX_DOMAIN` set and `HOSTTHIS_WORKER_TOKEN` unset, the
   internal router answers 503 to everything: a public Worker never runs an
   open internal router.
 
@@ -249,7 +249,7 @@ the row the cell holds, and returns a small answer, never the row:
 action: html | shell | raw | file | kbshell | kbraw | files | notfound
 ```
 
-- The rules are pure functions in `celld/src/read.js` (no I/O), ported from
+- The rules are pure functions in `worker/src/read.js` (no I/O), ported from
   `domain.Manifest.Lookup`, `File`, `LookupWithSPAFallback`, `LooksLikeAsset`,
   `IsMarkdownPath` and the dispatch in `serveSlug`. Only the extension table's
   asset flag is needed: content types come from the stored entry.
@@ -461,7 +461,7 @@ GET /api/rooms/<uuid>/ws on <slug>.<apex>
     canary routes (phase 3) cover the edge.
 - Misrouting is safe: a public router rejects `x.staging.<apex>` as not a slug
   (404), so staging traffic can never read a production slug of the same name.
-- The repo keeps `celld/wrangler.jsonc` for celld and adds a Cloudflare
+- The repo keeps `worker/wrangler.jsonc` for celld and adds a Cloudflare
   template (vars, assets, routes) with placeholders; real values stay with the
   operator.
 
@@ -596,7 +596,7 @@ One bundle, three modes:
    hostname distinct from the internal endpoint's, such as `localhost` versus
    `127.0.0.1`). CI runs both until phase 5, then worker only. Built:
    `e2e/fixtures.ts`, with the runtime's public surface from
-   `HOSTTHIS_LOCALRT_*` (`celld/README.md`).
+   `HOSTTHIS_LOCALRT_*` (`worker/README.md`).
 5. **Live rooms.** `TestLiveRoom` pointed at the Worker's public WebSocket.
 6. **Edge checks** on real Cloudflare (phase 3): headers after the edge, no
    injected markup, WebSocket through the edge, time to reap a vanished client,
@@ -647,7 +647,7 @@ and smoke. Bake at least a week.
 **Phase 5, slim hostthisd.** Spec first. Delete
 the Go read handlers, shells and assets (`web/shells/` is then read only by the
 Worker build), rooms HTTP, push and WebSocket handlers,
-`internal/celld/roomproxy.go`, `internal/roomwire`, the rooms services and
+`internal/worker/roomproxy.go`, `internal/roomwire`, the rooms services and
 repos only HTTP used, and `/p/<slug>` serving on the apex in subdomain mode.
 Keep a small reverse proxy implementing forwarded mode for deployments that do
 not expose the Worker. The `CachePurger` port stays: it invalidates the
@@ -760,7 +760,7 @@ Decisions:
 - "Real-time room relay": "Cell-owned fan-out", "Lifecycle and bounds".
 - "Limits": "Reads are constant-memory".
 - "Blob storage backends": "On-disk format" (the Worker decodes for reads).
-- "Celld-backed metadata storage": "Blob and operational boundaries"
+- "Worker-backed metadata storage": "Blob and operational boundaries"
   (hostthisd is no longer the only public surface).
 - "Edge caching": the Worker response cache, hostname purge, `no-cache` for browsers, weak ETag
   comparison.

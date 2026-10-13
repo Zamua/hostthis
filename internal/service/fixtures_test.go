@@ -14,16 +14,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
-	"github.com/Zamua/hostthis/internal/celldtest"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
+	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 // fixedNow is the clock every real-stack fixture injects.
 var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
-// realBlobs is the production blob stack (compressed over celld) on the test's
+// realBlobs is the production blob stack (compressed over the Worker) on the test's
 // local runtime namespace.
 func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 	t.Helper()
@@ -35,7 +35,7 @@ func realBlobs(t *testing.T) *storage.CompressedBlobStore {
 // tests that inspect what the store holds.
 func realBlobsAt(t *testing.T) (*storage.CompressedBlobStore, *keyLedger) {
 	t.Helper()
-	raw, err := storage.NewCelldBlobStore(celldtest.Endpoint(t), nil)
+	raw, err := storage.NewWorkerBlobStore(workertest.Endpoint(t), nil)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
@@ -45,14 +45,14 @@ func realBlobsAt(t *testing.T) (*storage.CompressedBlobStore, *keyLedger) {
 
 // newRepo is the test's metadata repo. Every call in one test addresses the
 // same cells, so pastes and sites share one slug space as in production.
-func newRepo(t *testing.T) *celld.PasteRepo {
+func newRepo(t *testing.T) *worker.PasteRepo {
 	t.Helper()
-	return celld.NewPasteRepo(celldtest.Endpoint(t), nil)
+	return worker.NewPasteRepo(workertest.Endpoint(t), nil)
 }
 
 // newStack wires the upload and manage services over real metadata and real
 // blobs: the same stack production runs, no mocks.
-func newStack(t *testing.T) (*Upload, *Manage, *celld.PasteRepo) {
+func newStack(t *testing.T) (*Upload, *Manage, *worker.PasteRepo) {
 	t.Helper()
 	blobs := realBlobs(t)
 	repo := newRepo(t)
@@ -188,9 +188,9 @@ func objectsUnder(t *testing.T, l *keyLedger) int {
 }
 
 // newRoomRepo is the room surface over the test's cells.
-func newRoomRepo(t *testing.T) *celld.RoomRepo {
+func newRoomRepo(t *testing.T) *worker.RoomRepo {
 	t.Helper()
-	rooms := celld.NewRoomRepo(celldtest.Endpoint(t), nil)
+	rooms := worker.NewRoomRepo(workertest.Endpoint(t), nil)
 	rooms.PushSubject = "https://paste.test"
 	return rooms
 }

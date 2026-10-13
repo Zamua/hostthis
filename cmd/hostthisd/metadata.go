@@ -1,5 +1,5 @@
-// The metadata plane: the celld adapters at HOSTTHIS_CELLD_ENDPOINT, for
-// example http://celld:8080 (docs/SPEC.md "Metadata storage backends").
+// The metadata plane: the worker adapters at HOSTTHIS_WORKER_ENDPOINT, for
+// example http://worker:8787 (docs/SPEC.md "Metadata storage backends").
 
 package main
 
@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 // metadataBundle is everything the rest of the binary needs from the metadata
@@ -50,42 +50,42 @@ type roomStore interface {
 	service.RoomPushRepo
 }
 
-// buildMetadata wires the celld adapters. apex names the deployment in the
+// buildMetadata wires the worker adapters. apex names the deployment in the
 // VAPID tokens the room cells sign.
 func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
-	base := envOr("HOSTTHIS_CELLD_ENDPOINT", "")
+	base := envOr("HOSTTHIS_WORKER_ENDPOINT", "")
 	if base == "" {
-		return nil, errors.New("HOSTTHIS_CELLD_ENDPOINT is required")
+		return nil, errors.New("HOSTTHIS_WORKER_ENDPOINT is required")
 	}
-	rt, err := celldTransport(base, http.DefaultTransport)
+	rt, err := workerTransport(base, http.DefaultTransport)
 	if err != nil {
 		return nil, err
 	}
 	// One client across every adapter, so connections to the fleet are pooled
 	// rather than each surface opening its own.
 	client := &http.Client{Timeout: 30 * time.Second, Transport: rt}
-	repo := celld.NewPasteRepo(base, client)
+	repo := worker.NewPasteRepo(base, client)
 	repo.Logger = logger
-	rooms := celld.NewRoomRepo(base, client)
+	rooms := worker.NewRoomRepo(base, client)
 	rooms.PushSubject = "https://" + apex
 
-	logger.Printf("metadata: celld at %s", base)
+	logger.Printf("metadata: worker at %s", base)
 	return &metadataBundle{
 		Repo:    repo,
-		KeyGate: celld.NewKeyGateRepo(base, client),
+		KeyGate: worker.NewKeyGateRepo(base, client),
 		Sites:   storage.NewSites(repo),
 		Rooms:   rooms,
 		// Every socket terminates at its Room cell, which owns broadcast order.
-		RoomRelay: celld.NewRoomProxy(base, client),
+		RoomRelay: worker.NewRoomProxy(base, client),
 	}, nil
 }
 
-// celldTransport is rt sending HOSTTHIS_CELLD_TOKEN, when set, to the Worker
+// workerTransport is rt sending HOSTTHIS_WORKER_TOKEN, when set, to the Worker
 // at base. Every client that calls the Worker is built over it.
-func celldTransport(base string, rt http.RoundTripper) (http.RoundTripper, error) {
-	authed, err := celld.Authorize(rt, base, envOr("HOSTTHIS_CELLD_TOKEN", ""))
+func workerTransport(base string, rt http.RoundTripper) (http.RoundTripper, error) {
+	authed, err := worker.Authorize(rt, base, envOr("HOSTTHIS_WORKER_TOKEN", ""))
 	if err != nil {
-		return nil, fmt.Errorf("HOSTTHIS_CELLD_TOKEN: %w", err)
+		return nil, fmt.Errorf("HOSTTHIS_WORKER_TOKEN: %w", err)
 	}
 	return authed, nil
 }

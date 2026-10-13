@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/celld"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/storage"
+	"github.com/Zamua/hostthis/internal/worker"
 )
 
 type generationSwapRepo struct {
-	*celld.PasteRepo
+	*worker.PasteRepo
 	swap func()
 }
 
@@ -47,7 +47,7 @@ func (r *generationSwapRepo) DeleteVersion(slug domain.Slug, generation string, 
 	return r.PasteRepo.DeleteVersion(slug, generation, version)
 }
 
-func seedGenerationPaste(t *testing.T, repo *celld.PasteRepo) domain.Paste {
+func seedGenerationPaste(t *testing.T, repo *worker.PasteRepo) domain.Paste {
 	t.Helper()
 	at := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	paste := domain.Paste{
@@ -85,7 +85,7 @@ func armGenerationReplacement(t *testing.T, repo *generationSwapRepo, old domain
 	return replacement
 }
 
-func assertReplacementUnchanged(t *testing.T, repo *celld.PasteRepo, want domain.Paste) {
+func assertReplacementUnchanged(t *testing.T, repo *worker.PasteRepo, want domain.Paste) {
 	t.Helper()
 	got, err := repo.Get(want.Slug)
 	if err != nil {
@@ -105,7 +105,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// seed prepares the old incarnation beyond the bare paste.
-		seed func(t *testing.T, inner *celld.PasteRepo, old domain.Paste)
+		seed func(t *testing.T, inner *worker.PasteRepo, old domain.Paste)
 		// mutate runs the verb under test as the old incarnation's owner.
 		mutate func(m *Manage, old domain.Paste) error
 	}{
@@ -117,7 +117,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 			_, err := m.Pin(old.Slug, old.Identity.String(), 1)
 			return err
 		}},
-		{"unpin", func(t *testing.T, inner *celld.PasteRepo, old domain.Paste) {
+		{"unpin", func(t *testing.T, inner *worker.PasteRepo, old domain.Paste) {
 			v1, err := inner.GetVersion(old.Slug, 1)
 			if err != nil {
 				t.Fatalf("get v1: %v", err)
@@ -128,7 +128,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 		}, func(m *Manage, old domain.Paste) error {
 			return m.Unpin(old.Slug, old.Identity.String())
 		}},
-		{"delete version", func(t *testing.T, inner *celld.PasteRepo, old domain.Paste) {
+		{"delete version", func(t *testing.T, inner *worker.PasteRepo, old domain.Paste) {
 			if _, err := inner.AppendVersionWithQuotaCheck(context.Background(), old.Slug, old.Generation,
 				domain.KindHTML, "old-v2", domain.Manifest{}, 4, 0, old.UpdatedAt.Add(time.Second)); err != nil {
 				t.Fatalf("append v2: %v", err)

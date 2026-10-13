@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-// E2E_READS=worker reads every paste from the celld Worker (see fixtures.ts).
+// E2E_READS=worker reads every paste from the Worker (see fixtures.ts).
 // That run keeps its own results and report, so it never clears the other's.
 const suffix = process.env.E2E_READS === 'worker' ? '-worker' : '';
 

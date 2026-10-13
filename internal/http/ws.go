@@ -18,7 +18,7 @@ import (
 const wsKey = "ws"
 
 // RoomRelay is the real-time surface the HTTP layer needs to stand up a
-// WebSocket connection for a room. internal/celld.RoomProxy satisfies it.
+// WebSocket connection for a room. internal/worker.RoomProxy satisfies it.
 // Optional: when nil, the /ws path 404s.
 type RoomRelay interface {
 	// Admit reserves a connection slot under the per-room and per-app caps.
