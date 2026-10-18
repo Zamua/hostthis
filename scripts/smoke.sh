@@ -109,6 +109,20 @@ mint() {
     return 1
   fi
   ok "$label → $MINT_URL"
+  await_ready "$MINT_URL"
+}
+
+# await_ready waits out the pending window: the URL is handed out before the
+# bytes land, and until then a GET serves the loading page (docs/SPEC.md "The
+# three states"). It gives up after ~15 s and lets the caller's check fail.
+await_ready() {
+  local i
+  for i in $(seq 30); do
+    case "$(curl -sS "$1" 2>/dev/null)" in
+      *"preparing your paste"*) sleep 0.5 ;;
+      *) return 0 ;;
+    esac
+  done
 }
 
 # smoke_delete removes one paste, best-effort but never silently: cleanup must
