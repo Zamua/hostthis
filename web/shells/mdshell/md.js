@@ -9,8 +9,8 @@
   var content = document.getElementById("content");
 
   // Fenced blocks are rendered by the same libraries the standalone kinds use,
-  // fetched ONLY once a fence of that language is known to be present. Mermaid
-  // alone is ~3.4 MB, and most documents contain neither kind of block.
+  // fetched ONLY once a fence of that language is known to be present: most
+  // documents contain no diagram.
   function loadScript(src) {
     return new Promise(function (resolve, reject) {
       var s = document.createElement("script");
@@ -29,9 +29,9 @@
     document.head.appendChild(l);
   }
 
-  function loadMermaid() {
-    if (window.mermaid) return Promise.resolve(window.mermaid);
-    return loadScript("/_hostthis/mermaid.min.js").then(function () { return window.mermaid; });
+  function loadPele() {
+    if (window.pele) return Promise.resolve(window.pele);
+    return loadScript("/_hostthis/pele.min.js").then(function () { return window.pele; });
   }
 
   // tintDiff colours a fenced diff line by line. textContent is read and
@@ -57,29 +57,24 @@
   }
 
   async function renderMermaidBlocks(blocks) {
-    var mermaid;
+    var pele;
     try {
-      mermaid = await loadMermaid();
+      pele = await loadPele();
     } catch (e) {
       blocks.forEach(function (b) { b.el.textContent = b.src; });
       return;
     }
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
-      // The source is untrusted and renders into this paste's own origin.
-      securityLevel: "strict",
-    });
-    for (var i = 0; i < blocks.length; i++) {
-      try {
-        var out = await mermaid.render("mmd-" + i, blocks[i].src);
-        blocks[i].el.innerHTML = out.svg;
-      } catch (e) {
+    blocks.forEach(function (b, i) {
+      // A distinct prefix per block keeps marker and gradient ids from
+      // colliding between diagrams on one page.
+      var diagram = pele.mount(b.el, b.src, { idPrefix: "mmd-" + i + "-", onError: function () {} });
+      if (diagram.error) {
         // A broken diagram keeps its source visible rather than vanishing.
-        blocks[i].el.textContent = blocks[i].src;
-        blocks[i].el.className = "mermaid-block mermaid-err";
+        diagram.destroy();
+        b.el.textContent = b.src;
+        b.el.className = "mermaid-block mermaid-err";
       }
-    }
+    });
   }
 
   // Heading anchors, added here because marked no longer emits ids: without

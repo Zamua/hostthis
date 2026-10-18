@@ -17,7 +17,7 @@
   },
   "shells": {
     "mdshell": {
-      "version": "mdshell-v7",
+      "version": "mdshell-v8",
       "csp": "shell",
       "assets": {
         "marked.min.js": "text/javascript; charset=utf-8",
@@ -40,11 +40,11 @@
       }
     },
     "mermaidshell": {
-      "version": "mermaidshell-v1",
+      "version": "mermaidshell-v2",
       "csp": "shell",
-      "note": "mdshell lazy-loads mermaid.min.js by name when a document has a mermaid fence.",
+      "note": "mdshell lazy-loads pele.min.js by name when a document has a mermaid fence.",
       "assets": {
-        "mermaid.min.js": "text/javascript; charset=utf-8",
+        "pele.min.js": "text/javascript; charset=utf-8",
         "mermaid.js": "text/javascript; charset=utf-8",
         "mermaid.css": "text/css; charset=utf-8"
       }
