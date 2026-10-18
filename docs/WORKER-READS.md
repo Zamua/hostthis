@@ -92,8 +92,8 @@ are SSH verbs that change what the head serves. Nothing version-specific moves.
   both the cache buster and the shell ETag.
 - CSP: `shellCSP`; pdf and data use `wasmWorkerCSP` (`'wasm-unsafe-eval'`,
   `worker-src 'self' blob:`).
-- 41 MB in total. `datashell/duckdb-eh.wasm` alone is 35.7 MB (lazy-loaded by
-  the SQL console); `mermaid.min.js` is 3.6 MB.
+- 38 MB in total. `datashell/duckdb-eh.wasm` alone is 35.7 MB (lazy-loaded by
+  the SQL console); `pele.min.js` is 0.7 MB.
 
 ### 1.4 Caching and the CDN
 

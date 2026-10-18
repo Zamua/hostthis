@@ -78,9 +78,14 @@ library and no lazy load at all.
 A **mermaid** paste is a [Mermaid](https://mermaid.js.org) diagram source
 (`graph`, `sequenceDiagram`, `flowchart`, ...). Same shape again: a fixed
 shell fetches the raw source via `?raw` and renders it to SVG in the
-browser. Mermaid also renders **inside markdown pastes**: a fenced
-` ```mermaid ` block in any markdown paste becomes a diagram. The renderer
-is ~3.5 MB, so the markdown shell loads it **only when the fetched source
+browser, with [Pele](https://github.com/obsidianmd/pele), which reads
+Mermaid syntax and draws in its own layout and visual style. Pele escapes
+diagram text, drops script links and click callbacks, and filters styles;
+a source it cannot parse shows its parse error instead of a diagram, with
+no second renderer to fall back to. Mermaid also renders **inside markdown
+pastes**: a fenced ` ```mermaid ` block in any markdown paste becomes a
+diagram, and a block that fails to parse shows its source. The renderer is
+~0.7 MB, so the markdown shell loads it **only when the fetched source
 actually contains a mermaid fence** - a prose paste never pays for it.
 
 A **pdf** paste renders through [pdf.js](https://mozilla.github.io/pdf.js/)
