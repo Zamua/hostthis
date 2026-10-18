@@ -266,8 +266,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/css; charset=utf-8"
     },
-    "size": 4853,
-    "sha256": "f225f682a5d0a35ed93d43abf9f3da2d996187dc1be4352acfb5b921006b2a94"
+    "size": 5312,
+    "sha256": "e51ce71bfb1d98578f2e84ef3b3fa426db0ba1e2626f43985e5f25303f8959fe"
   },
   "asset/md.js": {
     "status": 200,
@@ -275,8 +275,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 5699,
-    "sha256": "7ef741eb8b076118094c06454d89d9c3af847f5c05c7668230e3dd0326efa857"
+    "size": 5488,
+    "sha256": "1ed73926ed6f0e3f2859fed7de9b4d38b7f8fe6abde75970171d4ee87fb4e04b"
   },
   "asset/mdshell/md.js": {
     "status": 200,
@@ -284,8 +284,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 5699,
-    "sha256": "7ef741eb8b076118094c06454d89d9c3af847f5c05c7668230e3dd0326efa857"
+    "size": 5488,
+    "sha256": "1ed73926ed6f0e3f2859fed7de9b4d38b7f8fe6abde75970171d4ee87fb4e04b"
   },
   "asset/mermaid.css": {
     "status": 200,
@@ -293,8 +293,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/css; charset=utf-8"
     },
-    "size": 1105,
-    "sha256": "0f11f7f23f91f0090ec7d1b1d86feca8787aadf8439ebc14e339599a3d3cafbf"
+    "size": 1564,
+    "sha256": "ff5d720837c57cc481bcf4a7732e69532bc16ee2190577dfcdc3e10ef0e9adf9"
   },
   "asset/mermaid.js": {
     "status": 200,
@@ -302,17 +302,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 1305,
-    "sha256": "64410e77531184a0ac84e8441b20ded7180ac38755bebc9f3356a2d0583e5c98"
-  },
-  "asset/mermaid.min.js": {
-    "status": 200,
-    "header": {
-      "Cache-Control": "public, max-age=31536000, immutable",
-      "Content-Type": "text/javascript; charset=utf-8"
-    },
-    "size": 3565102,
-    "sha256": "74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b"
+    "size": 1357,
+    "sha256": "7882dc5ff29dc10895488c1c9b83ad6f0d565addf6bb82b27b3347b7343a537d"
   },
   "asset/pdf.css": {
     "status": 200,
@@ -349,6 +340,15 @@
     },
     "size": 1375838,
     "sha256": "1baa1844c89c80a5b2797c916e75ab29254be46d8e9cb53cb6364d7aad84be36"
+  },
+  "asset/pele.min.js": {
+    "status": 200,
+    "header": {
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Content-Type": "text/javascript; charset=utf-8"
+    },
+    "size": 678273,
+    "sha256": "c028a0077dcd32074cbb84c675f846b09d8c1b15ae022bb823818d4caf9d5ded"
   },
   "asset/purify.min.js": {
     "status": 200,
@@ -784,14 +784,14 @@
       "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
-      "Etag": "\"mdshell-v7\"",
+      "Etag": "\"mdshell-v8\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
     "size": 506,
-    "sha256": "80a7a2ba1a7b55b45d3ed4dff3de3b138353f9288945102437812b0e22e768f0"
+    "sha256": "4c76f8671030a71e6958141c630a7dbe30a9777f43a2c311355f44d8acb25f28"
   },
   "shell/mermaid": {
     "status": 200,
@@ -799,14 +799,14 @@
       "Cache-Control": "public, no-cache",
       "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: http: https:; media-src 'self' data: http: https:; font-src 'self' data: https:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
       "Content-Type": "text/html; charset=utf-8",
-      "Etag": "\"mermaidshell-v1\"",
+      "Etag": "\"mermaidshell-v2\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
-    "size": 515,
-    "sha256": "c0130e19f9c0ca949c40c8df6db06f202c20f723cf12055e65951eed227c16fa"
+    "size": 512,
+    "sha256": "1f50915dd3af7cb2679b4c757f3e95d72870a430811cae2ee15c66600189af3d"
   },
   "shell/pdf": {
     "status": 200,

@@ -1,4 +1,4 @@
-// Renders a bare Mermaid paste. The source arrives as raw bytes; mermaid turns
+// Renders a bare Mermaid paste. The source arrives as raw bytes; pele turns
 // it into SVG in the browser, so the server never renders a diagram.
 (async function () {
   "use strict";
@@ -18,17 +18,15 @@
     if (!resp.ok) return fail("Failed to load paste.");
     var src = await resp.text();
 
-    var dark = matchMedia("(prefers-color-scheme: dark)").matches;
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: dark ? "dark" : "default",
-      // Mermaid's own sanitizer. The source is untrusted, and the diagram is
-      // rendered into this same origin.
-      securityLevel: "strict",
-    });
-
-    var out = await mermaid.render("diagram", src);
-    content.innerHTML = out.svg;
+    content.innerHTML = "";
+    // pele escapes diagram text and filters links and styles itself. mount()
+    // measures text with the page's own font and fits the container width.
+    var diagram = pele.mount(content, src, { idPrefix: "diagram-", onError: function () {} });
+    if (diagram.error) {
+      var e = diagram.error;
+      diagram.destroy();
+      return fail("Diagram failed to render.\n\n" + (e && e.message ? e.message : String(e)));
+    }
 
     var title = src.split("\n").find(function (l) { return l.trim(); });
     if (title) document.title = title.trim().slice(0, 80);
