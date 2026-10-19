@@ -2,10 +2,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"strings"
 	"testing"
@@ -215,4 +217,63 @@ func TestHave(t *testing.T) {
 	if _, err := d.Have(r1.Site.Slug, "key:someone-else"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign have: %v, want not found", err)
 	}
+}
+
+// readCountingUnit counts reads through the blob unit.
+type readCountingUnit struct {
+	BlobUnit
+	stored, decoded int
+}
+
+func (u *readCountingUnit) ReadStored(ctx context.Context, key string) (io.ReadCloser, error) {
+	u.stored++
+	return u.BlobUnit.ReadStored(ctx, key)
+}
+
+func (u *readCountingUnit) Read(ctx context.Context, e domain.ManifestEntry) (io.ReadCloser, int64, error) {
+	u.decoded++
+	return u.BlobUnit.Read(ctx, e)
+}
+
+// Carrying packed files reads each base pack once and decodes nothing, so a
+// keep list costs no per-file round trip.
+func TestDeployToSlug_KeepListReadsEachPackOnce(t *testing.T) {
+	d, _, blobs := reuseStack(t)
+	owner := "key:packs"
+	files := map[string]string{"index.html": "<h1>one</h1>"}
+	keep := "base 1\n"
+	for i := range 40 {
+		p, body := fmt.Sprintf("assets/c%02d.js", i), fmt.Sprintf("console.log(%d)", i)
+		files[p] = body
+		keep += sha(body) + "  " + p + "\n"
+	}
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), owner)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	_, head1 := headOf(t, d, r1.Site.Slug, owner)
+	packs := map[string]bool{}
+	for p, e := range head1.Files {
+		if p != "index.html" {
+			packs[e.Key] = true
+		}
+	}
+
+	counting := &readCountingUnit{BlobUnit: d.Blob}
+	d.Blob = counting
+	arc := gzipTar(t, map[string]string{"index.html": "<h1>two</h1>", ".hostthis-keep": keep})
+	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(arc), owner); err != nil {
+		t.Fatalf("keep deploy: %v", err)
+	}
+	if counting.stored != len(packs) || counting.decoded != 0 {
+		t.Fatalf("read %d stored packs and decoded %d files, want %d and 0", counting.stored, counting.decoded, len(packs))
+	}
+	_, head2 := headOf(t, d, r1.Site.Slug, owner)
+	want := map[string]string{"index.html": "<h1>two</h1>"}
+	for p, b := range files {
+		if p != "index.html" {
+			want[p] = b
+		}
+	}
+	servesBytes(t, blobs, head2, want)
 }

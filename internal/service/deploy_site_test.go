@@ -623,6 +623,13 @@ func (p *countingPack) Append(r io.Reader) (int64, int64, error) {
 	return off, n + 1, err
 }
 
+func (p *countingPack) AppendStored(r io.Reader) (int64, int64, error) {
+	n, err := io.Copy(io.Discard, r)
+	off := p.n
+	p.n += n
+	return off, n, err
+}
+
 func (p *countingPack) Len() int64 { return p.n }
 
 func (p *countingPack) Commit(context.Context) error {
