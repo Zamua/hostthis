@@ -104,6 +104,11 @@ const (
 	// is a var and a const cannot reference one; MaxSiteBytesMatchesQuota pins
 	// the two equal.
 	MaxSiteBytes = 1 << 30 // 1 GiB, tracking UserQuotaBytes
+	// MaxSiteArchiveBytes caps the COMPRESSED archive one deploy reads. The
+	// uncompressed cap alone does not bound the read, since gzip members and
+	// deflate blocks that inflate to nothing can stream forever. The headroom
+	// covers gzip and tar framing around MaxSiteBytes of incompressible files.
+	MaxSiteArchiveBytes = MaxSiteBytes + 64<<20
 )
 
 // Errors the safe-untar surfaces. All abort the whole deploy: a

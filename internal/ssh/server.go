@@ -474,24 +474,27 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 	}
 	// The live session reader goes straight to the service layer's streaming
 	// pipeline; buffering the body here would peak memory at HardRawByteCap
-	// per concurrent upload.
-	limited := io.LimitReader(sess, int64(domain.HardRawByteCap)+1)
+	// per concurrent upload. The peek is non-destructive: the gzip magic
+	// decides site-vs-paste, and only a paste takes the paste input cap (a
+	// site archive is capped by the deploy service).
+	peeked := bufio.NewReaderSize(sess, 512)
+	isArchive := false
+	if s.Deploy != nil && args.Type == "" {
+		head, _ := peeked.Peek(2)
+		isArchive = domain.HasGzipMagic(head)
+	}
+	limited := io.LimitReader(peeked, int64(domain.HardRawByteCap)+1)
 
 	if args.Slug != "" {
 		// Update path.
 		slug, _ := domain.ParseSlug(args.Slug)
 
-		// A gzip-tar archive piped at an owned site slug re-deploys in place:
-		// the gzip magic decides site-vs-paste, the slug positional decides
-		// new-vs-update. The peek is non-destructive.
-		if s.Deploy != nil && args.Type == "" {
-			peeked := bufio.NewReaderSize(limited, 512)
-			if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
-				res, err := s.Deploy.DeployToSlug(slug, peeked, owner)
-				s.emitSite(sess, res, err)
-				return
-			}
-			limited = peeked
+		// A gzip-tar archive piped at an owned site slug re-deploys in place;
+		// the slug positional decides new-vs-update.
+		if isArchive {
+			res, err := s.Deploy.DeployToSlug(slug, peeked, owner)
+			s.emitSite(sess, res, err)
+			return
 		}
 
 		res, err := s.Manage.Update(slug, owner, limited, args.Type)
@@ -524,16 +527,13 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 
 	// Create path. A gzip magic prefix (with no explicit type hint) routes to
 	// the site deploy; everything else is a single-file paste.
-	peeked := bufio.NewReaderSize(limited, 512)
-	if s.Deploy != nil && args.Type == "" {
-		if head, _ := peeked.Peek(2); domain.HasGzipMagic(head) {
-			res, err := s.Deploy.Deploy(peeked, owner)
-			s.emitSite(sess, res, err)
-			return
-		}
+	if isArchive {
+		res, err := s.Deploy.Deploy(peeked, owner)
+		s.emitSite(sess, res, err)
+		return
 	}
 
-	res, err := s.Upload.Create(peeked, owner, args.Name, args.Type)
+	res, err := s.Upload.Create(limited, owner, args.Name, args.Type)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
@@ -1090,15 +1090,20 @@ STATIC SITES
 LIMITS
 
     {{quota}} per identity, counting post-compression bytes across all
-    your active pastes. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,
+    your active pastes. One paste: {{paste}} after compression. One site:
+    {{site}} unpacked. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,
     folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://{{apex}}/  (rooms, realtime + push API)`
 
 // helpText renders helpTextTemplate. apex must be non-empty.
 func helpText(apex string) string {
-	t := strings.ReplaceAll(helpTextTemplate, "{{apex}}", apex)
-	return strings.ReplaceAll(t, "{{quota}}", quotaSentence())
+	return strings.NewReplacer(
+		"{{apex}}", apex,
+		"{{quota}}", quotaSentence(),
+		"{{paste}}", fmt.Sprintf("%d MiB", domain.MaxPasteBytes>>20),
+		"{{site}}", fmt.Sprintf("%d GiB", domain.MaxSiteBytes>>30),
+	).Replace(helpTextTemplate)
 }
 
 // quotaSentence renders the per-identity cap for the help text's LIMITS block,

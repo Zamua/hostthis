@@ -465,7 +465,9 @@ With* options. Refusal behavior is pinned by
   INPUT regardless of how well it compresses. Anything that requires
   reading more than that is "too big to evaluate" and rejected with
   `upload too large to consider`. Generous enough that no legitimate
-  text payload ever hits this; tight enough to bound the read.
+  text payload ever hits this; tight enough to bound the read. It
+  binds single-file pastes only; a site archive has its own input cap
+  (see "Safe-untar").
 - **Format gate**: accept only supported content types. Server sniffs the
   first 512 bytes for content type via `http.DetectContentType` and
   cross-checks any explicit `--type` flag. Unsupported content is rejected
@@ -703,6 +705,13 @@ extractor enforces three guards while it STREAMS the archive (never
   (1 MiB), with a per-path length cap (1 KiB), so a "million tiny files"
   archive cannot exhaust file descriptors, inodes, or metadata-store
   space even though each file is small.
+- **Archive input cap.** The compressed archive read is capped at the
+  1 GiB max site size plus 64 MiB of framing headroom. The uncompressed
+  bound alone does not bound the read: gzip members and deflate blocks
+  that inflate to nothing can stream forever. Crossing it fails with
+  *site archive too large to consider*, never as a corrupt stream. A
+  site is NOT held to the 100 MiB raw-byte fast-fail for single-file
+  pastes; that cap applies only once the upload sniffs as a paste.
 
 Any guard tripping aborts the whole deploy: a half-extracted site is
 never persisted and never served (deploys are atomic - see Versioning
@@ -2291,7 +2300,8 @@ STATIC SITES
 LIMITS
 
     1 GiB per identity, counting post-compression bytes across all
-    your active pastes. HTML, Markdown, diff, or a gzip-tar site archive.
+    your active pastes. One paste: 10 MiB after compression. One site:
+    1 GiB unpacked. HTML, Markdown, diff, or a gzip-tar site archive.
 
     Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
 ```
