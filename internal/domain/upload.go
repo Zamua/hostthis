@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"strconv"
+	"strings"
 )
 
 // uploadsNamespace is the key root every upload's prefix lives under.
@@ -43,3 +44,16 @@ func UploadPrefix(id string) string { return uploadsNamespace + id + "/" }
 
 // UploadObjectKey is the key of the n-th file an upload stages.
 func UploadObjectKey(id string, n int) string { return UploadPrefix(id) + strconv.Itoa(n) }
+
+// UploadIDOfPrefix is the upload id an UploadPrefix names.
+func UploadIDOfPrefix(prefix string) (string, bool) {
+	id, ok := strings.CutPrefix(prefix, uploadsNamespace)
+	if !ok {
+		return "", false
+	}
+	id, ok = strings.CutSuffix(id, "/")
+	if !ok || !ValidUploadID(id) {
+		return "", false
+	}
+	return id, true
+}

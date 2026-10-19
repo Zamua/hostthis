@@ -820,7 +820,9 @@ test("Paste delete commits before an unavailable allocation release", async () =
   const deleted = await responseJSON(await h.paste().deleteVersion({
     opId: "delete-1", generation: "generation-1", ver: 1,
   }));
-  assert.deepStrictEqual(deleted, { status: 200, body: { deleted: true, totalSize: 4, upload: "" } });
+  assert.deepStrictEqual(deleted, {
+    status: 200, body: { deleted: true, totalSize: 4, upload: "", prefixes: [], keys: [], freed: 2 },
+  });
   assert.equal(storedVersions(h.pasteStorage)[0].deleted, true);
   assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
   assert.notEqual(h.pasteStorage.alarm, null);
@@ -1288,20 +1290,25 @@ test("Paste removal keeps its named uploads after every local commit crash", asy
   });
 });
 
-test("Paste version delete names the tombstoned upload on every path", async () => {
+test("Paste version delete names the tombstoned upload, and a replay the same", async () => {
   const h = artifactHarness();
   await appendUploads(h, [2, 3]);
   const body = { opId: "delete-2", generation: "generation-1", ver: 2 };
-  const expected = { status: 200, body: { deleted: true, totalSize: 3, upload: "up-2" } };
+  const expected = {
+    status: 200,
+    body: { deleted: true, totalSize: 3, upload: "up-2", prefixes: ["uploads/up-2/"], keys: [], freed: 1 },
+  };
 
   assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion(body)), expected);
   assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion(body)), expected);
+  // A new operation on a tombstone names nothing: a later version may share
+  // what the first delete kept.
   assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion({
     ...body, opId: "delete-2-again",
-  })), expected);
+  })), { status: 200, body: { deleted: true, totalSize: 3, upload: "", prefixes: [], keys: [], freed: 0 } });
   assert.deepStrictEqual(await responseJSON(await h.paste().deleteVersion({
     opId: "delete-1", generation: "generation-1", ver: 1,
-  })), { status: 200, body: { deleted: true, totalSize: 1, upload: "" } });
+  })), { status: 200, body: { deleted: true, totalSize: 1, upload: "", prefixes: [], keys: [], freed: 2 } });
 });
 
 function budgetSeed(a = 4, b = 4) {
@@ -1686,4 +1693,82 @@ test("Paste put re-creates a slug whose old history passed the 128-key delete li
   })).status, 204);
   assert.deepStrictEqual(storedVersions(h.pasteStorage).map((v) => v.ver), [1]);
   assert.equal(h.pasteStorage.data.get("manifest:100"), undefined);
+});
+
+// A site manifest as Go encodes it: path -> entry with its object span.
+function siteManifest(files) {
+  const Files = {};
+  for (const [path, [Key, CompressedSize, Offset, Length]] of Object.entries(files)) {
+    Files[path] = { Key, CompressedSize, ...(Length ? { Offset, Length } : {}) };
+  }
+  return { Files };
+}
+
+async function appendSite(h, { opId, uploadId, base, files }) {
+  const manifest = siteManifest(files);
+  const size = Object.values(files).reduce((sum, [, n]) => sum + n, 0);
+  return responseJSON(await h.paste().append({
+    ...appendBody(opId, 1000), kind: "site", size, uploadId, manifest,
+    ...(base !== undefined ? { base } : {}),
+  }));
+}
+
+function chargedSize(h) {
+  return h.identityStorage.data.get("entries").slugone1.chargedSize;
+}
+
+// docs/SPEC.md "Redeploy reuse": an append against the head shares its
+// standalone objects and charges only what it adds; a version delete frees
+// exactly what neither live neighbour holds, whole prefixes where it can.
+test("Paste redeploy reuse shares standalone objects and frees from neighbours", async () => {
+  const h = artifactHarness();
+  const audio = ["uploads/u2/0", 100];
+  const v2 = await appendSite(h, {
+    opId: "a2", uploadId: "u2",
+    files: { "a.m4a": audio, "x.js": ["uploads/u2/1", 10, 0, 10], "y.js": ["uploads/u2/1", 5, 10, 5] },
+  });
+  assert.equal(v2.body.totalSize, 2 + 115);
+
+  const packed = { "x.js": ["uploads/u3/0", 10, 0, 10], "y.js": ["uploads/u3/0", 5, 10, 5] };
+  assert.deepStrictEqual(await appendSite(h, { opId: "stale", uploadId: "u3", base: 1, files: { "a.m4a": audio, ...packed } }),
+    { status: 409, body: { error: "base-moved" } });
+  assert.deepStrictEqual(await appendSite(h, {
+    opId: "packshare", uploadId: "u3", base: 2, files: { "a.m4a": audio, "x.js": ["uploads/u2/1", 10, 0, 10] },
+  }), { status: 409, body: { error: "bad-reuse" } });
+
+  const v3 = await appendSite(h, { opId: "a3", uploadId: "u3", base: 2, files: { "a.m4a": audio, ...packed } });
+  assert.equal(v3.body.totalSize, 2 + 115 + 15);
+  assert.equal(chargedSize(h), 132);
+
+  const del2 = await responseJSON(await h.paste().deleteVersion({ opId: "d2", generation: "generation-1", ver: 2 }));
+  assert.deepStrictEqual(del2.body, {
+    deleted: true, totalSize: 117, upload: "", prefixes: [], keys: ["uploads/u2/1"], freed: 15,
+  });
+  assert.equal(h.pasteStorage.data.get("ver:3").charge, 115);
+
+  await appendSite(h, { opId: "a4", uploadId: "u4", base: 3, files: { "a.m4a": audio, "x.js": ["uploads/u4/0", 10, 0, 10] } });
+  const del3 = await responseJSON(await h.paste().deleteVersion({ opId: "d3", generation: "generation-1", ver: 3 }));
+  assert.deepStrictEqual(del3.body, {
+    deleted: true, totalSize: 112, upload: "u3", prefixes: ["uploads/u3/"], keys: [], freed: 15,
+  });
+
+  assert.equal((await h.paste().pin({ opId: "p1", generation: "generation-1", ver: 1 })).status, 200);
+  const del4 = await responseJSON(await h.paste().deleteVersion({ opId: "d4", generation: "generation-1", ver: 4 }));
+  assert.deepStrictEqual(del4.body, {
+    deleted: true, totalSize: 2, upload: "u4", prefixes: ["uploads/u2/", "uploads/u4/"], keys: [], freed: 110,
+  });
+  assert.equal(chargedSize(h), 2);
+
+  // A repeat under a new operation names nothing: those bytes are already
+  // accounted for.
+  const again = await responseJSON(await h.paste().deleteVersion({ opId: "d4-again", generation: "generation-1", ver: 4 }));
+  assert.deepStrictEqual(again.body, { deleted: true, totalSize: 2, upload: "", prefixes: [], keys: [], freed: 0 });
+});
+
+test("Paste head answers the latest live version and its manifest", async () => {
+  const h = artifactHarness();
+  await appendSite(h, { opId: "a2", uploadId: "u2", files: { "a.m4a": ["uploads/u2/0", 100] } });
+  const head = await responseJSON(await h.paste().head());
+  assert.equal(head.body.ver, 2);
+  assert.deepStrictEqual(head.body.manifest, siteManifest({ "a.m4a": ["uploads/u2/0", 100] }));
 });

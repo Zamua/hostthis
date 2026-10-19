@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
+	"os"
+	"slices"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/archive"
@@ -23,6 +26,9 @@ type SiteRepo interface {
 	// exist". ErrOverUserQuota on quota overflow.
 	ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, storedBytes int, userCap int64, now time.Time) error
 	Get(domain.Slug) (domain.Site, error)
+	// Head reads the latest live version of an owned site and its manifest;
+	// foreign and non-site slugs are domain.ErrNotFound.
+	Head(slug domain.Slug, owner domain.Identity) (int, domain.Manifest, error)
 	// Delete re-checks wantIdentity + wantCreatedAt inside its {slug}
 	// transaction, so a delete+re-mint of the slug by another identity in the
 	// window cannot destroy the new owner's paste. It answers with the upload id
@@ -72,6 +78,42 @@ type SiteDeployer interface {
 	DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error)
 	Delete(slug domain.Slug, owner string) error
 	ListSites(owner string) ([]domain.Site, error)
+	Have(slug domain.Slug, owner string) (Held, error)
+}
+
+// Held is a site head as a keep list: its version and each file's digest,
+// for the files a keep list can name.
+type Held struct {
+	Base  int
+	Files []HeldFile
+}
+
+// HeldFile is one keepable file of a site head.
+type HeldFile struct {
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+}
+
+// Have reads an owned site's head as a keep list (docs/SPEC.md "Redeploy
+// reuse"), sorted by path. A foreign or non-site slug is ErrNotFound.
+func (d *DeploySite) Have(slug domain.Slug, owner string) (Held, error) {
+	if owner == "" {
+		return Held{}, ErrEmptyOwner
+	}
+	ver, man, err := d.Sites.Head(slug, domain.Identity(owner))
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return Held{}, ErrNotFound
+		}
+		return Held{}, err
+	}
+	held := Held{Base: ver, Files: []HeldFile{}}
+	for _, p := range slices.Sorted(maps.Keys(man.Files)) {
+		if e := man.Files[p]; e.Digest != "" && domain.KeepablePath(p) {
+			held.Files = append(held.Files, HeldFile{Path: p, Digest: e.Digest})
+		}
+	}
+	return held, nil
 }
 
 var _ SiteDeployer = (*DeploySite)(nil)
@@ -116,7 +158,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 		return SiteResult{}, ErrEmptyOwner
 	}
 	now := d.Now().UTC()
-	man, uploadID, err := d.extract(body, owner, now)
+	man, uploadID, err := d.extract(body, owner, now, nil)
 	if err != nil {
 		return SiteResult{}, err
 	}
@@ -159,7 +201,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 // classifier; ErrUnsafeArchive / ErrTooManyFiles surface verbatim so the
 // SSH layer can message them precisely. A failed extract deletes whatever it
 // staged.
-func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domain.Manifest, string, error) {
+func (d *DeploySite) extract(body io.Reader, owner string, now time.Time, base *siteBase) (domain.Manifest, string, error) {
 	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
 	if err != nil {
 		return domain.Manifest{}, "", fmt.Errorf("sum paste bytes: %w", err)
@@ -171,14 +213,17 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
 
 	uploadID := domain.NewUploadID()
-	sink := &blobSink{blob: d.Blob, uploadID: uploadID}
+	sink := &blobSink{blob: d.Blob, uploadID: uploadID, base: base.standalone()}
 	defer sink.Close()
 	limit := d.MaxArchiveBytes
 	if limit <= 0 {
 		limit = domain.MaxSiteArchiveBytes
 	}
 	capped := &archiveCapReader{r: body, left: limit}
-	man, err := archive.Untar(capped, sink, budget)
+	man, keep, err := archive.UntarKeep(capped, sink, budget)
+	if err == nil && keep != nil {
+		err = d.applyKeepList(man, *keep, base, sink)
+	}
 	if err == nil {
 		err = sink.Flush()
 	}
@@ -190,6 +235,7 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 		err = ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
 		err = domain.ErrUnsupportedKind
+	case errors.Is(err, domain.ErrBadKeepList), errors.Is(err, domain.ErrBaseMoved):
 	case err != nil:
 		_, err = classifyCommitErr(err)
 	case len(man.Files) == 0:
@@ -286,12 +332,22 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		return SiteResult{}, ErrNotFound
 	}
 
-	man, uploadID, err := d.extract(body, owner, now)
+	baseVer, baseMan, err := d.Sites.Head(slug, domain.Identity(owner))
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return SiteResult{}, ErrNotFound
+		}
+		return SiteResult{}, fmt.Errorf("read site head: %w", err)
+	}
+	base := &siteBase{ver: baseVer, man: baseMan}
+
+	man, uploadID, err := d.extract(body, owner, now, base)
 	if err != nil {
 		return SiteResult{}, err
 	}
 
 	site := domain.Site{
+		Base:     baseVer,
 		Slug:     slug,
 		Identity: domain.Identity(owner),
 		// A redeploy re-decides the shape from its own manifest, so adding a
@@ -325,9 +381,12 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 type blobSink struct {
 	blob     BlobUnit
 	uploadID string
-	next     int
-	pack     domain.BlobPack
-	packKey  string
+	// base maps the digest of each standalone file of the version this deploy
+	// is computed against to its entry; a file matching one is not stored.
+	base    map[string]domain.ManifestEntry
+	next    int
+	pack    domain.BlobPack
+	packKey string
 }
 
 // siteExtractBudget is the unallocated owner quota available to the next
@@ -346,6 +405,9 @@ func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int
 	if domain.Packable(size) {
 		return s.storePacked(p, r)
 	}
+	if d, ok := r.(*domain.DigestReader); ok && len(s.base) > 0 {
+		return s.storeUnlessHeld(p, d)
+	}
 	key := s.nextKey()
 	// No buffer: the body streams through the compressor into the object store,
 	// so an in-flight file costs the compressor window and a copy buffer rather
@@ -353,6 +415,33 @@ func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int
 	// whole remaining allowance, so buffering would size peak memory to the
 	// QUOTA.
 	compressedSize, err := s.blob.StageEncoding(context.Background(), key, r)
+	if err != nil {
+		return domain.BlobRef{}, 0, storeErr(p, err)
+	}
+	return domain.BlobRef{Key: key}, compressedSize, nil
+}
+
+// storeUnlessHeld spills the file to disk while hashing it, then points at the
+// base's object when that holds the same bytes, and stores the spill
+// otherwise. Disk, not memory, is the buffer.
+func (s *blobSink) storeUnlessHeld(p string, r *domain.DigestReader) (domain.BlobRef, int, error) {
+	spill, err := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-file-*")
+	if err != nil {
+		return domain.BlobRef{}, 0, fmt.Errorf("create file spill: %w", err)
+	}
+	defer os.Remove(spill.Name()) //nolint:errcheck
+	defer spill.Close()           //nolint:errcheck
+	if _, err := io.Copy(spill, r); err != nil {
+		return domain.BlobRef{}, 0, storeErr(p, err)
+	}
+	if held, ok := s.base[r.Digest()]; ok {
+		return held.Ref(), held.CompressedSize, nil
+	}
+	if _, err := spill.Seek(0, io.SeekStart); err != nil {
+		return domain.BlobRef{}, 0, fmt.Errorf("rewind file spill: %w", err)
+	}
+	key := s.nextKey()
+	compressedSize, err := s.blob.StageEncoding(context.Background(), key, spill)
 	if err != nil {
 		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
@@ -402,6 +491,64 @@ func (s *blobSink) Close() {
 		_ = s.pack.Close()
 		s.pack = nil
 	}
+}
+
+// siteBase is the version a redeploy is computed against.
+type siteBase struct {
+	ver int
+	man domain.Manifest
+}
+
+// standalone indexes the base's unpacked files by digest. Packs are never
+// shared, so a packed file is not offered.
+func (b *siteBase) standalone() map[string]domain.ManifestEntry {
+	if b == nil {
+		return nil
+	}
+	out := map[string]domain.ManifestEntry{}
+	for _, e := range b.man.Files {
+		if e.Digest != "" && e.Key != "" && e.Length == 0 {
+			out[e.Digest] = e
+		}
+	}
+	return out
+}
+
+// applyKeepList carries each listed base file into man: a standalone file by
+// reference, a packed one copied into this deploy's pack. Any mismatch
+// refuses the whole deploy (docs/SPEC.md "Redeploy reuse").
+func (d *DeploySite) applyKeepList(man domain.Manifest, keep domain.KeepList, base *siteBase, sink *blobSink) error {
+	if base == nil {
+		return fmt.Errorf("%w: a new site has no base to keep from", domain.ErrBadKeepList)
+	}
+	if keep.Base != base.ver {
+		return domain.ErrBaseMoved
+	}
+	for _, p := range slices.Sorted(maps.Keys(keep.Paths)) {
+		if _, sent := man.Files[p]; sent {
+			return fmt.Errorf("%w: %s is both listed and sent", domain.ErrBadKeepList, p)
+		}
+		held, ok := base.man.Files[p]
+		if !ok || held.Digest == "" || held.Digest != keep.Paths[p] {
+			return fmt.Errorf("%w: %s does not match version %d", domain.ErrBadKeepList, p, base.ver)
+		}
+		if held.Length == 0 {
+			man.Add(p, held)
+			continue
+		}
+		rc, _, err := d.Blob.Read(context.Background(), held)
+		if err != nil {
+			return fmt.Errorf("read kept %q: %w", p, err)
+		}
+		ref, n, err := sink.storePacked(p, rc)
+		_ = rc.Close()
+		if err != nil {
+			return err
+		}
+		held.Key, held.Offset, held.Length, held.CompressedSize = ref.Key, ref.Offset, ref.Length, n
+		man.Add(p, held)
+	}
+	return nil
 }
 
 // storeErr keeps the untar's cap sentinel intact, so SafeUntar can tell a

@@ -33,7 +33,8 @@ type SiteBackingRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 	AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
-		uploadID string, m domain.Manifest, size int, userCap int64, now time.Time) (AppendResult, error)
+		uploadID string, m domain.Manifest, size int, userCap int64, now time.Time, base int) (AppendResult, error)
+	HeadManifest(domain.Slug) (int, domain.Manifest, error)
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error)
 }
 
@@ -120,9 +121,23 @@ func (a *Sites) ReplaceWithQuotaCheck(ctx context.Context, s domain.Site, stored
 	// The appended version carries the shape THIS deploy decided, so a redeploy
 	// that adds or drops a root index.html changes what the slug serves as.
 	_, err = a.repo.AppendManifestVersion(
-		ctx, s.Slug, existing.Generation, s.Kind, s.UploadID, s.Manifest, storedBytes, userCap, now,
+		ctx, s.Slug, existing.Generation, s.Kind, s.UploadID, s.Manifest, storedBytes, userCap, now, s.Base,
 	)
 	return err
+}
+
+// Head reads the latest live version of an owned directory and its manifest,
+// the base a redeploy reuses from. Foreign and non-directory slugs are
+// not-found.
+func (a *Sites) Head(slug domain.Slug, owner domain.Identity) (int, domain.Manifest, error) {
+	existing, err := a.repo.Get(slug)
+	if err != nil {
+		return 0, domain.Manifest{}, err
+	}
+	if !existing.Kind.IsDirectory() || existing.Identity != owner {
+		return 0, domain.Manifest{}, ErrNotFound
+	}
+	return a.repo.HeadManifest(slug)
 }
 
 func (a *Sites) Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error) {

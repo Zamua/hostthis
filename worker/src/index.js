@@ -1,7 +1,7 @@
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
-import { resolveRead } from "./read.js";
+import { manifestObjects, resolveRead } from "./read.js";
 import {
   PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
 } from "./rooms/policy.js";
@@ -72,6 +72,24 @@ async function loadVersions(storage) {
   const found = await Promise.all(
     Array.from({ length: maxVer }, (_, i) => storage.get(versionKey(i + 1))));
   return found.filter(Boolean);
+}
+
+function chargeOf(version) {
+  return version.charge ?? version.size ?? 0;
+}
+
+function latestLive(versions) {
+  return versions.reduce((latest, v) => !v.deleted && (!latest || v.ver > latest.ver) ? v : latest, null);
+}
+
+function uploadPrefix(uploadId) {
+  return `uploads/${uploadId}/`;
+}
+
+// The upload prefix an object key lives under, or "" for a key outside one.
+function prefixOf(key) {
+  const match = /^uploads\/[^/]+\//.exec(key);
+  return match ? match[0] : "";
 }
 
 async function loadManifest(storage, ver) {
@@ -2181,6 +2199,7 @@ const PASTE_OPS = {
   remove: mutation((self, body) => self.remove(body)),
   append: mutation((self, body) => self.append(body)),
   delversion: mutation((self, body) => self.deleteVersion(body)),
+  head: read((self) => self.head()),
   pin: mutation((self, body) => self.pin(body)),
   pushkey: mutation((self) => self.pushKey(), { body: false }),
   pushsign: mutation((self, body) => self.pushSign(body)),
@@ -2443,8 +2462,10 @@ export class Paste {
     return Response.json(receipt.body, { status: receipt.status });
   }
 
+  // A version written before reuse has no charge and shares nothing, so its
+  // size is what it occupies.
   liveCharge(versions) {
-    return versions.reduce((sum, version) => version.deleted ? sum : sum + (version.size ?? 0), 0);
+    return versions.reduce((sum, version) => version.deleted ? sum : sum + chargeOf(version), 0);
   }
 
   // Backoff bounds the commits a stuck operation costs.
@@ -2694,7 +2715,7 @@ export class Paste {
           ...rest,
           kind: "abandon",
           version: current.version + 1,
-          target: current.target - mutation.size,
+          target: current.target - chargeOf(mutation),
           latestVersion,
           attempts: 0,
         }],
@@ -2795,7 +2816,15 @@ export class Paste {
     }
     const versions = await loadVersions(this.state.storage);
     const nextVer = ((await this.state.storage.get("maxVer")) ?? 1) + 1;
-    const target = this.liveCharge(versions) + body.size;
+    let charge = body.size;
+    if (body.base !== undefined) {
+      const reuse = await this.reuseCharge(versions, body);
+      if (reuse.error) {
+        return Response.json({ error: reuse.error }, { status: 409 });
+      }
+      charge = reuse.charge;
+    }
+    const target = this.liveCharge(versions) + charge;
     const pending = {
       kind: "append",
       stage: "decide",
@@ -2812,6 +2841,7 @@ export class Paste {
         ver: nextVer,
         kind: body.kind,
         size: body.size,
+        ...(body.base !== undefined ? { charge } : {}),
         createdAt: body.now,
         deleted: false,
         manifest: body.manifest ?? null,
@@ -2837,6 +2867,42 @@ export class Paste {
       return Response.json({ error: "artifact-accounting-conflict" }, { status: 409 });
     }
     return Response.json({ error: "artifact-accounting-unavailable" }, { status: 502 });
+  }
+
+  // An append computed against base may point at base's standalone objects
+  // and charges only the objects base does not hold (docs/SPEC.md "Redeploy
+  // reuse"). The pending operation this append writes blocks every other
+  // mutation until it settles, so base is still the head when it publishes.
+  async reuseCharge(versions, body) {
+    const head = latestLive(versions);
+    if (!Number.isSafeInteger(body.base) || !head || head.ver !== body.base) {
+      return { error: "base-moved" };
+    }
+    const base = manifestObjects(await loadManifest(this.state.storage, head.ver));
+    const own = `uploads/${body.uploadId}/`;
+    let charge = 0;
+    for (const [key, object] of manifestObjects(body.manifest)) {
+      if (key.startsWith(own)) {
+        charge += object.size;
+        continue;
+      }
+      const shared = base.get(key);
+      if (!shared || shared.packed || object.packed) {
+        return { error: "bad-reuse" };
+      }
+    }
+    return { charge };
+  }
+
+  // The latest live version: the head a redeploy is computed against.
+  async head() {
+    const head = latestLive(await loadVersions(this.state.storage));
+    if (!head) {
+      return Response.json({ found: false });
+    }
+    return Response.json({
+      found: true, ver: head.ver, manifest: (await loadManifest(this.state.storage, head.ver)) ?? null,
+    });
   }
 
   // NEWEST FIRST, which is the order every reader wants and none should have to
@@ -2869,9 +2935,11 @@ export class Paste {
     if (!version) {
       return Response.json({ deleted: false, reason: "absent" });
     }
+    // Its bytes were named by the delete that tombstoned it; naming them again
+    // could delete objects a later version has since come to share.
     if (version.deleted) {
       return Response.json({
-        deleted: true, totalSize: this.liveCharge(versions), upload: version.uploadId ?? "",
+        deleted: true, totalSize: this.liveCharge(versions), upload: "", prefixes: [], keys: [], freed: 0,
       });
     }
     const live = versions.filter((candidate) => !candidate.deleted);
@@ -2881,6 +2949,8 @@ export class Paste {
       return Response.json({ error: "version-served" }, { status: 409 });
     }
 
+    const before = this.liveCharge(versions);
+    const freeing = await this.freedBy(versions, version);
     version.deleted = true;
     if (row.pinnedVersion === body.ver) {
       row.pinnedVersion = 0;
@@ -2889,7 +2959,16 @@ export class Paste {
     const target = this.liveCharge(versions);
     const receipt = {
       status: 200,
-      body: { deleted: true, totalSize: target, upload: version.uploadId ?? "" },
+      body: {
+        deleted: true,
+        totalSize: target,
+        // A whole-prefix delete of this version's upload, for a caller that
+        // reads only this field.
+        upload: freeing.prefixes.includes(uploadPrefix(version.uploadId)) ? version.uploadId : "",
+        prefixes: freeing.prefixes,
+        keys: freeing.keys,
+        freed: before - target,
+      },
     };
     const pending = {
       kind: "deleteVersion",
@@ -2907,6 +2986,7 @@ export class Paste {
       await splitLegacyVersions(tx);
       await tx.put(Object.fromEntries([
         [versionKey(version.ver), version],
+        ...(freeing.next ? [[versionKey(freeing.next.ver), freeing.next]] : []),
         ["row", row],
         [ARTIFACT_PENDING, pending],
         [this.receiptKey(body.generation, body.opId), receipt],
@@ -2915,6 +2995,44 @@ export class Paste {
     });
     await this.resumeArtifactPending();
     return this.receiptResponse(receipt);
+  }
+
+  // What deleting version frees, from its live neighbours alone: the live
+  // versions sharing an object are one unbroken run (docs/SPEC.md "Redeploy
+  // reuse"). The next live version's charge is recomputed against its new
+  // predecessor, in versions, and returned to be stored.
+  async freedBy(versions, version) {
+    const live = versions.filter((v) => !v.deleted).sort((a, b) => a.ver - b.ver);
+    const prev = live.filter((v) => v.ver < version.ver).at(-1);
+    const next = live.find((v) => v.ver > version.ver);
+    const objects = async (v) => v ? manifestObjects(await loadManifest(this.state.storage, v.ver)) : new Map();
+    const [mine, before, after] = [await objects(version), await objects(prev), await objects(next)];
+    const deleted = new Set(versions.filter((v) => v.deleted || v.ver === version.ver)
+      .map((v) => v.uploadId).filter(Boolean));
+    const held = (prefix) => [...before.keys(), ...after.keys()].some((key) => key.startsWith(prefix));
+    const freedKeys = [...mine].filter(([key]) => !before.has(key) && !after.has(key));
+    const candidates = new Set(freedKeys.map(([key]) => prefixOf(key)).filter(Boolean));
+    if (version.uploadId) {
+      candidates.add(uploadPrefix(version.uploadId));
+    }
+    const prefixes = [...candidates]
+      .filter((prefix) => deleted.has(prefix.slice("uploads/".length, -1)) && !held(prefix))
+      .sort();
+    const keys = freedKeys.map(([key]) => key)
+      .filter((key) => !prefixes.includes(prefixOf(key)))
+      .sort();
+    let changed = null;
+    if (next && (next.charge !== undefined || freedKeys.length < mine.size)) {
+      let charge = 0;
+      for (const [key, object] of after) {
+        if (!before.has(key)) {
+          charge += object.size;
+        }
+      }
+      next.charge = charge;
+      changed = next;
+    }
+    return { prefixes, keys, next: changed };
   }
 
   // Roll the row onto the version the public URL serves: the pin when set,
@@ -3290,6 +3408,13 @@ async function handleBlob(request, env, url) {
   const key = blobKeyOf(url);
   if (!validBlobKey(key)) {
     return new Response("invalid key\n", { status: 400 });
+  }
+  if (request.method === "DELETE") {
+    if (!key.startsWith(BLOB_DELETE_PREFIX)) {
+      return new Response("invalid key\n", { status: 400 });
+    }
+    await env.PAYLOADS.delete(key);
+    return new Response(null, { status: 204 });
   }
   if (request.method === "PUT") {
     // A zero-length request has no body stream.
