@@ -1,6 +1,7 @@
 package service
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -449,6 +450,15 @@ func (s *blobSink) storeUnlessHeld(p string, r *domain.DigestReader) (domain.Blo
 }
 
 func (s *blobSink) storePacked(p string, r io.Reader) (domain.BlobRef, int, error) {
+	return s.intoPack(p, func(pack domain.BlobPack) (int64, int64, error) { return pack.Append(r) })
+}
+
+// appendStored adds an already-encoded member to the open pack.
+func (s *blobSink) appendStored(p string, r io.Reader) (domain.BlobRef, int, error) {
+	return s.intoPack(p, func(pack domain.BlobPack) (int64, int64, error) { return pack.AppendStored(r) })
+}
+
+func (s *blobSink) intoPack(p string, add func(domain.BlobPack) (int64, int64, error)) (domain.BlobRef, int, error) {
 	if s.pack == nil {
 		key := s.nextKey()
 		pack, err := s.blob.OpenPack(key)
@@ -457,7 +467,7 @@ func (s *blobSink) storePacked(p string, r io.Reader) (domain.BlobRef, int, erro
 		}
 		s.pack, s.packKey = pack, key
 	}
-	off, n, err := s.pack.Append(r)
+	off, n, err := add(s.pack)
 	if err != nil {
 		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
@@ -524,6 +534,7 @@ func (d *DeploySite) applyKeepList(man domain.Manifest, keep domain.KeepList, ba
 	if keep.Base != base.ver {
 		return domain.ErrBaseMoved
 	}
+	packed := map[string][]keptMember{}
 	for _, p := range slices.Sorted(maps.Keys(keep.Paths)) {
 		if _, sent := man.Files[p]; sent {
 			return fmt.Errorf("%w: %s is both listed and sent", domain.ErrBadKeepList, p)
@@ -536,17 +547,46 @@ func (d *DeploySite) applyKeepList(man domain.Manifest, keep domain.KeepList, ba
 			man.Add(p, held)
 			continue
 		}
-		rc, _, err := d.Blob.Read(context.Background(), held)
-		if err != nil {
-			return fmt.Errorf("read kept %q: %w", p, err)
+		packed[held.Key] = append(packed[held.Key], keptMember{path: p, entry: held})
+	}
+	for _, key := range slices.Sorted(maps.Keys(packed)) {
+		if err := d.copyMembers(key, packed[key], man, sink); err != nil {
+			return err
 		}
-		ref, n, err := sink.storePacked(p, rc)
-		_ = rc.Close()
+	}
+	return nil
+}
+
+type keptMember struct {
+	path  string
+	entry domain.ManifestEntry
+}
+
+// copyMembers reads one base pack once, in offset order, and moves each kept
+// member's stored bytes into this deploy's pack unchanged.
+func (d *DeploySite) copyMembers(key string, members []keptMember, man domain.Manifest, sink *blobSink) error {
+	slices.SortFunc(members, func(a, b keptMember) int { return cmp.Compare(a.entry.Offset, b.entry.Offset) })
+	rc, err := d.Blob.ReadStored(context.Background(), key)
+	if err != nil {
+		return fmt.Errorf("read kept pack %q: %w", key, err)
+	}
+	defer rc.Close() //nolint:errcheck
+	var pos int64
+	for _, m := range members {
+		if _, err := io.CopyN(io.Discard, rc, m.entry.Offset-pos); err != nil {
+			return fmt.Errorf("read kept pack %q: %w", key, err)
+		}
+		ref, n, err := sink.appendStored(m.path, io.LimitReader(rc, m.entry.Length))
 		if err != nil {
 			return err
 		}
-		held.Key, held.Offset, held.Length, held.CompressedSize = ref.Key, ref.Offset, ref.Length, n
-		man.Add(p, held)
+		if n != int(m.entry.Length) {
+			return fmt.Errorf("read kept pack %q: member at %d is short", key, m.entry.Offset)
+		}
+		pos = m.entry.Offset + m.entry.Length
+		e := m.entry
+		e.Key, e.Offset, e.Length, e.CompressedSize = ref.Key, ref.Offset, ref.Length, n
+		man.Add(m.path, e)
 	}
 	return nil
 }

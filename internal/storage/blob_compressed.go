@@ -182,6 +182,17 @@ func (p *blobPack) Append(r io.Reader) (int64, int64, error) {
 	return off, cw.n, nil
 }
 
+// AppendStored copies r, already one at-rest member, as the next member.
+func (p *blobPack) AppendStored(r io.Reader) (int64, int64, error) {
+	off := p.n
+	n, err := io.Copy(p.spill, r)
+	p.n += n
+	if err != nil {
+		return 0, 0, fmt.Errorf("pack member copy: %w", err)
+	}
+	return off, n, nil
+}
+
 // Len is the stored length so far.
 func (p *blobPack) Len() int64 { return p.n }
 
@@ -216,6 +227,12 @@ func (c *CompressedBlobStore) DeleteUpload(_ context.Context, uploadID string) e
 		return fmt.Errorf("blob: invalid upload id %q", uploadID)
 	}
 	return c.Inner.DeletePrefix(domain.UploadPrefix(uploadID))
+}
+
+// ReadStored streams an object's at-rest bytes, undecoded.
+func (c *CompressedBlobStore) ReadStored(_ context.Context, key string) (io.ReadCloser, error) {
+	rc, _, err := c.Inner.GetReader(key)
+	return rc, err
 }
 
 // DeleteObject deletes one object of an upload.

@@ -2794,7 +2794,9 @@ commit.
   line is `base <n>`; each further line is `<digest>  <path>`, the format
   `sha256sum` prints, with paths relative to the site root. Each listed path is
   carried from the base: a standalone file by reference, a packed one copied
-  server-side into this deploy's pack. The deploy is refused whole, with
+  server-side into this deploy's pack. The copy reads each base pack once and
+  moves its members' stored bytes unchanged, so carrying a file costs no
+  per-file read and no decode. The deploy is refused whole, with
   nothing published, when `base` is not the head, a listed path is absent from
   the base or has another digest, a path is listed twice or is also in the
   archive, or a line is malformed (including `sha256sum`'s escaped form, a
