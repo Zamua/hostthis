@@ -13,11 +13,8 @@ tar czf - <dir> | ssh -T hostthis.dev [<slug>]
 ssh hostthis.dev <command> [<args>]
 ```
 
-`-T` is for piped uploads only: it disables the ssh client's
-pseudo-terminal request so the client stops printing
-`Pseudo-terminal will not be allocated because stdin is not a terminal.`.
-It changes nothing on the server. Verb commands (`list`, `get`, …) pass
-a command argument and never trigger the warning.
+`-T` silences ssh's pseudo-terminal warning on piped uploads; it changes
+nothing on the server.
 
 ## DESCRIPTION
 
@@ -28,9 +25,7 @@ ssh pipe, no signup, no install. Identity is your ssh
 public key: anyone with a different key can read the URL but cannot
 update, rename, pin, or delete the paste.
 
-A Markdown paste renders in the browser; so does a diff (line-by-line
-or side-by-side, with syntax highlighting). Append `?raw` to any
-rendered paste's URL for the raw source.
+Append `?raw` to a rendered paste's URL for its raw source.
 
 ## COMMANDS
 
@@ -66,6 +61,10 @@ paste or site</dd>
 <dt><code>ssh hostthis.dev versions <em>slug</em> [-o json]</code></dt>
 <dd>list versions</dd>
 
+<dt><code>ssh hostthis.dev have <em>slug</em> [-o json]</code></dt>
+<dd>a site's latest version as a keep list: <code>base <em>n</em></code>, then
+<code><em>sha256</em>  <em>path</em></code> per file</dd>
+
 <dt><code>ssh hostthis.dev pin <em>slug</em> <em>ver</em></code></dt>
 <dd>stick the URL to <em>ver</em>; survives future updates</dd>
 
@@ -93,24 +92,17 @@ tar czf - site/ | ssh -T hostthis.dev            # deploy, get a URL
 tar czf - site/ | ssh -T hostthis.dev abc12345   # re-deploy in place
 ```
 
-Served at `<slug>.hostthis.dev/<path>`, with content type by file
-extension. A request that matches no file serves `index.html`, so
-single-page apps route client-side. A single leading directory is
-flattened, so `tar czf - site/` serves at the root. macOS sidecar files
-`._*`, `.DS_Store`, and `__MACOSX/` are skipped. Delete a site with
-`delete <slug>`, the same as a paste.
+Served at `<slug>.hostthis.dev/<path>`, content type by extension. A
+request that matches no file serves `index.html`, so single-page apps route
+client-side. A single leading directory is flattened. macOS sidecar files are
+skipped.
 
-An archive with no root `index.html` deploys as a **knowledge base**
-instead: the same URL browses the directory as a set of documents, with
-a sidebar that walks one folder level at a time, breadcrumbs, a table of
-contents, and search over paths, headings and text. Markdown renders in
-the browser; every other file appears beside it and links out to its own
-raw URL, exactly as a site's file does. Pipe a folder of notes the same
-way:
+A redeploy stores only files that changed. To skip sending unchanged ones,
+put their `have` lines in `.hostthis-keep` at the archive root and send the
+rest; the deploy is refused if the site moved past `base` meanwhile.
 
-```
-tar czf - docs/ | ssh -T hostthis.dev
-```
+An archive with no root `index.html` deploys as a **knowledge base**: the URL
+browses it as documents, with folders, a table of contents and search.
 
 ## ROOMS API
 
@@ -216,71 +208,28 @@ Read from the environment your ssh client forwards.
 ## EXAMPLES
 
 ```
-# upload, get a URL on stdout (and a QR code on stderr)
-cat index.html | ssh -T hostthis.dev
-
 # capture just the URL; 2>/dev/null drops the QR + narration
 url=$(cat index.html | ssh -T hostthis.dev 2>/dev/null)
 
 # upload with a label; --name and --type follow a literal --
 cat notes.md | ssh -T hostthis.dev -- --name "alpha notes"
 
-# update an existing paste; same URL, bumps to v2, v3, ...
-cat v2.html | ssh -T hostthis.dev abc12345
-
 # force content type when sniffing gets it wrong
 cat tricky.html | ssh -T hostthis.dev -- --type html
 
-# render a unified diff (auto-detected, or force it with --type diff)
-git diff | ssh -T hostthis.dev
-cat review.patch | ssh -T hostthis.dev -- --type diff
+# every format is auto-detected
+git diff | ssh -T hostthis.dev           # a diff
+cat cpu.folded | ssh -T hostthis.dev     # folded stacks -> flame graph
+cat app.ndjson | ssh -T hostthis.dev     # NDJSON logs -> log viewer
 
-# a mermaid diagram, a pdf, a csv, a json document - all auto-detected
-cat architecture.mmd | ssh -T hostthis.dev
-cat q3-review.pdf    | ssh -T hostthis.dev
-cat sales.csv        | ssh -T hostthis.dev
-cat events.json      | ssh -T hostthis.dev
+# link to a place inside a paste
+#   <url>#some-heading   <url>#page=3   <url>#row=42   <url>#F1L42-L48
 
-# a profile renders as an interactive flame graph. The accepted format is
-# folded stacks ("a;b;c 123" per line), which every profiler can emit:
-# perf via stackcollapse-perf.pl, Go pprof, py-spy --format raw, async-profiler
-cat cpu.folded | ssh -T hostthis.dev
-
-# NDJSON logs get levels, filtering and per-line links. This is the shape
-# Loki and OpenSearch both work in; their stream and bulk wrappers unwrap.
-cat app.ndjson | ssh -T hostthis.dev
-
-# anything else textual renders with a line gutter and citable ranges
-cat nginx.conf | ssh -T hostthis.dev
-
-# link to a place INSIDE a paste
-#   <url>#some-heading   markdown heading
-#   <url>#page=3         pdf page
-#   <url>#row=42         csv row
-#   <url>#F1L42-L48      diff lines of file 1 (shift-click, or tap, for a range)
-#   <url>#focus=main;serve  flame graph: zoom to that stack
-#   <url>#q=malloc          flame graph: highlight matching frames
-
-# read your content back
-ssh hostthis.dev get abc12345
-
-# re-show the link for an existing paste (URL only, or URL + QR)
-ssh hostthis.dev url abc12345
-ssh hostthis.dev qr abc12345
-
-# set the owner label from the words, or omit it to clear
-ssh hostthis.dev rename abc12345 design notes v2
-ssh hostthis.dev rename abc12345
-
-# stick the URL on v1 even though v3 is the latest
-ssh hostthis.dev pin abc12345 1
-ssh hostthis.dev unpin abc12345
-
-# free one version's bytes; leaves a tombstone row
-ssh hostthis.dev delete abc12345 2
-
-# deploy a static site
-tar czf - site/ | ssh -T hostthis.dev
+# redeploy a site, sending only what changed since the latest version
+ssh hostthis.dev have abc12345 > held
+(cd dist && find . -type f | sed 's|^\./||' | sort | xargs sha256sum) > local
+{ grep '^base ' held; grep -Fxf local held; } > dist/.hostthis-keep
+grep -vFxf held local | cut -c67- | tar czf - -C dist -T - .hostthis-keep | ssh -T hostthis.dev abc12345
 ```
 
 ## SEE ALSO

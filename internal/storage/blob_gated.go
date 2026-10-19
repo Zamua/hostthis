@@ -70,4 +70,8 @@ func (g *GatedBlobStore) DeletePrefix(prefix string) error {
 	return g.Inner.DeletePrefix(prefix)
 }
 
+func (g *GatedBlobStore) Delete(key string) error {
+	return g.Inner.Delete(key)
+}
+
 var _ InnerBlobStore = (*GatedBlobStore)(nil)

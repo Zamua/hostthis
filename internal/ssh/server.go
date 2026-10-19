@@ -427,6 +427,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbRename(sess, owner, argv[1:])
 	case "delete":
 		s.verbDelete(sess, owner, argv[1:])
+	case "have":
+		s.verbHave(sess, owner, argv[1:])
 	case "versions":
 		s.verbVersions(sess, owner, argv[1:])
 	case "pin":
@@ -812,6 +814,44 @@ func parseVersionArg(s string) (int, error) {
 
 // -- versions / pin ---------------------------------------------------------
 
+// verbHave prints a site's head as a keep list (docs/SPEC.md "Redeploy reuse").
+func (s *Server) verbHave(sess gossh.Session, owner string, argv []string) {
+	format, rest, err := parseOutputFormat(argv)
+	if err != nil {
+		emitUsageErr(sess, err)
+		return
+	}
+	slug, err := requireSlug(rest)
+	if err != nil {
+		emitUsageErr(sess, err)
+		return
+	}
+	if s.Deploy == nil {
+		emitServiceErr(sess, service.ErrNotFound)
+		return
+	}
+	held, err := s.Deploy.Have(slug, owner)
+	if err != nil {
+		emitServiceErr(sess, err)
+		return
+	}
+	if format == formatJSON {
+		if err := writeJSON(sess, haveView{Base: held.Base, Files: held.Files}); err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+		_ = sess.Exit(ExitOK)
+		return
+	}
+	w := bufio.NewWriter(sess)
+	_, _ = fmt.Fprintf(w, "base %d\n", held.Base)
+	for _, f := range held.Files {
+		_, _ = fmt.Fprintf(w, "%s  %s\n", f.Digest, f.Path)
+	}
+	_ = w.Flush()
+	_ = sess.Exit(ExitOK)
+}
+
 func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	format, rest, err := parseOutputFormat(argv)
 	if err != nil {
@@ -1086,6 +1126,9 @@ STATIC SITES
 
     tar czf - site/ | ssh -T {{apex}}        deploy a multi-file site
     tar czf - site/ | ssh -T {{apex}} <slug> re-deploy in place
+    ssh {{apex}} have <slug>                 keep list of the latest version; put
+                                             unchanged files' lines in .hostthis-keep
+                                             to skip sending them
 
 LIMITS
 
@@ -1143,6 +1186,8 @@ func emitServiceErr(sess gossh.Session, err error) {
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrUnsafeArchive.Error())
 	case errors.Is(err, domain.ErrTooManyFiles):
 		fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrTooManyFiles.Error())
+	case errors.Is(err, domain.ErrBaseMoved):
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrBaseMoved.Error())
 	case errors.Is(err, domain.ErrBusy):
 		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: another change to this paste is still settling; retry shortly")
 	case errors.Is(err, domain.ErrStoreBusy):

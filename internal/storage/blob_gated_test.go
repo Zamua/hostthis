@@ -246,3 +246,5 @@ func TestGatedBlobStore_RejectsBadConfig(t *testing.T) {
 		t.Fatal("wait 0 accepted")
 	}
 }
+
+func (p *gateProbe) Delete(string) error { return nil }

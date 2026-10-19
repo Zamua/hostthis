@@ -464,13 +464,17 @@ func conformDeletesNameTheirUploads(t *testing.T, r conformanceRepo) {
 		t.Fatalf("listed upload ids = %v, want %v", listed, want)
 	}
 
-	for attempt := range 2 {
-		if id, err := r.DeleteVersion(slug, generationOf(slug), 2); err != nil || id != "up-du-v2" {
-			t.Fatalf("DeleteVersion(2) attempt %d = (%q, %v), want up-du-v2", attempt+1, id, err)
-		}
+	// The delete names its upload; a second delete names nothing, since a
+	// later version may share what the first one kept.
+	if rel, err := r.DeleteVersion(slug, generationOf(slug), 2); err != nil || rel.Upload != "up-du-v2" ||
+		!slices.Equal(rel.Prefixes, []string{"uploads/up-du-v2/"}) {
+		t.Fatalf("DeleteVersion(2) = (%+v, %v), want up-du-v2's prefix", rel, err)
 	}
-	if id, err := r.DeleteVersion(slug, generationOf(slug), 1); err != nil || id != "" {
-		t.Fatalf("DeleteVersion of a legacy version = (%q, %v), want no upload", id, err)
+	if rel, err := r.DeleteVersion(slug, generationOf(slug), 2); err != nil || rel.Upload != "" || len(rel.Prefixes) != 0 {
+		t.Fatalf("DeleteVersion(2) again = (%+v, %v), want nothing named", rel, err)
+	}
+	if rel, err := r.DeleteVersion(slug, generationOf(slug), 1); err != nil || rel.Upload != "" || len(rel.Prefixes) != 0 {
+		t.Fatalf("DeleteVersion of a legacy version = (%+v, %v), want no upload", rel, err)
 	}
 	ids, err := r.Delete(slug, "key:du", fixedNow)
 	if err != nil {

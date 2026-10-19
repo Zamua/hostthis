@@ -79,6 +79,12 @@ func parseFormatValue(val string) (outputFormat, error) {
 	}
 }
 
+// haveView is `have -o json`.
+type haveView struct {
+	Base  int                `json:"base"`
+	Files []service.HeldFile `json:"files"`
+}
+
 // writeJSON marshals v as indented JSON followed by a newline. Used only in
 // json mode, where stdout carries the JSON value alone.
 func writeJSON(w io.Writer, v any) error {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
@@ -66,6 +67,8 @@ type InnerBlobStore interface {
 	// GetRange streams length bytes of key starting at offset.
 	GetRange(key string, offset, length int64) (io.ReadCloser, error)
 	DeletePrefix(prefix string) error
+	// Delete removes one object; a missing one succeeds.
+	Delete(key string) error
 }
 
 func NewCompressedBlobStore(inner InnerBlobStore) *CompressedBlobStore {
@@ -213,6 +216,14 @@ func (c *CompressedBlobStore) DeleteUpload(_ context.Context, uploadID string) e
 		return fmt.Errorf("blob: invalid upload id %q", uploadID)
 	}
 	return c.Inner.DeletePrefix(domain.UploadPrefix(uploadID))
+}
+
+// DeleteObject deletes one object of an upload.
+func (c *CompressedBlobStore) DeleteObject(_ context.Context, key string) error {
+	if !strings.HasPrefix(key, "uploads/") {
+		return fmt.Errorf("blob: object %q is not under an upload", key)
+	}
+	return c.Inner.Delete(key)
 }
 
 // errUnframed marks a stored object that lacks the at-rest magic. Every write

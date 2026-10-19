@@ -630,6 +630,9 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"\n" +
 	"    tar czf - site/ | ssh -T paste.test        deploy a multi-file site\n" +
 	"    tar czf - site/ | ssh -T paste.test <slug> re-deploy in place\n" +
+	"    ssh paste.test have <slug>                 keep list of the latest version; put\n" +
+	"                                             unchanged files' lines in .hostthis-keep\n" +
+	"                                             to skip sending them\n" +
 	"\n" +
 	"LIMITS\n" +
 	"\n" +

@@ -296,3 +296,11 @@ func TestUpload_Create_QuotaEnforcedSynchronously(t *testing.T) {
 	}
 	waitFinalize(t, done)
 }
+
+func (f *fakeBlobs) Delete(key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.deleted = append(f.deleted, key)
+	delete(f.stored, key)
+	return nil
+}

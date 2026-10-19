@@ -137,3 +137,5 @@ var (
 	_ http.ResponseWriter = (*discardResponseWriter)(nil)
 	_ BlobReader          = bufferingBlobReader{}
 )
+
+func (m memObjects) Delete(string) error { return nil }

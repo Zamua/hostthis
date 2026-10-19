@@ -423,3 +423,63 @@ func TestSite_ByteRanges(t *testing.T) {
 		})
 	}
 }
+
+// The have-plus-keep flow end to end: `have` prints a keep list, a redeploy
+// sending only the changed file plus the kept lines serves every file, and
+// the unchanged file keeps its content ETag.
+func TestSite_HaveAndKeepList(t *testing.T) {
+	s := startStack(t, withSites())
+	audio := strings.Repeat("lecture audio ", 200_000)
+	stdout, stderr, exit := s.run("", makeSiteArchive(t, map[string]string{
+		"index.html":   siteIndex,
+		"assets/a.m4a": audio,
+	}))
+	if exit != 0 {
+		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
+	}
+	base := strings.TrimSpace(stdout)
+	slug := extractSlug(stdout)
+	before, _ := httpGet(t, base+"/assets/a.m4a")
+
+	held, stderr, exit := s.run("have "+slug, nil)
+	if exit != 0 || !strings.HasPrefix(held, "base 1\n") || !strings.Contains(held, "  assets/a.m4a\n") {
+		t.Fatalf("have exit %d: %q (stderr %q)", exit, held, stderr)
+	}
+	var keep strings.Builder
+	for line := range strings.SplitSeq(held, "\n") {
+		if strings.HasPrefix(line, "base ") || strings.HasSuffix(line, "  assets/a.m4a") {
+			keep.WriteString(line + "\n")
+		}
+	}
+	if _, stderr, exit := s.run(slug, makeSiteArchive(t, map[string]string{
+		"index.html":     "<!doctype html><h1>two</h1>",
+		".hostthis-keep": keep.String(),
+	})); exit != 0 {
+		t.Fatalf("keep redeploy exit %d: stderr %q", exit, stderr)
+	}
+	after, body := httpGet(t, base+"/assets/a.m4a")
+	if body != audio || after.Header.Get("ETag") != before.Header.Get("ETag") ||
+		!strings.HasPrefix(after.Header.Get("ETag"), `"sha256-`) {
+		t.Fatalf("kept file: %d bytes, ETag %q (was %q)", len(body), after.Header.Get("ETag"), before.Header.Get("ETag"))
+	}
+	if _, body := httpGet(t, base); !strings.Contains(body, "two") {
+		t.Fatalf("index not updated: %q", body)
+	}
+
+	// A keep list against a version that is no longer the head is refused.
+	_, stderr, exit = s.run(slug, makeSiteArchive(t, map[string]string{"index.html": "x", ".hostthis-keep": keep.String()}))
+	if exit == 0 || !strings.Contains(stderr, "changed while this deploy ran") {
+		t.Fatalf("stale keep list: exit %d, stderr %q", exit, stderr)
+	}
+
+	var view struct {
+		Base  int `json:"base"`
+		Files []struct {
+			Path, Digest string
+		} `json:"files"`
+	}
+	out, _, _ := s.run("have "+slug+" -o json", nil)
+	if err := json.Unmarshal([]byte(out), &view); err != nil || view.Base != 2 || len(view.Files) != 2 {
+		t.Fatalf("have -o json = %q (%v)", out, err)
+	}
+}

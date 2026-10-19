@@ -114,6 +114,26 @@ func (w *world) buildCorpus(t *testing.T) {
 		w.slugs = append(w.slugs, slugCase{slug: w.upload(t, "", tarGz(t, files)), label: "site " + demo, targets: targets})
 	}
 
+	// A redeploy sharing a standalone object of its base, and carrying a packed
+	// file through a keep list (docs/SPEC.md "Redeploy reuse").
+	media := bytes.Repeat([]byte("frame "), 300_000)
+	shared := w.upload(t, "", tarGz(t, map[string][]byte{
+		"index.html": []byte("<h1>v1</h1>"), "media/a.bin": media, "app.js": []byte("console.log(1)"),
+	}))
+	held := w.ssh.run(t, "have "+shared, nil)
+	var keep bytes.Buffer
+	for line := range strings.SplitSeq(held, "\n") {
+		if strings.HasPrefix(line, "base ") || strings.HasSuffix(line, "  app.js") {
+			keep.WriteString(line + "\n")
+		}
+	}
+	w.ssh.run(t, shared, tarGz(t, map[string][]byte{
+		"index.html": []byte("<h1>v2</h1>"), "media/a.bin": media, ".hostthis-keep": keep.Bytes(),
+	}))
+	w.slugs = append(w.slugs, slugCase{slug: shared, label: "site sharing its base", targets: []string{
+		"/index.html", "/media/a.bin", "/app.js", "/.hostthis-keep",
+	}})
+
 	targets := []string{
 		"/?files=1", "/guide/intro.md?files=1", "/nope?files", "/guide", "/guide/", "/guide/deep",
 		"/guide/missing.md", "/missing.png", "/a/client/route", "/img/", "/_files/", "/files.json?files=1",

@@ -249,3 +249,5 @@ func TestRead_ContentLengthIsTheDecodedSize(t *testing.T) {
 		}
 	}
 }
+
+func (o rawObjects) Delete(string) error { return nil }

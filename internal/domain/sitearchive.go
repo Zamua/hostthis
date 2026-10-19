@@ -1,9 +1,14 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
+	"path"
+	"strings"
 )
 
 // Site-archive extraction rules, over format-neutral entries. No guard here is
@@ -56,6 +61,9 @@ type SiteExtractor struct {
 	// exact when an archive repeats one.
 	pathBytes int
 	man       Manifest
+	// keep is the archive's keep list, and keepRel where it was found.
+	keep    *KeepList
+	keepRel string
 }
 
 // NewSiteExtractor starts an extraction with quotaBudget bytes available. The
@@ -104,6 +112,9 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 		// OS-generated sidecar: never published, never counted toward a cap.
 		return nil
 	}
+	if path.Base(rel) == KeepListName {
+		return e.addKeepList(rel, body)
+	}
 	if len(rel) > MaxSitePathLen {
 		return fmt.Errorf("%w: path %q exceeds %d bytes", ErrTooManyFiles, rel, MaxSitePathLen)
 	}
@@ -114,7 +125,8 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 	}
 
 	capped := &cappedReader{r: body, running: &e.running, capBytes: e.capBytes}
-	ref, compressedSize, err := sink.Store(rel, capped, ent.Size)
+	hashed := &DigestReader{r: capped, h: sha256.New()}
+	ref, compressedSize, err := sink.Store(rel, hashed, ent.Size)
 	if err != nil {
 		if errors.Is(err, ErrArchiveTooLarge) {
 			return ErrArchiveTooLarge
@@ -140,6 +152,7 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 		DecodedSize:    int(capped.read),
 		CompressedSize: compressedSize,
 		ContentType:    ContentTypeForPath(rel),
+		Digest:         hashed.Digest(),
 	})
 
 	// Checked incrementally, so a flood of long names aborts before the map
@@ -154,6 +167,57 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 func (e *SiteExtractor) Finish() Manifest {
 	// Strip a shared top-level directory so `tar czf - site/` serves index.html
 	// at the root. No-op when files are at root or span multiple directories.
+	dir := e.man.commonLeadingDir()
 	e.man.StripCommonLeadingDir()
+	// The keep list counts only at the site root: the archive's, the stripped
+	// directory's, or the only directory of an archive that sends no files.
+	if e.keep != nil && e.keepRel != KeepListName && e.keepRel != dir+"/"+KeepListName &&
+		(len(e.man.Files) > 0 || strings.Count(e.keepRel, "/") != 1) {
+		e.keep = nil
+	}
 	return e.man
+}
+
+// KeepList is the archive's keep list at the site root, read after Finish.
+func (e *SiteExtractor) KeepList() (KeepList, bool) {
+	if e.keep == nil {
+		return KeepList{}, false
+	}
+	return *e.keep, true
+}
+
+// addKeepList reads a keep list one level deep at most; deeper ones are
+// ignored. Neither is stored or counted as a file.
+func (e *SiteExtractor) addKeepList(rel string, body io.Reader) error {
+	if strings.Count(rel, "/") > 1 {
+		return nil
+	}
+	if e.keep != nil {
+		return fmt.Errorf("%w: more than one %s", ErrBadKeepList, KeepListName)
+	}
+	kl, err := ParseKeepList(body)
+	if err != nil {
+		return err
+	}
+	e.keep, e.keepRel = &kl, rel
+	return nil
+}
+
+// DigestReader hashes what it passes on. A FileSink reads its Digest once the
+// file is consumed, which is how a sink can skip storing bytes it already
+// holds.
+type DigestReader struct {
+	r io.Reader
+	h hash.Hash
+}
+
+func (d *DigestReader) Read(p []byte) (int, error) {
+	n, err := d.r.Read(p)
+	d.h.Write(p[:n])
+	return n, err
+}
+
+// Digest is the hex SHA-256 of everything read so far.
+func (d *DigestReader) Digest() string {
+	return hex.EncodeToString(d.h.Sum(nil))
 }

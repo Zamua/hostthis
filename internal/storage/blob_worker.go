@@ -153,6 +153,19 @@ func (s *WorkerBlobStore) DeletePrefix(prefix string) error {
 	return expectNoContent(resp, "delete "+prefix)
 }
 
+// Delete asks the Worker to delete one object.
+func (s *WorkerBlobStore) Delete(key string) error {
+	req, err := http.NewRequest(http.MethodDelete, s.objectURL(key), nil)
+	if err != nil {
+		return fmt.Errorf("blob worker: delete %s: %w", key, err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("blob worker: delete %s: %w", key, err)
+	}
+	return expectNoContent(resp, "delete "+key)
+}
+
 func expectNoContent(resp *http.Response, op string) error {
 	if resp.StatusCode != http.StatusNoContent {
 		return statusError(resp, op)

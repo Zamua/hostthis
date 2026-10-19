@@ -4,7 +4,7 @@
     "Each vector runs request (path already percent-decoded; raw and files flags) against rows[row] as the Paste cell holds it; null is no row.",
     "extensions is the known-extension table's asset flag: a miss on an asset extension is a 404, any other a route.",
     "entry.decodedSize is the stored entry's DecodedSize, 0 for an entry without one; only a positive one is a response's Content-Length, whatever the entry's Size.",
-    "entry.offset and entry.length are present only for a pack member, whose ETag is its key, \"@\" and its offset."
+    "entry.offset and entry.length are present only for a pack member, whose ETag is its key, \"@\" and its offset. An entry with a digest has the ETag \"sha256-\" and its digest instead, wherever it is stored."
   ],
   "extensions": {
     ".html": false,
@@ -55,6 +55,10 @@
     ".dat": true
   },
   "rows": {
+    "siteDigest": {
+      "kind": "site", "status": "ready", "updatedAt": 1760158400431, "uploadId": "udig",
+      "manifest": {"Files": {"index.html": {"Key": "uploads/uold/0", "Size": 4, "DecodedSize": 4, "CompressedSize": 17, "ContentType": "text/html; charset=utf-8", "Kind": "", "Digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}}}
+    },
     "sitePackedFirst": {
       "kind": "site", "status": "ready", "updatedAt": 1760158400431, "uploadId": "upack",
       "manifest": {"Files": {"index.html": {"Key": "uploads/upack/0", "Length": 53, "Size": 40, "DecodedSize": 40, "CompressedSize": 53, "ContentType": "text/html; charset=utf-8", "Kind": ""}}}
@@ -1949,6 +1953,12 @@
       "row": "sitePackedFirst",
       "request": {"path": "/", "raw": false, "files": false},
       "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "upack", "entry": {"key": "uploads/upack/0", "offset": 0, "length": 53, "contentType": "text/html; charset=utf-8", "decodedSize": 40}}
+    },
+    {
+      "name": "an entry with a digest carries it",
+      "row": "siteDigest",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "udig", "entry": {"key": "uploads/uold/0", "contentType": "text/html; charset=utf-8", "decodedSize": 4, "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}}
     }
   ]
 }

@@ -29,4 +29,8 @@ type BlobUnit interface {
 	// DeleteUpload deletes every object under the upload's prefix. An upload
 	// with nothing stored succeeds.
 	DeleteUpload(ctx context.Context, uploadID string) error
+
+	// DeleteObject deletes one object under an upload prefix. A missing object
+	// succeeds.
+	DeleteObject(ctx context.Context, key string) error
 }

@@ -780,10 +780,9 @@ previous one stays live, so a directory pins, rolls back and rolls forward like
 any other artifact. An update has never thrown away what it replaced, and a
 directory is not an exception.
 
-It therefore charges like an update: every live version counts against quota.
-Each version's charge is the sum of every final manifest path's compressed size,
-and each version holds its own copy of every file, so the charge is also what
-it occupies. An owner reclaims bytes only by deleting versions they no longer
+It therefore charges like an update: every live version counts against quota,
+but an object shared by several live versions is charged once (see "Redeploy
+reuse"). An owner reclaims bytes only by deleting versions they no longer
 retain.
 
 **One artifact appears in one listing.** A directory is an artifact, so it is
@@ -795,8 +794,9 @@ show it twice and charge it twice - the same trap in two places.
 Each upload's files live under that upload's own prefix in the `BlobStore`
 (see "Blob storage backends → Object keys"). A manifest entry carries its
 object key, so resolving a file needs the manifest alone. A redeploy stages
-every file, changed or not, under a new prefix: no two uploads share bytes,
-and deleting one version's bytes cannot affect any other.
+every changed file under a new prefix, and a file unchanged from the version it
+was computed against points at that version's object instead (see "Redeploy
+reuse"). Shared objects never cross slugs.
 
 A read resolves the root through the manifest: its `/` entry, else
 `index.html`. The flat descriptor keeps kind and size and never names bytes, so
@@ -1080,10 +1080,11 @@ site-vs-paste, the slug decides new-vs-update.
   a refused redeploy deletes that prefix. The old served version remains
   visible until publication finishes, and a half-finished deploy never serves
   a partial site.
-- **Quota charges the appended version in full.** A redeploy retains every prior
-  live version, so it receives no replacement credit. Admission evaluates the
-  owner's existing all-live charge plus the final manifest's logical compressed
-  size. Deleting a version later releases exactly that version's charge.
+- **Quota charges what the appended version adds.** A redeploy retains every
+  prior live version, so it receives no replacement credit. Admission evaluates
+  the owner's existing all-live charge plus the new version's charge: its
+  stored bytes that the base does not already hold (see "Redeploy reuse").
+  Deleting a version later releases exactly the bytes it frees.
 - **Purges the slug.** Like a paste update, a re-deploy purges the slug's
   cached responses (see "Active invalidation"), so the next load of any file
   shows the new version.
@@ -2296,6 +2297,9 @@ STATIC SITES
 
     tar czf - site/ | ssh -T hostthis.dev        deploy a multi-file site
     tar czf - site/ | ssh -T hostthis.dev <slug> re-deploy in place
+    ssh hostthis.dev have <slug>                 keep list of the latest version; put
+                                             unchanged files' lines in .hostthis-keep
+                                             to skip sending them
 
 LIMITS
 
@@ -2737,9 +2741,10 @@ uploads/<upload-id>/<n>
 - Storage involves no hashing, and uploads share nothing: an identical
   re-upload writes new objects under new keys.
 
-A stored file's ETag is its object key, plus its offset when it lives in a
-pack (see "Edge caching"). An upload's objects never change, so that is a
-stable validator.
+A stored file's ETag is `sha256-<digest>` when its entry records a digest, so
+cache identity follows the bytes wherever they are stored; otherwise it is its
+object key, plus its offset when it lives in a pack (see "Edge caching"). An
+upload's objects never change, so both are stable validators.
 
 ### Site packs: small files share an object
 
@@ -2764,9 +2769,73 @@ A site of hundreds of small files costs a handful of writes, not one per file.
   packed file costs the same single read as an unpacked one.
 - **Staging spills to disk:** a pack is built in a temporary file and sent
   with its length, so memory does not grow with it.
-- **Deletes are unchanged:** packs live under the upload's prefix, so deleting
-  a version still deletes one prefix. No object is shared across uploads, so
-  nothing needs reference counting or a sweeper.
+- **Packs are never shared:** a pack belongs to the one version that wrote it,
+  even when a redeploy carries one of its files (see "Redeploy reuse").
+
+### Redeploy reuse
+
+A redeploy does not store or charge again a file the site already holds, and a
+client can skip sending it at all. There are no reference counts, sweepers, or
+background state: a delete still names exactly the bytes it frees, in its own
+commit.
+
+- **Digest.** Every site file entry records `Digest`, the hex SHA-256 of its
+  decoded bytes, computed as it streams in. Entries written before it have
+  none and are never reused.
+- **Base.** A redeploy is computed against the slug's head: its latest live
+  version, which is not the served one when the URL is pinned. A redeploy
+  reuses only from the base.
+- **Reuse.** A file whose digest matches a standalone (unpacked) file of the
+  base points at that object: nothing is stored, nothing new is charged. A file
+  matching only a packed base file is stored again in this deploy's own pack,
+  so a pack is never kept alive by another version.
+- **Keep list.** An archive may hold `.hostthis-keep` at its root (after the
+  shared top directory is stripped). It is never stored or served. Its first
+  line is `base <n>`; each further line is `<digest>  <path>`, the format
+  `sha256sum` prints, with paths relative to the site root. Each listed path is
+  carried from the base: a standalone file by reference, a packed one copied
+  server-side into this deploy's pack. The deploy is refused whole, with
+  nothing published, when `base` is not the head, a listed path is absent from
+  the base or has another digest, a path is listed twice or is also in the
+  archive, or a line is malformed (including `sha256sum`'s escaped form, a
+  leading `\`). A base file neither sent nor listed is dropped. `.hostthis-keep`
+  anywhere else is ignored and never stored.
+- **`have <slug>`** (owner only; not found otherwise, shaped as any not-found)
+  prints the head as a ready keep list: `base <n>`, then a `<digest>  <path>`
+  line for each file with a digest and a path free of backslashes and
+  newlines, sorted by path. `-o json` gives `{"base": n, "files": [{"path",
+  "digest"}]}`.
+
+**Why deletes stay local.** Reuse reaches only the head, and a key absent from
+the head is never picked up again. So the live versions referencing any object
+are one unbroken run, starting at the version that stored it. Deleting a
+version therefore needs only its live neighbours: the previous live version
+*p* and the next live version *n*.
+
+**The Paste cell decides both checks in its single transaction**, so nothing
+coordinates across machines:
+
+- An append that carries `base` is refused with `base-moved` (409) unless
+  `base` is the latest live version, and with `bad-reuse` (409) when any entry
+  names an object outside its own upload prefix that is not a standalone object
+  of the base. The service deletes its prefix and answers *the site changed
+  while this deploy ran; nothing was saved, retry* (exit 1). It never rebases.
+- A version delete frees the objects of *v* referenced by neither *p* nor *n*.
+  An upload prefix is deleted whole when its version is deleted and neither
+  *p* nor *n* references a key under it; that also clears staging strays no
+  manifest named. Other freed objects are deleted one by one.
+
+**Charge.** Each live version records a charge: the stored size of its objects
+that its previous live version does not hold. The artifact's charge is the sum,
+which is the stored size of its distinct live objects. An append adds the new
+version's charge; a version delete recomputes the next live version's charge
+against its new predecessor and releases exactly the freed bytes, which
+`delete <slug> <ver>` reports as `freed`. A version written before this has no
+charge field and charges its full size, which is exact because it shares
+nothing. A version's `size`, shown by `versions`, stays its full logical size.
+
+The first redeploy of a site written before digests is a full upload; every
+redeploy after it can reuse.
 
 ### Deleting bytes
 
@@ -2774,8 +2843,9 @@ Metadata commits first, then bytes, so a read that starts after the commit
 never follows a row to missing bytes. A GET that read the head before the
 commit and opens an object after its prefix is deleted answers 500.
 
-- **Delete a version:** commit the tombstone, then delete that version's
-  `uploads/<upload-id>/`.
+- **Delete a version:** commit the tombstone, then delete the prefixes and
+  objects its receipt names (see "Redeploy reuse"); with no sharing, that is
+  that version's `uploads/<upload-id>/`.
 - **Delete a paste:** commit the removal, then delete each removed version's
   prefix.
 - **The delete names its own bytes.** The metadata delete answers with the
@@ -2785,8 +2855,9 @@ commit and opens an object after its prefix is deleted answers 500.
   re-created, and a later read could name the new owner's uploads.
 - **A crash between the two steps** leaks that prefix but never breaks a read.
 
-Nothing asks whether anything else still uses the bytes, because nothing else
-can.
+Nothing asks afterwards whether anything else still uses the bytes: the commit
+already decided it from the version's neighbours, and nothing outside the slug
+can reference them.
 
 An upload that is definitively refused deletes its own prefix before returning
 its error:
@@ -3742,7 +3813,7 @@ case:
 | no row, `notfound` | 404 |
 | `pending` | 200 loading page, `no-store`, `Retry-After: 1` |
 | `failed` | 410 error page, `no-store` |
-| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the entry's validator (its key, plus its offset when packed), `Content-Length` the entry's decoded size when it has one |
+| `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the entry's validator (`sha256-<digest>` when it has a digest, else its key, plus its offset when packed), `Content-Length` the entry's decoded size when it has one |
 | `shell`, `kbshell` | 200, the kind's shell with its CSP, ETag the shell version |
 | `files` | 200, the sorted path list as `json.Encoder` writes it, ETag `files-<upload id>` |
 | a kind with no shell | 500 `unsupported kind` |

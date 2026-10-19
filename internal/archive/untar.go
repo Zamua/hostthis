@@ -19,12 +19,19 @@ import (
 // No durable I/O of its own: on error the caller persists nothing and deletes
 // whatever the sink already wrote.
 func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manifest, error) {
+	man, _, err := UntarKeep(src, sink, quotaBudget)
+	return man, err
+}
+
+// UntarKeep is Untar that also returns the archive's keep list, when it has
+// one at the site root (docs/SPEC.md "Redeploy reuse").
+func UntarKeep(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manifest, *domain.KeepList, error) {
 	ex := domain.NewSiteExtractor(quotaBudget)
 
 	gz, err := gzip.NewReader(src)
 	if err != nil {
 		// Truncated or corrupt: an unsupported upload, not a server error.
-		return domain.Manifest{}, fmt.Errorf("%w: not a valid gzip stream: %v", domain.ErrUnsupportedKind, err)
+		return domain.Manifest{}, nil, fmt.Errorf("%w: not a valid gzip stream: %v", domain.ErrUnsupportedKind, err)
 	}
 	defer gz.Close() //nolint:errcheck
 
@@ -35,14 +42,18 @@ func Untar(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.Manif
 			break
 		}
 		if err != nil {
-			return domain.Manifest{}, fmt.Errorf("%w: corrupt tar: %v", domain.ErrUnsupportedKind, err)
+			return domain.Manifest{}, nil, fmt.Errorf("%w: corrupt tar: %v", domain.ErrUnsupportedKind, err)
 		}
 		// tr is valid only until the next Next().
 		if err := ex.Add(entryOf(hdr), tr, sink); err != nil {
-			return domain.Manifest{}, err
+			return domain.Manifest{}, nil, err
 		}
 	}
-	return ex.Finish(), nil
+	man := ex.Finish()
+	if kl, ok := ex.KeepList(); ok {
+		return man, &kl, nil
+	}
+	return man, nil, nil
 }
 
 // legacyTypeRegA is tar's pre-1.11 alias for a regular file. Go's reader

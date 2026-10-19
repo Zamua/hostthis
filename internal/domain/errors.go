@@ -37,6 +37,13 @@ var (
 	// remove the bytes currently selected by the paste's serving head.
 	ErrVersionCurrentlyServed = errors.New("storage: version is currently served")
 
+	// ErrBaseMoved refuses a redeploy whose base is no longer the head: the
+	// site changed while it ran, and it never rebases.
+	ErrBaseMoved = errors.New("the site changed while this deploy ran; nothing was saved, retry")
+
+	// ErrBadReuse refuses a version that names objects it may not share.
+	ErrBadReuse = errors.New("storage: version shares an object outside its base")
+
 	// ErrBusy is returned when a paste mutation is refused, having persisted
 	// nothing, because another change to that paste has not settled yet.
 	ErrBusy = errors.New("storage: another change to this paste is still settling; retry shortly")

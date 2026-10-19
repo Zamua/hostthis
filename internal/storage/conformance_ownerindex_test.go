@@ -33,7 +33,7 @@ type ownerIndexRepo interface {
 	Delete(slug domain.Slug, wantIdentity domain.Identity, wantCreatedAt time.Time) ([]string, error)
 	AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string, kind domain.ContentKind,
 		uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time) (domain.AppendResult, error)
-	DeleteVersion(domain.Slug, string, int) (string, error)
+	DeleteVersion(domain.Slug, string, int) (domain.VersionRelease, error)
 }
 
 func chargedBytes(t *testing.T, r ownerIndexRepo, owner string) (int, error) {

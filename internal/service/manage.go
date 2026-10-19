@@ -42,7 +42,7 @@ type PasteAdmin interface {
 	IsVersionServed(domain.Slug, int) (bool, error)
 	// DeleteVersion answers with the tombstoned version's upload id, empty for
 	// a version recorded without one.
-	DeleteVersion(domain.Slug, string, int) (uploadID string, err error)
+	DeleteVersion(domain.Slug, string, int) (domain.VersionRelease, error)
 	SumActiveBytesByOwner(owner string, now time.Time) (int, error)
 	OwnerFirstSeen(owner string) (time.Time, error)
 	// OwnerSummary is whoami's roll-up in one call: count + first-seen +
@@ -294,7 +294,8 @@ var ErrVersionCurrentlyServed = errors.New("service: version is currently served
 //   - target is already tombstoned → ErrVersionAlreadyDeleted
 //   - target is the version the URL currently serves → ErrVersionCurrentlyServed
 //
-// The freed byte count is the row's pre-deletion size column.
+// The freed byte count is the charge the delete released, which is less than
+// the version's size when its neighbours share its objects.
 func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (DeleteVersionResult, error) {
 	paste, err := m.requireOwner(slug, owner)
 	if err != nil {
@@ -322,17 +323,20 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 		return DeleteVersionResult{}, ErrVersionCurrentlyServed
 	}
 
-	upload, err := m.Repo.DeleteVersion(slug, paste.Generation, verNum)
+	release, err := m.Repo.DeleteVersion(slug, paste.Generation, verNum)
 	if err != nil {
 		if errors.Is(err, domain.ErrVersionCurrentlyServed) {
 			return DeleteVersionResult{}, ErrVersionCurrentlyServed
 		}
 		return DeleteVersionResult{}, err
 	}
-	discardUpload(m.Blob, m.Logger, upload)
+	discardRelease(m.Blob, m.Logger, release)
 	// No cache purge: the served bytes did not change, only an older
 	// version's bytes that no URL surface exposed.
-	return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
+	if !release.Listed {
+		return DeleteVersionResult{VerNum: verNum, FreedBytes: target.Size}, nil
+	}
+	return DeleteVersionResult{VerNum: verNum, FreedBytes: release.Freed}, nil
 }
 
 // Pin makes the public URL serve verNum and stick there across later updates.
