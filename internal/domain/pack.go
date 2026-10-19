@@ -39,6 +39,8 @@ func PackFull(storedLen int64) bool {
 type BlobPack interface {
 	// Append encodes r as the next member and returns its stored span.
 	Append(r io.Reader) (offset, length int64, err error)
+	// AppendStored appends r, already one complete at-rest member, unchanged.
+	AppendStored(r io.Reader) (offset, length int64, err error)
 	// Len is the stored length so far.
 	Len() int64
 	// Commit writes the pack as one object.

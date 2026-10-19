@@ -26,6 +26,9 @@ type BlobUnit interface {
 	// its slice of a pack. An entry without a key is ErrNotFound.
 	Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error)
 
+	// ReadStored streams an object's at-rest bytes, undecoded.
+	ReadStored(ctx context.Context, key string) (io.ReadCloser, error)
+
 	// DeleteUpload deletes every object under the upload's prefix. An upload
 	// with nothing stored succeeds.
 	DeleteUpload(ctx context.Context, uploadID string) error
