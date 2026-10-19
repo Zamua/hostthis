@@ -468,7 +468,7 @@ func TestSite_HaveAndKeepList(t *testing.T) {
 
 	// A keep list against a version that is no longer the head is refused.
 	_, stderr, exit = s.run(slug, makeSiteArchive(t, map[string]string{"index.html": "x", ".hostthis-keep": keep.String()}))
-	if exit == 0 || !strings.Contains(stderr, "changed while this deploy ran") {
+	if exit == 0 || !strings.Contains(stderr, "run have again") {
 		t.Fatalf("stale keep list: exit %d, stderr %q", exit, stderr)
 	}
 
@@ -481,5 +481,18 @@ func TestSite_HaveAndKeepList(t *testing.T) {
 	out, _, _ := s.run("have "+slug+" -o json", nil)
 	if err := json.Unmarshal([]byte(out), &view); err != nil || view.Base != 2 || len(view.Files) != 2 {
 		t.Fatalf("have -o json = %q (%v)", out, err)
+	}
+}
+
+// A bare "--" after the slug is the ssh option terminator, not an argument.
+func TestUpload_DashDashAfterSlug(t *testing.T) {
+	s := startStack(t)
+	stdout, stderr, exit := s.run("", []byte("a,b\n1,2\n"))
+	if exit != 0 {
+		t.Fatalf("upload exit %d: %q", exit, stderr)
+	}
+	slug := extractSlug(stdout)
+	if _, stderr, exit := s.run(slug+" -- --type csv", []byte("a,b\n1,2\n")); exit != 0 {
+		t.Fatalf("update with -- after the slug: exit %d, stderr %q", exit, stderr)
 	}
 }
