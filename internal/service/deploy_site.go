@@ -56,7 +56,14 @@ type DeploySite struct {
 	// Logger records object deletions that fail after the outcome is decided.
 	// nil discards.
 	Logger *log.Logger
+	// MaxArchiveBytes caps the compressed archive read; 0 means
+	// domain.MaxSiteArchiveBytes.
+	MaxArchiveBytes int64
 }
+
+// ErrSiteArchiveTooLarge is returned when the compressed archive itself
+// exceeded the site archive cap, whatever it would have expanded to.
+var ErrSiteArchiveTooLarge = fmt.Errorf("service: site archive too large to consider (input exceeded %d MiB cap)", domain.MaxSiteArchiveBytes>>20)
 
 // SiteDeployer is the site surface the SSH layer consumes, an interface so
 // cache invalidation can be a decorator the composition root layers on.
@@ -166,11 +173,19 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 	uploadID := domain.NewUploadID()
 	sink := &blobSink{blob: d.Blob, uploadID: uploadID}
 	defer sink.Close()
-	man, err := archive.Untar(body, sink, budget)
+	limit := d.MaxArchiveBytes
+	if limit <= 0 {
+		limit = domain.MaxSiteArchiveBytes
+	}
+	capped := &archiveCapReader{r: body, left: limit}
+	man, err := archive.Untar(capped, sink, budget)
 	if err == nil {
 		err = sink.Flush()
 	}
 	switch {
+	// First: the codec reports a cut-off stream as whatever it was decoding.
+	case err != nil && capped.hit:
+		err = ErrSiteArchiveTooLarge
 	case errors.Is(err, domain.ErrArchiveTooLarge):
 		err = ErrOverQuota
 	case errors.Is(err, domain.ErrUnsupportedKind):
@@ -185,6 +200,32 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time) (domai
 		return domain.Manifest{}, "", err
 	}
 	return man, uploadID, nil
+}
+
+// archiveCapReader passes at most left bytes and fails, rather than ending the
+// stream, once r has more.
+type archiveCapReader struct {
+	r    io.Reader
+	left int64
+	hit  bool
+}
+
+var errArchiveCap = errors.New("site archive cap exceeded")
+
+func (c *archiveCapReader) Read(p []byte) (int, error) {
+	if c.hit {
+		return 0, errArchiveCap
+	}
+	if int64(len(p)) > c.left+1 {
+		p = p[:c.left+1]
+	}
+	n, err := c.r.Read(p)
+	if int64(n) > c.left {
+		c.hit = true
+		return int(c.left), errArchiveCap
+	}
+	c.left -= int64(n)
+	return n, err
 }
 
 // Delete removes an owned static site by slug, then deletes every removed

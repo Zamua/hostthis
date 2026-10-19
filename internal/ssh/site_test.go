@@ -1,6 +1,8 @@
 package ssh_test
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -328,5 +330,28 @@ func TestSite_ListIncludesSites(t *testing.T) {
 	}
 	if site != 1 || paste != 1 {
 		t.Fatalf("want 1 site + 1 paste in json, got site=%d paste=%d", site, paste)
+	}
+}
+
+// A site archive is not held to the paste input cap: one whose compressed
+// stream passes HardRawByteCap deploys and redeploys in place.
+func TestSite_ArchiveOverPasteInputCap(t *testing.T) {
+	s := startStack(t, withSites())
+	var empty bytes.Buffer
+	gz := gzip.NewWriter(&empty)
+	_ = gz.Close()
+	pad := bytes.Repeat(empty.Bytes(), domain.HardRawByteCap/empty.Len()+1)
+	arc := append(pad, makeSiteArchive(t, map[string]string{"index.html": siteIndex})...)
+
+	stdout, stderr, exit := s.run("", arc)
+	if exit != 0 {
+		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
+	}
+	slug := extractSlug(stdout)
+	if _, stderr, exit := s.run(slug, arc); exit != 0 {
+		t.Fatalf("redeploy exit %d: stderr %q", exit, stderr)
+	}
+	if resp, body := httpGet(t, strings.TrimSpace(stdout)); resp.StatusCode != 200 || body != siteIndex {
+		t.Fatalf("GET site: code %d body %q", resp.StatusCode, body)
 	}
 }

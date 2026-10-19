@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -677,6 +678,46 @@ func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
 			}
 			if result.Site.Slug != repo.inserts[1] {
 				t.Fatalf("result slug = %q, want committed slug %q", result.Site.Slug, repo.inserts[1])
+			}
+		})
+	}
+}
+
+// emptyGzipMembers is n gzip members that each inflate to nothing.
+func emptyGzipMembers(t *testing.T, n int) []byte {
+	t.Helper()
+	var one bytes.Buffer
+	gz := gzip.NewWriter(&one)
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Repeat(one.Bytes(), n)
+}
+
+// The archive cap bounds the compressed bytes read, and a cut-off archive fails
+// as too large rather than as a corrupt stream.
+func TestGuard_DeployArchiveCap(t *testing.T) {
+	arc := gzipTar(t, map[string]string{"index.html": "<h1>capped</h1>"})
+	for name, tc := range map[string]struct {
+		body  []byte
+		limit int64
+		want  error
+	}{
+		"at the cap":       {arc, int64(len(arc)), nil},
+		"cut off":          {arc, int64(len(arc)) / 2, ErrSiteArchiveTooLarge},
+		"inflates to none": {append(emptyGzipMembers(t, 4096), arc...), 64 << 10, ErrSiteArchiveTooLarge},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, sites, _, root := deployStack(t)
+			d.MaxArchiveBytes = tc.limit
+			owner := "key:archive-cap"
+			_, err := d.Deploy(bytes.NewReader(tc.body), owner)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("deploy: got %v, want %v", err, tc.want)
+			}
+			if tc.want != nil {
+				noSites(t, d, sites, owner)
+				assertNoObjects(t, root)
 			}
 		})
 	}
