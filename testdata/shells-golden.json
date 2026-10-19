@@ -495,6 +495,7 @@
   "kb/raw": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"key-setup\"",
@@ -524,6 +525,7 @@
   "raw/csv": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -538,6 +540,7 @@
   "raw/diff": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -552,6 +555,7 @@
   "raw/flamegraph": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -566,6 +570,7 @@
   "raw/json": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "application/json; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -580,6 +585,7 @@
   "raw/knowledgebase": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -594,6 +600,7 @@
   "raw/log": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -608,6 +615,7 @@
   "raw/markdown": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -622,6 +630,7 @@
   "raw/mermaid": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
@@ -636,6 +645,7 @@
   "raw/pdf": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "application/pdf",
       "Etag": "\"uploads/a/0\"",
@@ -650,6 +660,7 @@
   "raw/text": {
     "status": 200,
     "header": {
+      "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",

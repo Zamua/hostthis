@@ -442,7 +442,8 @@ var streamBufPool = sync.Pool{New: func() any { b := make([]byte, 32<<10); retur
 // streamEntry writes entry's stored bytes as a 200 under ct, streamed so
 // memory stays constant whatever the size. Content-Length is the entry's
 // recorded decoded size, so a short body is visible to every client; an entry
-// without one declares none, since its Size may be wrong.
+// without one declares none, since its Size may be wrong. An entry with a
+// size answers single byte ranges (docs/SPEC.md "Byte ranges").
 //
 // The first chunk is decoded before the status goes out, so damage found there
 // is a 500. Damage found later aborts the response, the one signal left once
@@ -452,6 +453,28 @@ var streamBufPool = sync.Pool{New: func() any { b := make([]byte, 32<<10); retur
 func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain.Slug,
 	entry domain.ManifestEntry, ct, surface, what string,
 ) {
+	h := w.Header()
+	size, known := entry.DecodedLength()
+	status, rng := http.StatusOK, domain.ByteRange{Length: int64(size)}
+	if known {
+		h.Set("Accept-Ranges", "bytes")
+		var verdict domain.RangeVerdict
+		if ifr := r.Header.Get("If-Range"); ifr == "" || ifr == h.Get("ETag") {
+			rng, verdict = domain.ParseRange(r.Header.Get("Range"), int64(size))
+		}
+		switch verdict {
+		case domain.RangeUnsatisfiable:
+			h.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+			return
+		case domain.RangeSatisfiable:
+			status = http.StatusPartialContent
+			h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.Start, rng.Start+rng.Length-1, size))
+		default:
+			rng = domain.ByteRange{Length: int64(size)}
+		}
+	}
+
 	rc, _, err := s.Blobs.Read(r.Context(), entry)
 	if err != nil {
 		s.logf("warn: %s read 500: slug=%s %s blob read: %v", surface, slug, what, err)
@@ -459,13 +482,25 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 		return
 	}
 	defer rc.Close() //nolint:errcheck
+	var body io.Reader = rc
+	if rng.Start > 0 {
+		if _, err := io.CopyN(io.Discard, rc, rng.Start); err != nil {
+			s.logf("warn: %s read 500: slug=%s %s decode: %v", surface, slug, what, err)
+			serveReadError(w, "internal error")
+			return
+		}
+	}
+	// A range short of the end cannot see the frame checksum.
+	if known && rng.Start+rng.Length < int64(size) {
+		body = io.LimitReader(rc, rng.Length)
+	}
 
 	bp := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(bp)
 	buf := *bp
 	held := 0
 	for held == 0 && err == nil {
-		held, err = rc.Read(buf)
+		held, err = body.Read(buf)
 	}
 	if err != nil && err != io.EOF {
 		s.logf("warn: %s read 500: slug=%s %s decode: %v", surface, slug, what, err)
@@ -473,12 +508,11 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 		return
 	}
 
-	h := w.Header()
 	h.Set("Content-Type", ct)
-	size, known := entry.DecodedLength()
 	if known {
-		h.Set("Content-Length", strconv.Itoa(size))
+		h.Set("Content-Length", strconv.FormatInt(rng.Length, 10))
 	}
+	w.WriteHeader(status)
 	var sent int64
 	for err == nil {
 		if held > 1 {
@@ -491,7 +525,7 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 			buf[0], held = buf[held-1], 1
 		}
 		var n int
-		n, err = rc.Read(buf[held:])
+		n, err = body.Read(buf[held:])
 		held += n
 	}
 	if err != io.EOF {
@@ -500,7 +534,7 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 	}
 	n, werr := w.Write(buf[:held])
 	sent += int64(n)
-	if werr == nil && known && sent != int64(size) {
+	if werr == nil && known && sent != rng.Length {
 		werr = http.ErrContentLength
 	}
 	s.warnShort(werr, slug, surface, what, size)
@@ -534,7 +568,7 @@ func setSandboxHeaders(h http.Header) {
 // contentHeaders are the headers a content response sets before it can still
 // fail.
 var contentHeaders = []string{
-	"Cache-Control", "Content-Length", "Content-Security-Policy", "ETag",
+	"Accept-Ranges", "Cache-Control", "Content-Length", "Content-Range", "Content-Security-Policy", "ETag",
 	"Last-Modified", "Permissions-Policy", "Referrer-Policy", "X-Frame-Options",
 }
 
