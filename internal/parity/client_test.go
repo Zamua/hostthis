@@ -53,7 +53,7 @@ func (r request) with(name, value string) request {
 func (r request) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s http://%s%s", r.method, r.host, r.target)
-	for _, name := range []string{"If-None-Match", "If-Modified-Since", "Origin", "Upgrade"} {
+	for _, name := range []string{"If-None-Match", "If-Modified-Since", "Range", "If-Range", "Origin", "Upgrade"} {
 		if v := r.header.Get(name); v != "" {
 			fmt.Fprintf(&b, " [%s: %s]", name, v)
 		}

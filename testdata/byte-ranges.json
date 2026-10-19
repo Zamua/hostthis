@@ -1,0 +1,102 @@
+{
+  "about": "Range headers against a 100-byte body (docs/SPEC.md \"Byte ranges\"). Both servers run these: Go domain.ParseRange and the Worker's parseRange.",
+  "size": 100,
+  "cases": [
+    {
+      "header": "bytes=0-9",
+      "verdict": "satisfiable",
+      "start": 0,
+      "length": 10
+    },
+    {
+      "header": "bytes=90-",
+      "verdict": "satisfiable",
+      "start": 90,
+      "length": 10
+    },
+    {
+      "header": "bytes=-10",
+      "verdict": "satisfiable",
+      "start": 90,
+      "length": 10
+    },
+    {
+      "header": "bytes=-500",
+      "verdict": "satisfiable",
+      "start": 0,
+      "length": 100
+    },
+    {
+      "header": "bytes=50-500",
+      "verdict": "satisfiable",
+      "start": 50,
+      "length": 50
+    },
+    {
+      "header": "Bytes = 0-0",
+      "verdict": "satisfiable",
+      "start": 0,
+      "length": 1
+    },
+    {
+      "header": "bytes=99999999999999999999-",
+      "verdict": "unsatisfiable"
+    },
+    {
+      "header": "bytes=0-99999999999999999999",
+      "verdict": "satisfiable",
+      "start": 0,
+      "length": 100
+    },
+    {
+      "header": "bytes=100-",
+      "verdict": "unsatisfiable"
+    },
+    {
+      "header": "bytes=-0",
+      "verdict": "unsatisfiable"
+    },
+    {
+      "header": "",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes=0-1,5-6",
+      "verdict": "ignored"
+    },
+    {
+      "header": "items=0-1",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes=5-1",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes=a-1",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes=-",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes=+1-2",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes=1",
+      "verdict": "ignored"
+    },
+    {
+      "header": "bytes= 3-4",
+      "verdict": "satisfiable",
+      "start": 3,
+      "length": 2
+    },
+    {
+      "header": "bytes=3 -4",
+      "verdict": "ignored"
+    }
+  ]
+}

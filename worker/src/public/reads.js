@@ -7,6 +7,7 @@ import { goStringList } from "./gojson.js";
 import { formatHTTPDate } from "./httpdate.js";
 import { exactLength } from "./length.js";
 import { FAILED_PAGE, LOADING_PAGE } from "./pages.js";
+import { parseRange, sliceStream } from "./range.js";
 import { goError, methodNotAllowed, notFound } from "./responses.js";
 import { rawContentType, renderShell } from "./shells.js";
 
@@ -89,9 +90,28 @@ export function readPath(openBlob) {
       if (unchanged(headers)) {
         return new Response(null, { status: 304, headers });
       }
+      const size = entry.decodedSize;
+      const sized = Number.isSafeInteger(size) && size > 0;
+      let range = { verdict: "ignored" };
+      if (sized) {
+        headers["Accept-Ranges"] = "bytes";
+        const ifRange = request.headers.get("If-Range");
+        if (ifRange === null || ifRange === headers.ETag) {
+          range = parseRange(request.headers.get("Range"), size);
+        }
+        if (range.verdict === "unsatisfiable") {
+          headers["Content-Range"] = `bytes */${size}`;
+          return new Response(null, { status: 416, headers });
+        }
+      }
+      const partial = range.verdict === "satisfiable";
+      const status = partial ? 206 : 200;
+      if (partial) {
+        headers["Content-Range"] = `bytes ${range.start}-${range.start + range.length - 1}/${size}`;
+      }
       headers["Content-Type"] = contentType;
       if (method === "HEAD") {
-        return new Response(null, { headers });
+        return new Response(null, { status, headers });
       }
       let body;
       try {
@@ -102,14 +122,20 @@ export function readPath(openBlob) {
       }
       // Held to its recorded decoded length, damage found after the headers
       // leaves a body short of its Content-Length. An entry without one
-      // states none: a runtime may end its errored body as if whole.
-      const size = entry.decodedSize;
-      if (Number.isSafeInteger(size) && size > 0) {
+      // states none: a runtime may end its errored body as if whole. A range
+      // short of the end cannot see the frame checksum.
+      if (partial && range.start + range.length < size) {
+        headers["Content-Length"] = String(range.length);
+        body = sliceStream(body, range.start, range.length);
+      } else if (partial) {
+        headers["Content-Length"] = String(range.length);
+        body = sliceStream(exactLength(body, size), range.start, range.length);
+      } else if (sized) {
         headers["Content-Length"] = String(size);
         body = exactLength(body, size);
       }
       const reported = reportingErrors(body, (error) => warn(target.slug, `${what} blob read: ${error.message}`));
-      return new Response(reported, { headers });
+      return new Response(reported, { status, headers });
     };
 
     const shellPage = (shellKind) => {

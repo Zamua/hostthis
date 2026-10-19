@@ -3759,6 +3759,25 @@ its text with `Content-Type`, `X-Content-Type-Options: nosniff` and
 warning naming the slug and the cause, and nothing else (see "5xx
 observability on the read surface").
 
+**Byte ranges.** A stored-bytes response (`html`, `raw`, `file`, `kbraw`)
+whose entry records its decoded size answers single byte ranges, since media
+players (iOS Safari's `<audio>` and `<video>` among them) refuse to play from
+a server without them. Such a response carries `Accept-Ranges: bytes`. After
+the conditional check, a `Range` header of exactly one `bytes=` spec
+(`a-b`, `a-`, or `-n`) is served as:
+
+- `206` with `Content-Range: bytes a-b/size` and `Content-Length` the
+  range's length, the end clamped to the last byte;
+- `416` with `Content-Range: bytes */size` and no body, when `a` is at or past
+  the end or `n` is zero.
+
+Any other `Range` (several ranges, another unit, a malformed spec) is ignored
+and the whole body is a `200`, as is a `Range` sent with an `If-Range` that is
+not the response's ETag. An entry without a recorded size ignores `Range`.
+The stored object is decoded from its start and the bytes before the range
+are discarded, so a range costs decode time up to its end. Only a range that
+reaches the last byte can still be failed by the frame checksum.
+
 The bytes stream from `PAYLOADS` through a check of the at-rest magic and a
 zstd decoder (see "On-disk format"), never held whole: libzstd's decompressor
 compiled to WASM, vendored with its build in `worker/vendor/zstd`. It decodes
