@@ -2949,6 +2949,7 @@ export class Paste {
       return Response.json({ error: "version-served" }, { status: 409 });
     }
 
+    const before = this.liveCharge(versions);
     const freeing = await this.freedBy(versions, version);
     version.deleted = true;
     if (row.pinnedVersion === body.ver) {
@@ -2966,7 +2967,7 @@ export class Paste {
         upload: freeing.prefixes.includes(uploadPrefix(version.uploadId)) ? version.uploadId : "",
         prefixes: freeing.prefixes,
         keys: freeing.keys,
-        freed: freeing.freed,
+        freed: before - target,
       },
     };
     const pending = {
@@ -3020,7 +3021,6 @@ export class Paste {
     const keys = freedKeys.map(([key]) => key)
       .filter((key) => !prefixes.includes(prefixOf(key)))
       .sort();
-    const freed = freedKeys.reduce((sum, [, object]) => sum + object.size, 0);
     let changed = null;
     if (next && (next.charge !== undefined || freedKeys.length < mine.size)) {
       let charge = 0;
@@ -3032,7 +3032,7 @@ export class Paste {
       next.charge = charge;
       changed = next;
     }
-    return { prefixes, keys, freed, next: changed };
+    return { prefixes, keys, next: changed };
   }
 
   // Roll the row onto the version the public URL serves: the pin when set,
