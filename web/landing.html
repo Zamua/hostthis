@@ -82,212 +82,143 @@
 </header>
 
 <h2>Name</h2>
-<div class="indent"><p>hostthis - pipe a rendered file in, get a public URL out</p></div>
+<div class="indent"><p>hostthis - pipe a file in, get a public URL out</p></div>
 
 <h2>Synopsis</h2>
 <div class="indent">
-<pre><strong>cat</strong> <em>file</em>      | <strong>ssh -T hostthis.dev</strong>
-<strong>cat</strong> <em>file</em>      | <strong>ssh -T hostthis.dev</strong> <em>slug</em>
-<strong>tar czf -</strong> <em>dir</em> | <strong>ssh -T hostthis.dev</strong> [<em>slug</em>]
-<strong>ssh hostthis.dev</strong> <em>command</em> [<em>args</em>]</pre>
-<p class="ink-soft"><code>-T</code> silences ssh&rsquo;s pseudo-terminal warning on
-piped uploads; it changes nothing on the server.</p>
+<pre>cat <em>file</em> | ssh -T hostthis.dev [<em>slug</em>] [-- <em>opts</em>]
+tar czf - <em>dir</em> | ssh -T hostthis.dev [<em>slug</em>]
+ssh hostthis.dev <em>command</em> [<em>args</em>]</pre>
 </div>
 
 <h2>Description</h2>
 <div class="indent">
-<p>Publishes HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
-JSON document, a profile as a flame graph, structured logs, or plain text
-with linkable lines, at a random subdomain.
-One ssh pipe, no signup, no install. Identity is your ssh public key: anyone with
-a different key can read the URL but cannot update, rename, pin, or delete the
-paste.</p>
+<p>Renders HTML, Markdown, diffs, Mermaid, PDF, CSV, JSON, folded stacks (flame
+graph), NDJSON logs and plain text at a random subdomain. A gzip-tar is a
+static site. No signup: your ssh key is your identity, and only it can change
+what it uploaded. Everything persists until you delete it.</p>
+</div>
 
-<p>Append <code>?raw</code> to a rendered paste&rsquo;s URL for its raw source.</p>
+<h2>Upload</h2>
+<div class="indent">
+<dl>
+  <dt>cat <em>file</em> | ssh -T hostthis.dev</dt>
+  <dd>new paste; URL on stdout, QR code on stderr</dd>
+  <dt>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></dt>
+  <dd>new version; same URL</dd>
+  <dt>-- --name "<em>label</em>"</dt>
+  <dd>set a label</dd>
+  <dt>-- --type <em>kind</em></dt>
+  <dd>force the renderer: html, markdown, diff, mermaid, pdf, csv, json,
+  flamegraph, log, text</dd>
+</dl>
+<p class="ink-soft">-T silences ssh's pseudo-terminal warning.</p>
 </div>
 
 <h2>Commands</h2>
 <div class="indent">
 <dl>
-  <dt>cat <em>file</em> | ssh -T hostthis.dev</dt>
-  <dd>upload a paste. The URL prints on stdout and a QR code of it on
-  stderr (<code>2&gt;/dev/null</code> drops the QR). To set a label or force the
-  content type, pass <strong>--name</strong> "label" or
-  <strong>--type</strong> html|markdown|diff|mermaid|pdf|csv|json|flamegraph|log|text after a literal <code>--</code>.
-  ssh otherwise parses a leading <strong>--name</strong> as one of its own
-  options.</dd>
-
-  <dt>cat <em>file</em> | ssh -T hostthis.dev <em>slug</em></dt>
-  <dd>replace <em>slug</em>&rsquo;s content; the URL stays the same</dd>
-
-  <dt>ssh hostthis.dev <strong>list</strong> [-o json]</dt>
-  <dd>your pastes, most recently updated first</dd>
-
-  <dt>ssh hostthis.dev <strong>get</strong> <em>slug</em></dt>
-  <dd>print content to stdout</dd>
-
-  <dt>ssh hostthis.dev <strong>url</strong> <em>slug</em></dt>
-  <dd>re-show just the URL for any existing paste or site (no ownership
-  check; not found on an unknown slug)</dd>
-
-  <dt>ssh hostthis.dev <strong>qr</strong> <em>slug</em></dt>
-  <dd>re-show the URL (stdout) and a QR code (stderr) for any existing
-  paste or site</dd>
-
-  <dt>ssh hostthis.dev <strong>rename</strong> <em>slug</em> [<em>label</em>]</dt>
-  <dd>set the owner label from the remaining words; omit them to clear it</dd>
-
-  <dt>ssh hostthis.dev <strong>versions</strong> <em>slug</em> [-o json]</dt>
-  <dd>list versions</dd>
-
-  <dt>ssh hostthis.dev <strong>have</strong> <em>slug</em> [-o json]</dt>
-  <dd>a site&rsquo;s latest version as a keep list: <code>base <em>n</em></code>, then
-  <code><em>sha256</em>  <em>path</em></code> per file</dd>
-
-  <dt>ssh hostthis.dev <strong>pin</strong> <em>slug</em> <em>ver</em></dt>
-  <dd>stick the URL to <em>ver</em>; survives future updates</dd>
-
-  <dt>ssh hostthis.dev <strong>unpin</strong> <em>slug</em></dt>
-  <dd>clear the pin; URL serves the latest version</dd>
-
-  <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em></dt>
-  <dd>wipe the entire paste; permanent</dd>
-
-  <dt>ssh hostthis.dev <strong>delete</strong> <em>slug</em> <em>ver</em></dt>
-  <dd>free one version&rsquo;s bytes; keeps the history row as a tombstone</dd>
-
-  <dt>ssh hostthis.dev <strong>whoami</strong> [-o json]</dt>
-  <dd>identity, active count, and quota usage</dd>
+  <dt>list [-o json]</dt><dd>your pastes, newest first</dd>
+  <dt>whoami [-o json]</dt><dd>identity, count, quota</dd>
+  <dt>get <em>slug</em></dt><dd>content to stdout</dd>
+  <dt>url <em>slug</em></dt><dd>the URL</dd>
+  <dt>qr <em>slug</em></dt><dd>the URL and a QR code</dd>
+  <dt>rename <em>slug</em> [<em>label</em>]</dt><dd>set the label; none clears it</dd>
+  <dt>versions <em>slug</em> [-o json]</dt><dd>version history</dd>
+  <dt>pin <em>slug</em> <em>ver</em></dt><dd>serve <em>ver</em> until unpinned</dd>
+  <dt>unpin <em>slug</em></dt><dd>serve the latest version</dd>
+  <dt>delete <em>slug</em></dt><dd>delete everything</dd>
+  <dt>delete <em>slug</em> <em>ver</em></dt><dd>delete one version's bytes</dd>
+  <dt>have <em>slug</em> [-o json]</dt><dd>a site's files as a keep list (see Sites)</dd>
 </dl>
 </div>
 
-<h2>Static Sites</h2>
+<h2>Links</h2>
 <div class="indent">
-<p>Pipe a gzip-tar instead of a single file to deploy a multi-file static site.</p>
-<pre>tar czf - site/ | ssh -T hostthis.dev            <span class="ink-soft"># deploy, get a URL</span>
-tar czf - site/ | ssh -T hostthis.dev abc12345   <span class="ink-soft"># re-deploy in place</span></pre>
-<p>Served at <em>slug</em>.hostthis.dev/<em>path</em>, content type by extension. A
-request that matches no file serves <code>index.html</code>, so single-page apps route
-client-side. A single leading directory is flattened. macOS sidecar files are
-skipped.</p>
-<p>A redeploy stores only files that changed. To skip sending unchanged ones, put
-their <code>have</code> lines in <code>.hostthis-keep</code> at the archive root and send
-the rest; the deploy is refused if the site moved past <code>base</code> meanwhile.</p>
-<p>An archive with no root <code>index.html</code> deploys as a knowledge base: the URL
-browses it as documents, with folders, a table of contents and search.</p>
+<dl>
+  <dt><em>url</em>?raw</dt><dd>source bytes</dd>
+  <dt>#<em>heading</em>, #page=3, #row=42</dt><dd>markdown, pdf, csv</dd>
+  <dt>#L42-L48, #F1L42-L48</dt><dd>text and log lines, diff lines of file 1</dd>
+  <dt>#focus=<em>stack</em>, #q=<em>term</em></dt><dd>flame graph zoom, highlight</dd>
+</dl>
 </div>
 
-<h2>Rooms API</h2>
+<h2>Sites</h2>
 <div class="indent">
-<p>A deployed site or paste can store and sync state in a room, with no backend of
-your own. The room&rsquo;s UUID is the only key. The API is served on the
-app&rsquo;s own origin.</p>
-<p>Durable key-value over HTTP:</p>
-<pre>POST   /api/rooms                -&gt; {"id":"&lt;uuid&gt;"}    mint a room
-GET    /api/rooms/&lt;uuid&gt;         -&gt; {key: value, ...}  read the whole room
-GET    /api/rooms/&lt;uuid&gt;/&lt;key&gt;   -&gt; value              read one key
-PUT    /api/rooms/&lt;uuid&gt;/&lt;key&gt;     write one key, body is the value
-DELETE /api/rooms/&lt;uuid&gt;/&lt;key&gt;     delete one key</pre>
-<p>Realtime over WebSocket, on the same origin:</p>
-<pre>GET /api/rooms/&lt;uuid&gt;/ws</pre>
-<p>On connect you receive a <code>snapshot</code> of the room, then a live
-stream: every durable PUT/DELETE is mirrored to all clients as
-<code>{"type":"put"|"delete", ...}</code>. Frames you send are broadcast verbatim
-to other clients and never stored, for ephemeral motion.</p>
-<p>Send <code>{"type":"ping"}</code> every 20 seconds: the server answers
-<code>{"type":"pong"}</code> and passes it to no one. A room holds 64 sockets. When it
-is full, a joining client takes the place of any socket that has pinged but not in
-the last two minutes, which is closed with code 4001 (<code>stale</code>);
-reconnect when you see it. A frame you send over 32 KiB closes your socket.</p>
-<p>A value is opaque bytes. The whole-room read and the <code>snapshot</code>/<code>put</code>
-frames embed each value as JSON when it parses as JSON - a value you PUT as a JSON
-object comes back as a nested object, not a quoted string - and as a JSON string
-otherwise. The read and the frames carry the same text for a value, byte for byte
-(<code>1e400</code> stays <code>1e400</code>). Reading a single key returns the raw bytes.</p>
-<p>Limits: 256 KiB and 256 keys per room; 64 MiB per app. Deployments without a
-room store return 404.</p>
-<p>Scheduled Web Push, per room, on the same origin:</p>
-<pre>GET    /api/push/key                          -&gt; {"key": "&lt;VAPID public key&gt;"}
-PUT    /api/rooms/&lt;uuid&gt;/push/subscriptions     body: PushSubscription JSON
-DELETE /api/rooms/&lt;uuid&gt;/push/subscriptions     body: {"endpoint": "..."}
-GET    /api/rooms/&lt;uuid&gt;/push/subscriptions   -&gt; [{"endpoint", "added"}]
-PUT    /api/rooms/&lt;uuid&gt;/push/schedule          body: Schedule
-GET    /api/rooms/&lt;uuid&gt;/push/schedule        -&gt; Schedule
-POST   /api/rooms/&lt;uuid&gt;/push/test            -&gt; {"sent", "pruned"}  send now</pre>
-<p>Schedule:</p>
-<pre>{ "tz": "&lt;IANA zone&gt;",
-  "items": [ { "id", "at": "HH:MM", "days": [0..6], "title",
-               "body" | "bodyKey", "url", "tag" } ] }</pre>
-<p><code>at</code>/<code>days</code> fire weekly at local time in <code>tz</code> (0 = Sunday);
-<code>when</code> (RFC 3339) fires once instead. <code>bodyKey</code> names a room key read
-at send time, <code>{date}</code> replaced by the local date; a missing key sends nothing.
-Payload: <code>{"title","body","url","tag"}</code>. 404/410 endpoints are dropped.</p>
-<p>Limits: 16 subscriptions, 16 items per room; 2 KiB payload; 8 sends per device per
-day; one test per minute. <code>push</code> and <code>push/...</code> are reserved keys.</p>
+<dl>
+  <dt>tar czf - <em>dir</em> | ssh -T hostthis.dev [<em>slug</em>]</dt>
+  <dd>deploy, or redeploy in place</dd>
+  <dt>routing</dt><dd>a missing path serves index.html</dd>
+  <dt>layout</dt><dd>one top-level directory is flattened</dd>
+  <dt>no index.html</dt><dd>browsable knowledge base</dd>
+  <dt>redeploy</dt><dd>stores only changed files</dd>
+  <dt>.hostthis-keep</dt><dd>lines from <strong>have</strong> for files not sent; base must still be latest</dd>
+</dl>
+</div>
+
+<h2>Persistence</h2>
+<div class="indent">
+<p>Key-value rooms on the page's own origin. The room id is the only key.</p>
+<dl>
+  <dt>POST /api/rooms</dt><dd>new room: {"id": "<em>uuid</em>"}</dd>
+  <dt>GET /api/rooms/<em>id</em></dt><dd>all keys as one JSON object</dd>
+  <dt>GET /api/rooms/<em>id</em>/<em>key</em></dt><dd>one value, raw bytes</dd>
+  <dt>PUT /api/rooms/<em>id</em>/<em>key</em></dt><dd>write; body is the value</dd>
+  <dt>DELETE /api/rooms/<em>id</em>/<em>key</em></dt><dd>remove</dd>
+</dl>
+<p class="ink-soft">Values are bytes; JSON values nest as JSON in whole-room reads.
+256 KiB and 256 keys per room, 64 MiB per app.</p>
+</div>
+
+<h2>Websockets</h2>
+<div class="indent">
+<dl>
+  <dt>GET /api/rooms/<em>id</em>/ws</dt><dd>a snapshot, then every put and delete</dd>
+  <dt>your frames</dt><dd>relayed to other clients, not stored</dd>
+  <dt>{"type":"ping"}</dt><dd>every 20 s; answered with pong</dd>
+  <dt>close 4001</dt><dd>dropped for a newcomer after 2 min without ping; reconnect</dd>
+</dl>
+<p class="ink-soft">64 sockets per room; frames up to 32 KiB.</p>
+</div>
+
+<h2>Push</h2>
+<div class="indent">
+<dl>
+  <dt>GET /api/push/key</dt><dd>VAPID public key</dd>
+  <dt>PUT|DELETE .../<em>id</em>/push/subscriptions</dt><dd>add or remove a PushSubscription</dd>
+  <dt>PUT .../<em>id</em>/push/schedule</dt><dd>{"tz", "items": [{"id", "at": "HH:MM", "days", "title", "body" | "bodyKey", "url", "tag"}]}</dd>
+  <dt>POST .../<em>id</em>/push/test</dt><dd>send now</dd>
+</dl>
+<p class="ink-soft">"when" (RFC 3339) fires once instead of at/days. bodyKey reads a room key at
+send time. 16 devices and 16 items per room, 8 sends per device per day, one
+test a minute. push and push/* are reserved keys.</p>
 </div>
 
 <h2>Limits</h2>
 <div class="indent">
-<p>1 GiB per identity, counting post-compression bytes across every active version
-of every active paste and site. One paste: 10 MiB after compression. One site:
-1 GiB unpacked.</p>
-
-<p>Pastes are HTML, Markdown, a unified diff, a Mermaid diagram, a PDF, a CSV or
-JSON document, folded stacks as a flame graph, NDJSON logs, or plain text;
-sites are a gzip-tar archive. Pastes and sites persist indefinitely.</p>
+<dl>
+  <dt>quota</dt><dd>1 GiB per key, after compression</dd>
+  <dt>paste</dt><dd>10 MiB after compression</dd>
+  <dt>site</dt><dd>1 GiB unpacked</dd>
+</dl>
 </div>
 
 <h2>Exit Status</h2>
 <div class="indent">
-<pre>0   success
-1   generic failure
-2   usage error: bad arguments or unknown verb
-3   identity required: no ssh key presented
-4   not found, or not yours
-6   refused by the per-subnet rate limit</pre>
+<pre>0  ok              3  no ssh key
+1  error           4  not found
+2  usage           6  rate limited</pre>
 </div>
 
 <h2>Environment</h2>
-<div class="indent">
-<pre>NO_COLOR    set to any value to disable color output
-TERM=dumb   also disables color output</pre>
-<p>Read from the environment your ssh client forwards.</p>
-</div>
-
-<h2>Examples</h2>
-<div class="indent">
-<pre><span class="ink-soft"># capture just the URL; 2>/dev/null drops the QR + narration</span>
-url=$(cat index.html | ssh -T hostthis.dev 2>/dev/null)
-
-<span class="ink-soft"># upload with a label; --name and --type follow a literal --</span>
-cat notes.md | ssh -T hostthis.dev -- --name "alpha notes"
-
-<span class="ink-soft"># force content type when sniffing gets it wrong</span>
-cat tricky.html | ssh -T hostthis.dev -- --type html
-
-<span class="ink-soft"># every format is auto-detected</span>
-git diff | ssh -T hostthis.dev           <span class="ink-soft"># a diff</span>
-cat cpu.folded | ssh -T hostthis.dev     <span class="ink-soft"># folded stacks -&gt; flame graph</span>
-cat app.ndjson | ssh -T hostthis.dev     <span class="ink-soft"># NDJSON logs -&gt; log viewer</span>
-
-<span class="ink-soft"># link to a place inside a paste
-#   &lt;url&gt;#some-heading   &lt;url&gt;#page=3   &lt;url&gt;#row=42   &lt;url&gt;#F1L42-L48</span>
-
-<span class="ink-soft"># redeploy a site, sending only what changed since the latest version</span>
-ssh hostthis.dev have abc12345 &gt; held
-(cd dist &amp;&amp; find . -type f | sed 's|^\./||' | sort | xargs sha256sum) &gt; local
-{ grep '^base ' held; grep -Fxf local held; } &gt; dist/.hostthis-keep
-grep -vFxf held local | cut -c67- | tar czf - -C dist -T - .hostthis-keep | ssh -T hostthis.dev abc12345</pre>
-</div>
+<div class="indent"><p>NO_COLOR or TERM=dumb disables color.</p></div>
 
 <h2>See Also</h2>
-<div class="indent">
-<p>Source: <a href="https://github.com/Zamua/hostthis">github.com/Zamua/hostthis</a></p>
-</div>
+<div class="indent"><p><a href="https://github.com/Zamua/hostthis">github.com/Zamua/hostthis</a></p></div>
 
 <footer class="footline">
   <span>hostthis</span>
-  <span class="center">2026-06</span>
+  <span class="center">2026-10</span>
   <span>HOSTTHIS(1)</span>
 </footer>
 
