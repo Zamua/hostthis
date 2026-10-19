@@ -25,23 +25,24 @@ what it uploaded. Everything persists until you delete it.
 cat <file> | ssh -T hostthis.dev           new paste; URL on stdout, QR on stderr
 cat <file> | ssh -T hostthis.dev <slug>    new version; same URL
 -- --name "<label>"                        set a label
--- --type <kind>                           force the renderer: html, markdown, diff,
+-- --type <kind>                           force the renderer when detection misses (a
+                                           tiny CSV reads as text): html, markdown, diff,
                                            mermaid, pdf, csv, json, flamegraph, log, text
 ```
 
-`-T` silences ssh's pseudo-terminal warning.
+`-T` silences ssh's pseudo-terminal warning. `--` may go before or after the slug.
 
 ## COMMANDS
 
 Each runs as `ssh hostthis.dev <command>`.
 
 ```
-list [-o json]               your pastes, newest first
+list [-o json]               your pastes, most recently updated first
 whoami [-o json]             identity, count, quota
 get <slug>                   content to stdout
 url <slug>                   the URL
 qr <slug>                    the URL and a QR code
-rename <slug> [<label>]      set the label; none clears it
+rename <slug> [<label>]      set the label; omit it to clear
 versions <slug> [-o json]    version history
 pin <slug> <ver>             serve <ver> until unpinned
 unpin <slug>                 serve the latest version
@@ -50,10 +51,13 @@ delete <slug> <ver>          delete one version's bytes
 have <slug> [-o json]        a site's files as a keep list (see SITES)
 ```
 
+Sizes are stored bytes after compression, the unit of the quota.
+
 ## LINKS
 
 ```
-<url>?raw                    source bytes
+<url>?raw                    source bytes (pages render in the browser, so
+                             curl of the page itself gets the renderer)
 #<heading> #page=3 #row=42   markdown, pdf, csv
 #L42-L48 #F1L42-L48          text and log lines, diff lines of file 1
 #focus=<stack> #q=<term>     flame graph zoom, highlight
@@ -63,12 +67,14 @@ have <slug> [-o json]        a site's files as a keep list (see SITES)
 
 ```
 tar czf - <dir> | ssh -T hostthis.dev [<slug>]   deploy, or redeploy in place
-routing                      a missing path serves index.html
+routing                      a missing path without a file extension serves
+                             index.html; a missing asset is 404
 layout                       one top-level directory is flattened
 no index.html                browsable knowledge base
 redeploy                     stores only changed files
-.hostthis-keep               lines from `have` for files not sent;
-                             base must still be latest
+.hostthis-keep               lines from `have` for files not sent, placed
+                             next to index.html; its directory is the site
+                             root. A stale base is refused: run have again
 ```
 
 To send only what changed since the latest version:
@@ -82,7 +88,9 @@ grep -vFxf held local | cut -c67- | tar czf - -C dist -T - .hostthis-keep | ssh 
 
 ## PERSISTENCE
 
-Key-value rooms on the page's own origin. The room id is the only key.
+Key-value rooms at `https://<slug>.hostthis.dev/api/`, on your page's own origin
+(not the apex). No auth: a room id, issued by POST, is the only key. Rooms are
+deleted with their site.
 
 ```
 POST   /api/rooms             new room: {"id": "<uuid>"}
@@ -92,14 +100,17 @@ PUT    /api/rooms/<id>/<key>  write; body is the value
 DELETE /api/rooms/<id>/<key>  remove
 ```
 
-Values are bytes; JSON values nest as JSON in whole-room reads. 256 KiB and
-256 keys per room, 64 MiB per app.
+In whole-room reads a value that parses as JSON nests as JSON; any other value
+is a string. 256 KiB and 256 keys per room, 64 MiB per app.
 
 ## WEBSOCKETS
 
 ```
-GET /api/rooms/<id>/ws       a snapshot, then every put and delete
-your frames                  relayed to other clients, not stored
+GET /api/rooms/<id>/ws       {"type":"snapshot","seq","state"}, then
+                             {"type":"put","seq","key","value"} and
+                             {"type":"delete","seq","key"}
+your frames                  relayed verbatim to the other clients; not
+                             echoed, not stored, so treat them as untrusted
 {"type":"ping"}              every 20 s; answered with pong
 close 4001                   dropped for a newcomer after 2 min without
                              ping; reconnect
@@ -112,9 +123,9 @@ close 4001                   dropped for a newcomer after 2 min without
 ```
 GET        /api/push/key                       VAPID public key
 PUT|DELETE /api/rooms/<id>/push/subscriptions  add or remove a PushSubscription
-PUT        /api/rooms/<id>/push/schedule       {"tz", "items": [{"id", "at": "HH:MM",
-                                               "days", "title", "body" | "bodyKey",
-                                               "url", "tag"}]}
+GET|PUT    /api/rooms/<id>/push/schedule       {"tz", "items": [{"id", "at": "HH:MM",
+                                               "days": [0-6, 0 = Sunday], "title",
+                                               "body" | "bodyKey", "url", "tag"}]}
 POST       /api/rooms/<id>/push/test           send now
 ```
 

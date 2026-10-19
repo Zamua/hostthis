@@ -85,7 +85,7 @@ func (s *WorkerBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 		return nil, 0, fmt.Errorf("blob worker: get %s: %w", key, err)
 	}
 	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := s.client.Do(req)
+	resp, err := s.doRead(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("blob worker: get %s: %w", key, err)
 	}
@@ -119,7 +119,7 @@ func (s *WorkerBlobStore) GetRange(key string, offset, length int64) (io.ReadClo
 	}
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, offset+length-1))
-	resp, err := s.client.Do(req)
+	resp, err := s.doRead(req)
 	if err != nil {
 		return nil, fmt.Errorf("blob worker: get %s: %w", key, err)
 	}
@@ -164,6 +164,17 @@ func (s *WorkerBlobStore) Delete(key string) error {
 		return fmt.Errorf("blob worker: delete %s: %w", key, err)
 	}
 	return expectNoContent(resp, "delete "+key)
+}
+
+// doRead sends a bodiless read, retrying once when the exchange fails before
+// any response: a dropped connection mid-deploy otherwise refuses the whole
+// deploy over one read.
+func (s *WorkerBlobStore) doRead(req *http.Request) (*http.Response, error) {
+	resp, err := s.client.Do(req)
+	if err == nil || req.Context().Err() != nil {
+		return resp, err
+	}
+	return s.client.Do(req.Clone(req.Context()))
 }
 
 func expectNoContent(resp *http.Response, op string) error {

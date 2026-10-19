@@ -62,13 +62,20 @@ func (c *cell) do(ctx context.Context, method, path, key, val string, body any) 
 		}
 		payload = b
 	}
-	rdr := bytes.NewReader(payload)
-	req, err := http.NewRequestWithContext(ctx, method, u, rdr)
-	if err != nil {
-		return nil, fmt.Errorf("worker: build %s: %w", path, err)
+	send := func() (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return c.client.Do(req)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.client.Do(req)
+	resp, err := send()
+	// A read is safe to send twice, and a pooled connection the far side has
+	// already closed fails one exchange with nothing answered.
+	if err != nil && method == http.MethodGet && ctx.Err() == nil {
+		resp, err = send()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("worker: %s: %w", path, err)
 	}

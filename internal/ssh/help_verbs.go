@@ -72,12 +72,12 @@ var verbDescriptors = map[string]verbDescriptor{
 	},
 	"rename": {
 		Name:      "rename",
-		Signature: "ssh {{apex}} rename <slug> \"<name>\"",
+		Signature: "ssh {{apex}} rename <slug> [\"<name>\"]",
 		Description: "Set or change the owner-only label for one of your pastes. " +
-			"Pass an empty string to clear.",
+			"Omit the name to clear it.",
 		Examples: []string{
 			"ssh {{apex}} rename abc12345 \"design v4\"",
-			"ssh {{apex}} rename abc12345 \"\"",
+			"ssh {{apex}} rename abc12345",
 		},
 	},
 	"delete": {
@@ -98,7 +98,8 @@ var verbDescriptors = map[string]verbDescriptor{
 		Signature: "ssh {{apex}} have <slug> [-o json]",
 		Description: "Print a site's latest version as a keep list: `base <n>`, then " +
 			"`<sha256>  <path>` per file. Put the lines for unchanged files in " +
-			".hostthis-keep at the archive root and send only the changed files.",
+			".hostthis-keep next to index.html (its directory is the site root) and " +
+			"send only the changed files.",
 		Examples: []string{
 			"ssh {{apex}} have abc12345 > keep.txt",
 		},

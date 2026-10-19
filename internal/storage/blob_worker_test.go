@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strconv"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/workertest"
@@ -127,4 +128,37 @@ func TestWorkerBlob_StatusMapping(t *testing.T) {
 	if err := bs.DeletePrefix(domain.UploadPrefix(domain.NewUploadID())); err == nil {
 		t.Fatal("DeletePrefix on a 500 = nil, want an error")
 	}
+}
+
+// A read whose connection drops before any response is retried once.
+func TestWorkerBlob_RetriesADroppedRead(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+			return
+		}
+		w.Header().Set("X-Blob-Size", "2")
+		if r.Header.Get("Range") != "" {
+			w.WriteHeader(http.StatusPartialContent)
+		}
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+	s, err := storage.NewWorkerBlobStore(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, _, err := s.GetReader("uploads/u/0")
+	if err != nil {
+		t.Fatalf("get after one dropped connection: %v", err)
+	}
+	_ = rc.Close()
+	calls.Store(0)
+	rc, err = s.GetRange("uploads/u/0", 0, 2)
+	if err != nil {
+		t.Fatalf("range after one dropped connection: %v", err)
+	}
+	_ = rc.Close()
 }

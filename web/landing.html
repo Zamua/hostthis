@@ -109,21 +109,22 @@ what it uploaded. Everything persists until you delete it.</p>
   <dt>-- --name "<em>label</em>"</dt>
   <dd>set a label</dd>
   <dt>-- --type <em>kind</em></dt>
-  <dd>force the renderer: html, markdown, diff, mermaid, pdf, csv, json,
-  flamegraph, log, text</dd>
+  <dd>force the renderer when detection misses (a tiny CSV reads as text):
+  html, markdown, diff, mermaid, pdf, csv, json, flamegraph, log, text</dd>
 </dl>
-<p class="ink-soft">-T silences ssh's pseudo-terminal warning.</p>
+<p class="ink-soft">-T silences ssh's pseudo-terminal warning. -- may go before or
+after the slug.</p>
 </div>
 
 <h2>Commands</h2>
 <div class="indent">
 <dl>
-  <dt>list [-o json]</dt><dd>your pastes, newest first</dd>
+  <dt>list [-o json]</dt><dd>your pastes, most recently updated first</dd>
   <dt>whoami [-o json]</dt><dd>identity, count, quota</dd>
   <dt>get <em>slug</em></dt><dd>content to stdout</dd>
   <dt>url <em>slug</em></dt><dd>the URL</dd>
   <dt>qr <em>slug</em></dt><dd>the URL and a QR code</dd>
-  <dt>rename <em>slug</em> [<em>label</em>]</dt><dd>set the label; none clears it</dd>
+  <dt>rename <em>slug</em> [<em>label</em>]</dt><dd>set the label; omit it to clear</dd>
   <dt>versions <em>slug</em> [-o json]</dt><dd>version history</dd>
   <dt>pin <em>slug</em> <em>ver</em></dt><dd>serve <em>ver</em> until unpinned</dd>
   <dt>unpin <em>slug</em></dt><dd>serve the latest version</dd>
@@ -131,12 +132,14 @@ what it uploaded. Everything persists until you delete it.</p>
   <dt>delete <em>slug</em> <em>ver</em></dt><dd>delete one version's bytes</dd>
   <dt>have <em>slug</em> [-o json]</dt><dd>a site's files as a keep list (see Sites)</dd>
 </dl>
+<p class="ink-soft">Sizes are stored bytes after compression, the unit of the quota.</p>
 </div>
 
 <h2>Links</h2>
 <div class="indent">
 <dl>
-  <dt><em>url</em>?raw</dt><dd>source bytes</dd>
+  <dt><em>url</em>?raw</dt><dd>source bytes (pages render in the browser, so curl
+  of the page itself gets the renderer)</dd>
   <dt>#<em>heading</em>, #page=3, #row=42</dt><dd>markdown, pdf, csv</dd>
   <dt>#L42-L48, #F1L42-L48</dt><dd>text and log lines, diff lines of file 1</dd>
   <dt>#focus=<em>stack</em>, #q=<em>term</em></dt><dd>flame graph zoom, highlight</dd>
@@ -148,33 +151,40 @@ what it uploaded. Everything persists until you delete it.</p>
 <dl>
   <dt>tar czf - <em>dir</em> | ssh -T hostthis.dev [<em>slug</em>]</dt>
   <dd>deploy, or redeploy in place</dd>
-  <dt>routing</dt><dd>a missing path serves index.html</dd>
+  <dt>routing</dt><dd>a missing path without a file extension serves index.html;
+  a missing asset is 404</dd>
   <dt>layout</dt><dd>one top-level directory is flattened</dd>
   <dt>no index.html</dt><dd>browsable knowledge base</dd>
   <dt>redeploy</dt><dd>stores only changed files</dd>
-  <dt>.hostthis-keep</dt><dd>lines from <strong>have</strong> for files not sent; base must still be latest</dd>
+  <dt>.hostthis-keep</dt><dd>lines from <strong>have</strong> for files not sent,
+  placed next to index.html; its directory is the site root. A stale base is
+  refused: run have again</dd>
 </dl>
 </div>
 
 <h2>Persistence</h2>
 <div class="indent">
-<p>Key-value rooms on the page's own origin. The room id is the only key.</p>
+<p>Key-value rooms at https://&lt;slug&gt;.hostthis.dev/api/, on your page's own
+origin (not the apex). No auth: a room id, issued by POST, is the only key.
+Rooms are deleted with their site.</p>
 <dl>
-  <dt>POST /api/rooms</dt><dd>new room: {"id": "<em>uuid</em>"}</dd>
-  <dt>GET /api/rooms/<em>id</em></dt><dd>all keys as one JSON object</dd>
-  <dt>GET /api/rooms/<em>id</em>/<em>key</em></dt><dd>one value, raw bytes</dd>
-  <dt>PUT /api/rooms/<em>id</em>/<em>key</em></dt><dd>write; body is the value</dd>
-  <dt>DELETE /api/rooms/<em>id</em>/<em>key</em></dt><dd>remove</dd>
+  <dt>POST /api/rooms</dt><dd>new room: {"id": "&lt;uuid&gt;"}</dd>
+  <dt>GET /api/rooms/&lt;id&gt;</dt><dd>all keys as one JSON object</dd>
+  <dt>GET /api/rooms/&lt;id&gt;/&lt;key&gt;</dt><dd>one value, raw bytes</dd>
+  <dt>PUT /api/rooms/&lt;id&gt;/&lt;key&gt;</dt><dd>write; body is the value</dd>
+  <dt>DELETE /api/rooms/&lt;id&gt;/&lt;key&gt;</dt><dd>remove</dd>
 </dl>
-<p class="ink-soft">Values are bytes; JSON values nest as JSON in whole-room reads.
-256 KiB and 256 keys per room, 64 MiB per app.</p>
+<p class="ink-soft">In whole-room reads a value that parses as JSON nests as JSON;
+any other value is a string. 256 KiB and 256 keys per room, 64 MiB per app.</p>
 </div>
 
 <h2>Websockets</h2>
 <div class="indent">
 <dl>
-  <dt>GET /api/rooms/<em>id</em>/ws</dt><dd>a snapshot, then every put and delete</dd>
-  <dt>your frames</dt><dd>relayed to other clients, not stored</dd>
+  <dt>GET /api/rooms/&lt;id&gt;/ws</dt><dd>{"type":"snapshot","seq","state"}, then
+  {"type":"put","seq","key","value"} and {"type":"delete","seq","key"}</dd>
+  <dt>your frames</dt><dd>relayed verbatim to the other clients; not echoed, not
+  stored, so treat them as untrusted</dd>
   <dt>{"type":"ping"}</dt><dd>every 20 s; answered with pong</dd>
   <dt>close 4001</dt><dd>dropped for a newcomer after 2 min without ping; reconnect</dd>
 </dl>
@@ -185,9 +195,10 @@ what it uploaded. Everything persists until you delete it.</p>
 <div class="indent">
 <dl>
   <dt>GET /api/push/key</dt><dd>VAPID public key</dd>
-  <dt>PUT|DELETE .../<em>id</em>/push/subscriptions</dt><dd>add or remove a PushSubscription</dd>
-  <dt>PUT .../<em>id</em>/push/schedule</dt><dd>{"tz", "items": [{"id", "at": "HH:MM", "days", "title", "body" | "bodyKey", "url", "tag"}]}</dd>
-  <dt>POST .../<em>id</em>/push/test</dt><dd>send now</dd>
+  <dt>PUT|DELETE .../&lt;id&gt;/push/subscriptions</dt><dd>add or remove a PushSubscription</dd>
+  <dt>GET|PUT .../&lt;id&gt;/push/schedule</dt><dd>{"tz", "items": [{"id", "at": "HH:MM",
+  "days": [0-6, 0 = Sunday], "title", "body" | "bodyKey", "url", "tag"}]}</dd>
+  <dt>POST .../&lt;id&gt;/push/test</dt><dd>send now</dd>
 </dl>
 <p class="ink-soft">"when" (RFC 3339) fires once instead of at/days. bodyKey reads a room key at
 send time. 16 devices and 16 items per room, 8 sends per device per day, one

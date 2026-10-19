@@ -50,6 +50,9 @@ func UntarKeep(src io.Reader, sink domain.FileSink, quotaBudget int64) (domain.M
 		}
 	}
 	man := ex.Finish()
+	if err := ex.KeepErr(); err != nil {
+		return domain.Manifest{}, nil, err
+	}
 	if kl, ok := ex.KeepList(); ok {
 		return man, &kl, nil
 	}

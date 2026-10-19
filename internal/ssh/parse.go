@@ -19,12 +19,14 @@ type uploadArgs struct {
 //
 //	[<slug>] [--name "label"] [--type html|markdown|diff|mermaid|pdf|csv|json]
 //
-// Flags may come before or after the slug.
+// Flags may come before or after the slug, and a bare "--" anywhere is the
+// option terminator ssh needs before a flag, so it is skipped.
 func parseUploadFlags(argv []string) (uploadArgs, error) {
 	var out uploadArgs
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
 		switch {
+		case a == "--":
 		case a == "--name":
 			// ssh flattens the command to a space-joined string, so a
 			// multi-word label arrives as several tokens: join up to the next

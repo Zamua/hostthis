@@ -532,7 +532,8 @@ func (d *DeploySite) applyKeepList(man domain.Manifest, keep domain.KeepList, ba
 		return fmt.Errorf("%w: a new site has no base to keep from", domain.ErrBadKeepList)
 	}
 	if keep.Base != base.ver {
-		return domain.ErrBaseMoved
+		return fmt.Errorf("%w: it was made for version %d, the latest is %d; run have again",
+			domain.ErrBadKeepList, keep.Base, base.ver)
 	}
 	packed := map[string][]keptMember{}
 	for _, p := range slices.Sorted(maps.Keys(keep.Paths)) {

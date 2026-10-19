@@ -1785,7 +1785,9 @@ because by then it has advanced past its `argv[0]`.
 Verified on OpenSSH 10.2p1 (macOS) and 9.6p1 (Linux); the behaviour comes
 from portable OpenSSH itself, so it is not platform-specific. Server-side
 parsing is unaffected - the server accepts `--name` and `--type` exactly as
-specified - so this constrains only how the client must be invoked.
+specified - so this constrains only how the client must be invoked. The server
+skips a bare `--` wherever it arrives, so `ssh hostthis.dev <slug> -- --type
+csv` works as well as `ssh hostthis.dev -- <slug> --type csv`.
 
 **stdout vs stderr discipline**: the URL is the *only* thing on stdout -
 one line, no trailing whitespace, no formatting - so pipes Just Work:
@@ -2789,15 +2791,19 @@ commit.
   base points at that object: nothing is stored, nothing new is charged. A file
   matching only a packed base file is stored again in this deploy's own pack,
   so a pack is never kept alive by another version.
-- **Keep list.** An archive may hold `.hostthis-keep` at its root (after the
-  shared top directory is stripped). It is never stored or served. Its first
+- **Keep list.** An archive may hold `.hostthis-keep` at its top level or one
+  directory down. Its directory IS the site root: the sent files are stripped
+  to it (never by the shared-directory guess, which would misplace files sent
+  from one subdirectory), and a sent file outside it refuses the deploy. It is
+  never stored or served. Its first
   line is `base <n>`; each further line is `<digest>  <path>`, the format
   `sha256sum` prints, with paths relative to the site root. Each listed path is
   carried from the base: a standalone file by reference, a packed one copied
   server-side into this deploy's pack. The copy reads each base pack once and
   moves its members' stored bytes unchanged, so carrying a file costs no
   per-file read and no decode. The deploy is refused whole, with
-  nothing published, when `base` is not the head, a listed path is absent from
+  nothing published, when `base` is not the head (the error says which version
+  is, and to run `have` again), a listed path is absent from
   the base or has another digest, a path is listed twice or is also in the
   archive, or a line is malformed (including `sha256sum`'s escaped form, a
   leading `\`). A base file neither sent nor listed is dropped. `.hostthis-keep`
