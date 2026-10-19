@@ -131,7 +131,7 @@ func TestDeployToSlug_KeepListRefusals(t *testing.T) {
 		sent map[string]string
 		want error
 	}{
-		"stale base":   {"base 7\n" + sha("a") + "  a.js\n", nil, domain.ErrBaseMoved},
+		"stale base":   {"base 7\n" + sha("a") + "  a.js\n", nil, domain.ErrBadKeepList},
 		"wrong digest": {"base 1\n" + sha("b") + "  a.js\n", nil, domain.ErrBadKeepList},
 		"absent path":  {"base 1\n" + sha("a") + "  b.js\n", nil, domain.ErrBadKeepList},
 		"also sent":    {"base 1\n" + sha("a") + "  a.js\n", map[string]string{"a.js": "a"}, domain.ErrBadKeepList},
@@ -276,4 +276,39 @@ func TestDeployToSlug_KeepListReadsEachPackOnce(t *testing.T) {
 		}
 	}
 	servesBytes(t, blobs, head2, want)
+}
+
+// The keep list's directory is the site root: sent files under one directory
+// keep that directory, and files outside the root refuse the deploy.
+func TestDeployToSlug_KeepListDefinesTheRoot(t *testing.T) {
+	d, _, blobs := reuseStack(t)
+	owner := "key:root"
+	v1 := map[string]string{"index.html": "<h1>one</h1>", "assets/a.js": "a", "assets/b.js": "b"}
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), owner)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	slug := r1.Site.Slug
+	keep := "base 1\n" + sha("<h1>one</h1>") + "  index.html\n" + sha("a") + "  assets/a.js\n"
+
+	// Only assets/ is sent, so the shared-directory guess would strip it.
+	arc := gzipTar(t, map[string]string{".hostthis-keep": keep, "assets/b.js": "b2"})
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); err != nil {
+		t.Fatalf("root keep deploy: %v", err)
+	}
+	_, head := headOf(t, d, slug, owner)
+	servesBytes(t, blobs, head, map[string]string{"index.html": "<h1>one</h1>", "assets/a.js": "a", "assets/b.js": "b2"})
+
+	keep2 := "base 2\n" + sha("b2") + "  assets/b.js\n"
+	arc = gzipTar(t, map[string]string{"dist/.hostthis-keep": keep2, "dist/index.html": "<h1>three</h1>", "dist/assets/a.js": "a"})
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); err != nil {
+		t.Fatalf("wrapped keep deploy: %v", err)
+	}
+	_, head = headOf(t, d, slug, owner)
+	servesBytes(t, blobs, head, map[string]string{"index.html": "<h1>three</h1>", "assets/a.js": "a", "assets/b.js": "b2"})
+
+	arc = gzipTar(t, map[string]string{"dist/.hostthis-keep": "base 3\n", "stray.txt": "x", "dist/index.html": "y"})
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); !errors.Is(err, domain.ErrBadKeepList) {
+		t.Fatalf("file outside the keep root: %v, want ErrBadKeepList", err)
+	}
 }

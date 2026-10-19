@@ -64,6 +64,7 @@ type SiteExtractor struct {
 	// keep is the archive's keep list, and keepRel where it was found.
 	keep    *KeepList
 	keepRel string
+	keepErr error
 }
 
 // NewSiteExtractor starts an extraction with quotaBudget bytes available. The
@@ -167,16 +168,32 @@ func (e *SiteExtractor) Add(ent ArchiveEntry, body io.Reader, sink FileSink) err
 func (e *SiteExtractor) Finish() Manifest {
 	// Strip a shared top-level directory so `tar czf - site/` serves index.html
 	// at the root. No-op when files are at root or span multiple directories.
-	dir := e.man.commonLeadingDir()
-	e.man.StripCommonLeadingDir()
-	// The keep list counts only at the site root: the archive's, the stripped
-	// directory's, or the only directory of an archive that sends no files.
-	if e.keep != nil && e.keepRel != KeepListName && e.keepRel != dir+"/"+KeepListName &&
-		(len(e.man.Files) > 0 || strings.Count(e.keepRel, "/") != 1) {
-		e.keep = nil
+	if e.keep == nil {
+		e.man.StripCommonLeadingDir()
+		return e.man
 	}
+	// A keep list's directory IS the site root: the files it names are
+	// root-relative, so the sent files must be stripped to the same root,
+	// never by the shared-directory guess.
+	root := path.Dir(e.keepRel)
+	if root == "." {
+		return e.man
+	}
+	stripped := make(map[string]ManifestEntry, len(e.man.Files))
+	for p, entry := range e.man.Files {
+		rel, ok := strings.CutPrefix(p, root+"/")
+		if !ok {
+			e.keepErr = fmt.Errorf("%w: %s is outside %s/, where %s is", ErrBadKeepList, p, root, KeepListName)
+			return e.man
+		}
+		stripped[rel] = entry
+	}
+	e.man.Files = stripped
 	return e.man
 }
+
+// KeepErr is a keep list that cannot define the site root, read after Finish.
+func (e *SiteExtractor) KeepErr() error { return e.keepErr }
 
 // KeepList is the archive's keep list at the site root, read after Finish.
 func (e *SiteExtractor) KeepList() (KeepList, bool) {

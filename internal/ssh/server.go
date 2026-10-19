@@ -541,7 +541,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 	if res.Paste.Name != "" {
-		_, _ = fmt.Fprintf(sess.Stderr(), "%q.\n", res.Paste.Name)
+		_, _ = fmt.Fprintf(sess.Stderr(), "labeled %q.\n", res.Paste.Name)
 	}
 	s.emitURL(sess, res.Paste.Slug)
 }
