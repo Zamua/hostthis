@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -353,5 +357,69 @@ func TestSite_ArchiveOverPasteInputCap(t *testing.T) {
 	}
 	if resp, body := httpGet(t, strings.TrimSpace(stdout)); resp.StatusCode != 200 || body != siteIndex {
 		t.Fatalf("GET site: code %d body %q", resp.StatusCode, body)
+	}
+}
+
+// A site file with a recorded size answers single byte ranges, a full read
+// advertises them, and a stale If-Range falls back to the whole file.
+func TestSite_ByteRanges(t *testing.T) {
+	s := startStack(t, withSites())
+	audio := strings.Repeat("0123456789", 300_000)
+	stdout, stderr, exit := s.run("", makeSiteArchive(t, map[string]string{
+		"index.html":            siteIndex,
+		"assets/lectures/a.m4a": audio,
+	}))
+	if exit != 0 {
+		t.Fatalf("deploy exit %d: stderr %q", exit, stderr)
+	}
+	url := strings.TrimSpace(stdout) + "/assets/lectures/a.m4a"
+	get := func(headers ...string) (*http.Response, string) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", url, nil)
+		for i := 0; i < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close() //nolint:errcheck
+		b, _ := io.ReadAll(resp.Body)
+		return resp, string(b)
+	}
+
+	full, body := get()
+	if full.StatusCode != 200 || body != audio || full.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("full read: %d, %d bytes, Accept-Ranges %q", full.StatusCode, len(body), full.Header.Get("Accept-Ranges"))
+	}
+	etag := full.Header.Get("ETag")
+	n := len(audio)
+	for _, c := range []struct {
+		name, header, ifRange string
+		status                int
+		contentRange, body    string
+	}{
+		{"middle", "bytes=1000000-1000099", "", 206, fmt.Sprintf("bytes 1000000-1000099/%d", n), audio[1000000:1000100]},
+		{"to end", "bytes=2999990-", "", 206, fmt.Sprintf("bytes 2999990-2999999/%d", n), audio[2999990:]},
+		{"suffix", "bytes=-5", "", 206, fmt.Sprintf("bytes 2999995-2999999/%d", n), audio[n-5:]},
+		{"past end", fmt.Sprintf("bytes=%d-", n), "", 416, fmt.Sprintf("bytes */%d", n), ""},
+		{"several", "bytes=0-1,4-5", "", 200, "", audio},
+		{"matching If-Range", "bytes=0-3", etag, 206, fmt.Sprintf("bytes 0-3/%d", n), audio[:4]},
+		{"stale If-Range", "bytes=0-3", `"other"`, 200, "", audio},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hs := []string{"Range", c.header}
+			if c.ifRange != "" {
+				hs = append(hs, "If-Range", c.ifRange)
+			}
+			resp, body := get(hs...)
+			if resp.StatusCode != c.status || resp.Header.Get("Content-Range") != c.contentRange || body != c.body {
+				t.Fatalf("got %d %q (%d bytes), want %d %q (%d bytes)",
+					resp.StatusCode, resp.Header.Get("Content-Range"), len(body), c.status, c.contentRange, len(c.body))
+			}
+			if c.status == 206 && resp.Header.Get("Content-Length") != strconv.Itoa(len(c.body)) {
+				t.Fatalf("Content-Length %q, want %d", resp.Header.Get("Content-Length"), len(c.body))
+			}
+		})
 	}
 }

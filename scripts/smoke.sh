@@ -406,6 +406,15 @@ if [ -n "$stream_url" ]; then
   [ "$got" = "$want" ] \
     && ok "streamed body reads back intact ($got bytes)" \
     || bad "streamed body round-trip" "read back $got bytes, want $want"
+  # Media players (iOS Safari's <audio>) need byte ranges from the origin.
+  want_range=$(tail -c +1025 "$stream_dir/site/big.bin" | head -c 16 | od -An -tx1 | tr -d ' \n')
+  range_out=$(curl -s -D - -o "$stream_dir/range.bin" -H 'Range: bytes=1024-1039' "${stream_url%/}/big.bin" 2>/dev/null)
+  got_range=$(od -An -tx1 "$stream_dir/range.bin" 2>/dev/null | tr -d ' \n')
+  if echo "$range_out" | head -1 | grep -q ' 206' && [ "$got_range" = "$want_range" ]; then
+    ok "byte range answers 206 with the right bytes"
+  else
+    bad "byte range" "$(echo "$range_out" | head -1 | tr -d '\r'), bytes ${got_range:-none}"
+  fi
 else
   bad "streamed upload" "no URL returned for a ${stream_mb} MiB body"
 fi

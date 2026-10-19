@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -66,21 +67,58 @@ func conditionals(r request, h response) []request {
 	return out
 }
 
+// ranges ask a sized answer for parts of its body, satisfiable or not, and
+// with an If-Range that holds and one that does not.
+func ranges(r request, h response) []request {
+	if h.status != 200 || h.header.Get("Accept-Ranges") != "bytes" {
+		return nil
+	}
+	size := h.header.Get("Content-Length")
+	out := []request{
+		r.with("Range", "bytes=0-0"),
+		r.with("Range", "bytes=1-"),
+		r.with("Range", "bytes=-3"),
+		r.with("Range", "bytes=0-99999999"),
+		r.with("Range", "bytes="+size+"-"),
+		r.with("Range", "bytes=-0"),
+		r.with("Range", "bytes=0-1,3-4"),
+		r.with("Range", "bytes=5-1"),
+		r.with("Range", "lines=0-1"),
+		r.with("Range", "bytes=0-1").with("If-Range", `"other"`),
+		{method: "HEAD", host: r.host, target: r.target, header: r.with("Range", "bytes=1-").header},
+	}
+	if etag := h.header.Get("ETag"); etag != "" {
+		out = append(out, r.with("Range", "bytes=0-1").with("If-Range", etag))
+	}
+	return out
+}
+
 // checkTarget compares every variant of target and, for an answer with
-// validators, its revalidations.
+// validators, its revalidations and byte ranges.
 func (w *world) checkTarget(t *testing.T, host, target string) {
 	t.Helper()
 	for _, r := range variants(host, target) {
 		h := w.check(t, r)
 		if r.method == "GET" {
-			for _, c := range conditionals(r, h) {
+			rs := ranges(r, h)
+			rangeChecks.Add(int64(len(rs)))
+			for _, c := range slices.Concat(conditionals(r, h), rs) {
 				w.check(t, c)
 			}
 		}
 	}
 }
 
+// rangeChecks counts range requests compared, so a corpus that stops
+// recording sizes cannot silently stop exercising them.
+var rangeChecks atomic.Int64
+
 func testReads(t *testing.T, w *world) {
+	t.Cleanup(func() {
+		if rangeChecks.Load() == 0 {
+			t.Error("no read answered with Accept-Ranges, so no range was compared")
+		}
+	})
 	for _, sc := range w.slugs {
 		t.Run(sc.label, func(t *testing.T) {
 			t.Parallel()

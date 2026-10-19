@@ -28,6 +28,8 @@ var comparedHeaders = []string{
 	"Allow",
 	"Location",
 	"X-Content-Type-Options",
+	"Accept-Ranges",
+	"Content-Range",
 }
 
 // world is the two servers under comparison and what they serve.
