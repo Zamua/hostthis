@@ -42,7 +42,7 @@ func (r *generationSwapRepo) Unpin(slug domain.Slug, generation string) error {
 	return r.PasteRepo.Unpin(slug, generation)
 }
 
-func (r *generationSwapRepo) DeleteVersion(slug domain.Slug, generation string, version int) (string, error) {
+func (r *generationSwapRepo) DeleteVersion(slug domain.Slug, generation string, version int) (domain.VersionRelease, error) {
 	r.runSwap()
 	return r.PasteRepo.DeleteVersion(slug, generation, version)
 }

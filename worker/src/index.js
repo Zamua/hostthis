@@ -3409,6 +3409,13 @@ async function handleBlob(request, env, url) {
   if (!validBlobKey(key)) {
     return new Response("invalid key\n", { status: 400 });
   }
+  if (request.method === "DELETE") {
+    if (!key.startsWith(BLOB_DELETE_PREFIX)) {
+      return new Response("invalid key\n", { status: 400 });
+    }
+    await env.PAYLOADS.delete(key);
+    return new Response(null, { status: 204 });
+  }
   if (request.method === "PUT") {
     // A zero-length request has no body stream.
     await env.PAYLOADS.put(key, request.body ?? new Uint8Array(0));

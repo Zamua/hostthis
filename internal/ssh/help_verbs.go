@@ -93,6 +93,16 @@ var verbDescriptors = map[string]verbDescriptor{
 			"ssh {{apex}} delete abc12345 2",
 		},
 	},
+	"have": {
+		Name:      "have",
+		Signature: "ssh {{apex}} have <slug> [-o json]",
+		Description: "Print a site's latest version as a keep list: `base <n>`, then " +
+			"`<sha256>  <path>` per file. Put the lines for unchanged files in " +
+			".hostthis-keep at the archive root and send only the changed files.",
+		Examples: []string{
+			"ssh {{apex}} have abc12345 > keep.txt",
+		},
+	},
 	"versions": {
 		Name:      "versions",
 		Signature: "ssh {{apex}} versions <slug> [-o json]",

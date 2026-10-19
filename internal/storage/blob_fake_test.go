@@ -101,3 +101,10 @@ func readKey(t testing.TB, c *CompressedBlobStore, key string) []byte {
 	}
 	return b
 }
+
+func (f *fakeDurable) Delete(key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objs, key)
+	return nil
+}

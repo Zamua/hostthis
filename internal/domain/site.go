@@ -19,6 +19,9 @@ type Site struct {
 	Kind     ContentKind
 	UploadID string   // prefix holding this deploy's objects
 	Manifest Manifest // path -> object key + size + content-type
+	// Base is the version a redeploy was computed against; zero shares
+	// nothing (docs/SPEC.md "Redeploy reuse").
+	Base int
 	// StoredBytes is what the quota charged for this site. Zero on a Site that
 	// has not been read from storage.
 	StoredBytes int
@@ -51,6 +54,9 @@ type ManifestEntry struct {
 	// single-document paste keeps its detected kind; a file inside a directory
 	// leaves it empty and is served raw.
 	Kind string
+	// Digest is the hex SHA-256 of the decoded bytes. A redeploy reuses by it,
+	// and it is the entry's ETag. Empty on entries written before it.
+	Digest string `json:",omitempty"`
 }
 
 // Ref is where the entry's stored bytes live.
@@ -58,9 +64,13 @@ func (e ManifestEntry) Ref() BlobRef {
 	return BlobRef{Key: e.Key, Offset: e.Offset, Length: e.Length}
 }
 
-// Validator is the entry's HTTP validator. Objects never change, so the key
-// suffices, plus the offset when several files share one pack.
+// Validator is the entry's HTTP validator: its content digest, which follows
+// the bytes wherever they are stored. Without one, the key suffices, since
+// objects never change, plus the offset when several files share one pack.
 func (e ManifestEntry) Validator() string {
+	if e.Digest != "" {
+		return "sha256-" + e.Digest
+	}
 	if e.Length > 0 {
 		return e.Key + "@" + strconv.FormatInt(e.Offset, 10)
 	}
@@ -408,4 +418,16 @@ func ContentTypeForPath(p string) string {
 		return ft.contentType
 	}
 	return "application/octet-stream"
+}
+
+// VersionRelease is what deleting one version frees: whole upload prefixes and
+// single objects, decided in the delete's commit from its live neighbours, and
+// the bytes of charge released. Listed is false for an answer that names only
+// Upload, from a store that predates reuse.
+type VersionRelease struct {
+	Upload   string
+	Prefixes []string
+	Keys     []string
+	Freed    int
+	Listed   bool
 }

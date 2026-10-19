@@ -486,7 +486,7 @@ func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug 
 
 func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, generation string,
 	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int,
-	userCap int64, now time.Time,
+	userCap int64, now time.Time, base int,
 ) (domain.AppendResult, error) {
 	opID, err := newOpaqueID("append")
 	if err != nil {
@@ -499,11 +499,15 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		Ver       int    `json:"ver"`
 		WasPinned bool   `json:"wasPinned"`
 	}
-	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, map[string]any{
+	body := map[string]any{
 		"opId": opID, "generation": generation, "userCap": userCap,
 		"kind": string(kind), "uploadId": uploadID, "size": size,
 		"manifest": manifest, "now": now.UTC().UnixMilli(),
-	}, &res)
+	}
+	if base > 0 {
+		body["base"] = base
+	}
+	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, body, &res)
 	// Only an identified refusal is definitive: the service deletes the upload's
 	// bytes on one, and any other answer may still publish the version.
 	switch {
@@ -517,6 +521,10 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		return domain.AppendResult{}, domain.ErrBusy
 	case replaced(status, res.Error):
 		return domain.AppendResult{}, domain.ErrNotFound
+	case status == http.StatusConflict && res.Error == "base-moved":
+		return domain.AppendResult{}, domain.ErrBaseMoved
+	case status == http.StatusConflict && res.Error == "bad-reuse":
+		return domain.AppendResult{}, domain.ErrBadReuse
 	case status >= 300 || res.Appended == nil:
 		return domain.AppendResult{}, fmt.Errorf("worker: append: unrecognised answer: status %d %s", status, res.Error)
 	case *res.Appended:
@@ -532,7 +540,7 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 func (r *PasteRepo) AppendVersionWithQuotaCheck(ctx context.Context, slug domain.Slug, generation string,
 	kind domain.ContentKind, uploadID string, manifest domain.Manifest, size int, userCap int64, now time.Time,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, kind, uploadID, manifest, size, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, kind, uploadID, manifest, size, userCap, now, 0)
 }
 
 // ListVersions is a single-cell read: the appended versions live beside the row.
@@ -571,39 +579,64 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 // frees the charge while the bytes remain, which under-charges silently and is
 // the direction nothing watches.
 //
-// The answer names the version's upload, also when it was already deleted, and
-// is empty for a version recorded without an upload id.
-func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (string, error) {
+// The answer names what the delete freed, decided in its commit; a delete of
+// a version already deleted frees nothing.
+func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) (domain.VersionRelease, error) {
 	opID, err := newOpaqueID("delete-version")
 	if err != nil {
-		return "", err
+		return domain.VersionRelease{}, err
 	}
 	var res struct {
-		Deleted bool   `json:"deleted"`
-		Upload  string `json:"upload"`
-		Error   string `json:"error"`
+		Deleted  bool      `json:"deleted"`
+		Upload   string    `json:"upload"`
+		Prefixes *[]string `json:"prefixes"`
+		Keys     []string  `json:"keys"`
+		Freed    int       `json:"freed"`
+		Error    string    `json:"error"`
 	}
 	status, err := r.callArtifactMutation(context.Background(), "/paste/delversion", slug,
 		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
 	if err != nil {
-		return "", err
+		return domain.VersionRelease{}, err
 	}
 	if status == http.StatusLocked {
-		return "", domain.ErrBusy
+		return domain.VersionRelease{}, domain.ErrBusy
 	}
 	if replaced(status, res.Error) {
-		return "", domain.ErrNotFound
+		return domain.VersionRelease{}, domain.ErrNotFound
 	}
 	if status == http.StatusConflict {
 		if res.Error == "version-served" {
-			return "", domain.ErrVersionCurrentlyServed
+			return domain.VersionRelease{}, domain.ErrVersionCurrentlyServed
 		}
-		return "", fmt.Errorf("worker: delete-version accounting conflict")
+		return domain.VersionRelease{}, fmt.Errorf("worker: delete-version accounting conflict")
 	}
 	if !res.Deleted {
-		return "", domain.ErrNotFound
+		return domain.VersionRelease{}, domain.ErrNotFound
 	}
-	return res.Upload, nil
+	rel := domain.VersionRelease{Upload: res.Upload, Keys: res.Keys, Freed: res.Freed}
+	if res.Prefixes != nil {
+		rel.Prefixes, rel.Listed = *res.Prefixes, true
+	}
+	return rel, nil
+}
+
+// HeadManifest reads the latest live version and its manifest: the base a
+// redeploy is computed against.
+func (r *PasteRepo) HeadManifest(slug domain.Slug) (int, domain.Manifest, error) {
+	var res struct {
+		Found    bool            `json:"found"`
+		Ver      int             `json:"ver"`
+		Manifest json.RawMessage `json:"manifest"`
+	}
+	status, err := r.call(context.Background(), http.MethodGet, "/paste/head", "slug", slug.String(), nil, &res)
+	if err != nil {
+		return 0, domain.Manifest{}, err
+	}
+	if status == http.StatusNotFound || !res.Found {
+		return 0, domain.Manifest{}, domain.ErrNotFound
+	}
+	return res.Ver, r.storedManifest(res.Manifest, slug, res.Ver), nil
 }
 
 // GetVersion reads one retained version. Single-cell.
@@ -718,11 +751,12 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 // because the paste cell IS the slug.
 
 // AppendManifestVersion appends a retained file-set version under the directory
-// shape this deploy decided.
+// shape this deploy decided. A base above zero names the version it was
+// computed against and may share that version's objects.
 func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug, generation string,
-	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time,
+	kind domain.ContentKind, uploadID string, m domain.Manifest, size int, userCap int64, now time.Time, base int,
 ) (domain.AppendResult, error) {
-	return r.appendArtifact(ctx, slug, generation, kind, uploadID, m, size, userCap, now)
+	return r.appendArtifact(ctx, slug, generation, kind, uploadID, m, size, userCap, now, base)
 }
 
 // urlQuery escapes a value for a query string. Named rather than inlined so

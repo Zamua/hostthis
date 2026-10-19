@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -175,16 +176,21 @@ func TestDeleteRefusalNamesNoUploads(t *testing.T) {
 	}
 }
 
-func TestDeleteVersionReturnsTheUpload(t *testing.T) {
-	for answer, want := range map[string]string{
-		`{"deleted":true,"totalSize":3,"upload":"upload-2"}`: "upload-2",
-		`{"deleted":true,"totalSize":3}`:                     "",
+// An answer with lists names exactly what they free; one without names only
+// its upload, as a cell from before reuse answers.
+func TestDeleteVersionReturnsTheRelease(t *testing.T) {
+	for answer, want := range map[string]domain.VersionRelease{
+		`{"deleted":true,"totalSize":3,"upload":"upload-2"}`: {Upload: "upload-2"},
+		`{"deleted":true,"totalSize":3}`:                     {},
+		`{"deleted":true,"totalSize":3,"upload":"","prefixes":["uploads/u1/"],"keys":["uploads/u2/1"],"freed":7}`: {
+			Prefixes: []string{"uploads/u1/"}, Keys: []string{"uploads/u2/1"}, Freed: 7, Listed: true,
+		},
 	} {
 		f := fixedCell(http.StatusOK, answer)
 		repo := NewPasteRepo("https://cell", f.client())
 		got, err := repo.DeleteVersion("slugone1", "generation-1", 2)
-		if err != nil || got != want {
-			t.Fatalf("DeleteVersion with %s = (%q, %v), want %q", answer, got, err, want)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("DeleteVersion with %s = (%+v, %v), want %+v", answer, got, err, want)
 		}
 	}
 }

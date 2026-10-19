@@ -208,15 +208,16 @@ const ENTRY_FIELDS = {
   LENGTH: ["length", "int"],
   SIZE: [null, "int"],
   DECODEDSIZE: ["decodedSize", "int"],
-  COMPRESSEDSIZE: ["compressedSize", "int"],
+  // Accounting only: the cell charges by it, and no read answer carries it.
+  COMPRESSEDSIZE: ["compressedSize", "int", "accounting"],
   CONTENTTYPE: ["contentType", "string"],
   KIND: [null, "string"],
   DIGEST: ["digest", "string"],
 };
 
-function decodeManifest(value) {
+function decodeManifest(value, accounting = false) {
   try {
-    return decodeFiles(value);
+    return decodeFiles(value, accounting);
   } catch (error) {
     if (error instanceof Undecodable) {
       return new Map();
@@ -240,7 +241,7 @@ export function entryValidator(entry) {
 // members the manifest names, counted once per offset.
 export function manifestObjects(value) {
   const spans = new Map();
-  for (const entry of decodeManifest(value).values()) {
+  for (const entry of decodeManifest(value, true).values()) {
     if (!entry.key) {
       continue;
     }
@@ -262,7 +263,7 @@ export function manifestObjects(value) {
   return objects;
 }
 
-function decodeFiles(value) {
+function decodeFiles(value, accounting) {
   let files = new Map();
   if (value === undefined || value === null) {
     return files;
@@ -276,20 +277,23 @@ function decodeFiles(value) {
       continue;
     }
     for (const [path, entry] of Object.entries(asObject(field))) {
-      files.set(path, decodeEntry(entry));
+      files.set(path, decodeEntry(entry, accounting));
     }
   }
   return files;
 }
 
-function decodeEntry(value) {
+function decodeEntry(value, accounting) {
   const entry = { key: "", offset: 0, length: 0, contentType: "", decodedSize: 0 };
   for (const [name, field] of Object.entries(value === undefined || value === null ? {} : asObject(value))) {
     const known = ENTRY_FIELDS[foldName(name)];
     if (!known || field === undefined || field === null) {
       continue;
     }
-    const [as, type] = known;
+    const [as, type, use] = known;
+    if (use === "accounting" && !accounting) {
+      continue;
+    }
     const decoded = type === "string" ? asString(field) : asInt(field);
     if (as) {
       entry[as] = decoded;

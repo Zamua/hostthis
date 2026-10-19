@@ -185,6 +185,9 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 		if read.Length > 0 {
 			fields["offset"], fields["length"] = read.Offset, read.Length
 		}
+		if read.Digest != "" {
+			fields["digest"] = read.Digest
+		}
 		entry := map[string]any{"entry": fields}
 		switch {
 		case kind == domain.KindHTML:

@@ -2297,6 +2297,9 @@ STATIC SITES
 
     tar czf - site/ | ssh -T hostthis.dev        deploy a multi-file site
     tar czf - site/ | ssh -T hostthis.dev <slug> re-deploy in place
+    ssh hostthis.dev have <slug>                 keep list of the latest version; put
+                                             unchanged files' lines in .hostthis-keep
+                                             to skip sending them
 
 LIMITS
 
