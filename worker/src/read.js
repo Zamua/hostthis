@@ -208,9 +208,10 @@ const ENTRY_FIELDS = {
   LENGTH: ["length", "int"],
   SIZE: [null, "int"],
   DECODEDSIZE: ["decodedSize", "int"],
-  COMPRESSEDSIZE: [null, "int"],
+  COMPRESSEDSIZE: ["compressedSize", "int"],
   CONTENTTYPE: ["contentType", "string"],
   KIND: [null, "string"],
+  DIGEST: ["digest", "string"],
 };
 
 function decodeManifest(value) {
@@ -224,10 +225,41 @@ function decodeManifest(value) {
   }
 }
 
-// An entry's validator, the same as Go's ManifestEntry.Validator: its key,
-// plus its offset when several files share one pack.
+// An entry's validator, the same as Go's ManifestEntry.Validator: its
+// content digest when it has one, else its key, plus its offset when several
+// files share one pack.
 export function entryValidator(entry) {
+  if (entry.digest) {
+    return `sha256-${entry.digest}`;
+  }
   return entry.length > 0 ? `${entry.key}@${entry.offset}` : entry.key;
+}
+
+// Each object a stored manifest references, with its stored size and whether
+// it is a pack (docs/SPEC.md "Redeploy reuse"). A pack's size is the sum of its
+// members the manifest names, counted once per offset.
+export function manifestObjects(value) {
+  const spans = new Map();
+  for (const entry of decodeManifest(value).values()) {
+    if (!entry.key) {
+      continue;
+    }
+    let object = spans.get(entry.key);
+    if (!object) {
+      object = { packed: entry.length > 0, sizes: new Map() };
+      spans.set(entry.key, object);
+    }
+    object.sizes.set(entry.offset ?? 0, entry.compressedSize ?? 0);
+  }
+  const objects = new Map();
+  for (const [key, { packed, sizes }] of spans) {
+    let size = 0;
+    for (const n of sizes.values()) {
+      size += n;
+    }
+    objects.set(key, { packed, size });
+  }
+  return objects;
 }
 
 function decodeFiles(value) {
