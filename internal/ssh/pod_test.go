@@ -155,16 +155,23 @@ func (s *podStack) link(t *testing.T) {
 		t.Fatalf("link page: %d, names the key: %v\n%s", res.StatusCode, strings.Contains(string(page), fp), page)
 	}
 	u, _ := url.Parse(linkURL)
-	res, err = noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, url.Values{"k": {u.Query().Get("k")}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = res.Body.Close()
-	if res.StatusCode != http.StatusSeeOther {
-		t.Fatalf("continue: %d, want 303 to the provider", res.StatusCode)
+	// Continue pressed twice: the first sign-in must still complete.
+	var first string
+	for i := range 2 {
+		res, err = noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, url.Values{"k": {u.Query().Get("k")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusSeeOther {
+			t.Fatalf("continue: %d, want 303 to the provider", res.StatusCode)
+		}
+		if i == 0 {
+			first = res.Header.Get("Location")
+		}
 	}
 	// The provider approves at once and redirects to the callback.
-	res, err = noRedirect.Get(res.Header.Get("Location"))
+	res, err = noRedirect.Get(first)
 	if err != nil {
 		t.Fatal(err)
 	}

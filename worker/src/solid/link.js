@@ -46,7 +46,9 @@ function page(status, title, body) {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+      // No form-action: Continue posts here and is redirected to the owner's
+      // provider, and browsers apply form-action to that redirect too.
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
       "X-Content-Type-Options": "nosniff",
     },
   });
@@ -272,7 +274,8 @@ async function callback(env, url) {
   const state = url.searchParams.get("state") ?? "";
   const id = /^([a-f0-9]{16})\./.exec(state)?.[1];
   const link = id && await loadLink(env, id);
-  if (!link || link.state !== "pending" || Date.now() >= link.expires || link.login?.state !== state) {
+  const login = link?.logins?.find((l) => l.state === state);
+  if (!link || link.state !== "pending" || Date.now() >= link.expires || !login) {
     return dead();
   }
   const code = url.searchParams.get("code");
@@ -280,21 +283,21 @@ async function callback(env, url) {
     return failed(`your provider answered ${url.searchParams.get("error") ?? "without a code"}`);
   }
   const urls = solidUrls(env);
-  const session = await sessionKey(link.login.dpop);
+  const session = await sessionKey(login.dpop);
   let token;
   try {
-    const res = await fetch(link.login.tokenEndpoint, {
+    const res = await fetch(login.tokenEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
-        DPoP: await dpopProof(session, "POST", link.login.tokenEndpoint),
+        DPoP: await dpopProof(session, "POST", login.tokenEndpoint),
       },
       body: new URLSearchParams({
         grant_type: "authorization_code",
         code,
         redirect_uri: urls.callback,
         client_id: urls.client,
-        code_verifier: link.login.verifier,
+        code_verifier: login.verifier,
       }),
     });
     token = await res.json();
