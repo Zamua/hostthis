@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"io"
+	"math"
 	"runtime"
 	"sync"
 	"testing"
@@ -86,11 +87,17 @@ func TestWarmEncodeAllocatesLittle(t *testing.T) {
 		put(e)
 	}
 	run()
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	run()
-	runtime.ReadMemStats(&after)
-	if got := after.TotalAlloc - before.TotalAlloc; got > 2<<20 {
+	// TotalAlloc is process-wide, so the least of a few runs filters out
+	// allocations other goroutines make meanwhile.
+	got := uint64(math.MaxUint64)
+	for range 3 {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		run()
+		runtime.ReadMemStats(&after)
+		got = min(got, after.TotalAlloc-before.TotalAlloc)
+	}
+	if got > 2<<20 {
 		t.Fatalf("warm 9 MiB encode allocated %.1f MiB, want under 2 MiB", float64(got)/(1<<20))
 	}
 }
