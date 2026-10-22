@@ -83,7 +83,10 @@ type Manage struct {
 	Repo    PasteAdmin
 	Blob    BlobUnit // per-upload writes, streaming reads, prefix deletes
 	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
-	Now     func() time.Time
+	// UploadIDs mints each upload's id, which decides where its bytes are
+	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
+	UploadIDs UploadIDSource
+	Now       func() time.Time
 	// Logger records object deletions that fail after the outcome is decided.
 	// nil discards.
 	Logger *log.Logger
@@ -154,7 +157,10 @@ type UpdateResult struct {
 // new version also becomes the served one; on a PINNED paste the pin holds and
 // the new version is recorded but not served.
 func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
-	uploadID := domain.NewUploadID()
+	uploadID, err := m.UploadIDs.next(owner)
+	if err != nil {
+		return UpdateResult{}, fmt.Errorf("upload id: %w", err)
+	}
 	staged, err := streamUpload(body)
 	defer staged.discard()
 	switch {

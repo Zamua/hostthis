@@ -1,6 +1,8 @@
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
+import { solidEnabled } from "./solid/identity.js";
+import { payloads, PodError } from "./solid/pod.js";
 import { manifestObjects, resolveRead } from "./read.js";
 import {
   PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
@@ -616,6 +618,15 @@ const IDENTITY_OPS = {
   artifactproject: mutation((self, body) => self.artifactProject(body)),
   artifactdrop: mutation((self, body) => self.artifactDrop(body)),
   notesubnet: mutation((self, body) => self.noteSubnet(body)),
+  // The owner's pod link, and the link cells (`podlink:<id>`) that record each
+  // link (docs/SPEC.md "Pod storage").
+  podget: read((self) => self.podGet()),
+  podset: mutation((self, body) => self.podSet(body)),
+  podclear: mutation((self) => self.podClear()),
+  linkstart: mutation((self, body) => self.linkStart(body)),
+  linkget: read((self) => self.linkGet()),
+  linkbegin: mutation((self, body) => self.linkBegin(body)),
+  linkcomplete: mutation((self, body) => self.linkComplete(body)),
   subnets: mutation((self, _body, url) => self.subnets(url), { body: false }),
 };
 
@@ -998,6 +1009,84 @@ export class Identity {
       await this.state.storage.put("subnets", subnets);
     }
     return new Response(null, { status: 204 });
+  }
+
+  async podGet() {
+    return Response.json({ link: (await this.state.storage.get("pod")) ?? null });
+  }
+
+  async podSet(body) {
+    if (!requireShape(body, { id: "string", webid: "string", storage: "string", linked: "uint" })) {
+      return Response.json({ error: "malformed-link" }, { status: 400 });
+    }
+    const link = { id: body.id, webid: body.webid, storage: body.storage, linked: body.linked };
+    await this.state.storage.put("pod", link);
+    return Response.json({ link });
+  }
+
+  async podClear() {
+    const had = (await this.state.storage.get("pod")) !== undefined;
+    await this.state.storage.delete("pod");
+    return Response.json({ cleared: had });
+  }
+
+  // A pending link: whose key it binds, the WebID it names, and its secret's
+  // hash. Started once; a second start of the same id is a conflict.
+  async linkStart(body) {
+    if (!solidEnabled(this.env)) {
+      return Response.json({ error: "pods-unavailable" }, { status: 409 });
+    }
+    if (!requireShape(body, { owner: "string", webid: "string", secretHash: "string", expires: "uint" })) {
+      return Response.json({ error: "malformed-link" }, { status: 400 });
+    }
+    if ((await this.state.storage.get("link")) !== undefined) {
+      return Response.json({ error: "link-exists" }, { status: 409 });
+    }
+    await this.state.storage.put("link", {
+      state: "pending",
+      owner: body.owner,
+      webid: body.webid,
+      secretHash: body.secretHash,
+      expires: body.expires,
+    });
+    return new Response(null, { status: 204 });
+  }
+
+  async linkGet() {
+    const link = await this.state.storage.get("link");
+    return link ? Response.json(link) : new Response("not found\n", { status: 404 });
+  }
+
+  // The login under way: the state, PKCE verifier and DPoP key the callback
+  // needs, kept on the pending link until it completes.
+  async linkBegin(body) {
+    const link = await this.state.storage.get("link");
+    if (!link || link.state !== "pending") {
+      return Response.json({ error: "link-not-pending" }, { status: 409 });
+    }
+    await this.state.storage.put("link", { ...link, login: body.login, storage: body.storage });
+    return new Response(null, { status: 204 });
+  }
+
+  // Pending to linked, once: the login's secrets are dropped and the record
+  // never changes again.
+  async linkComplete(body) {
+    const link = await this.state.storage.get("link");
+    if (!link || link.state !== "pending") {
+      return Response.json({ error: "link-not-pending" }, { status: 409 });
+    }
+    if (typeof (link.storage ?? body.storage) !== "string") {
+      return Response.json({ error: "malformed-link" }, { status: 400 });
+    }
+    const done = {
+      state: "linked",
+      owner: link.owner,
+      webid: link.webid,
+      storage: link.storage ?? body.storage,
+      linked: body.linked,
+    };
+    await this.state.storage.put("link", done);
+    return Response.json(done);
   }
 
   async subnets(url) {
@@ -3393,13 +3482,27 @@ function blobRange(header) {
   return { offset, length: end - offset + 1 };
 }
 
+// A pod's refusal is a 502 naming its answer (docs/SPEC.md "Pod storage").
 async function handleBlob(request, env, url) {
+  try {
+    return await handleBlobRoute(request, env, url);
+  } catch (error) {
+    if (error instanceof PodError) {
+      return Response.json({ error: "pod", status: error.status, message: error.message }, { status: 502 });
+    }
+    throw error;
+  }
+}
+
+async function handleBlobRoute(request, env, url) {
   if (url.pathname === "/blob" && request.method === "DELETE") {
     const prefix = url.searchParams.get("prefix");
     if (!validBlobPrefix(prefix)) {
       return new Response("invalid prefix\n", { status: 400 });
     }
-    await deleteBlobPrefix(env.PAYLOADS, prefix);
+    if (!(await payloads.deletePodPrefix(env, prefix))) {
+      await deleteBlobPrefix(env.PAYLOADS, prefix);
+    }
     return new Response(null, { status: 204 });
   }
   if (!url.pathname.startsWith(BLOB_PATH)) {
@@ -3413,12 +3516,13 @@ async function handleBlob(request, env, url) {
     if (!key.startsWith(BLOB_DELETE_PREFIX)) {
       return new Response("invalid key\n", { status: 400 });
     }
-    await env.PAYLOADS.delete(key);
+    await payloads.delete(env, key);
     return new Response(null, { status: 204 });
   }
   if (request.method === "PUT") {
     // A zero-length request has no body stream.
-    await env.PAYLOADS.put(key, request.body ?? new Uint8Array(0));
+    const length = Number(request.headers.get("Content-Length"));
+    await payloads.put(env, key, request.body, request.headers.has("Content-Length") ? length : undefined);
     return new Response(null, { status: 204 });
   }
   if (request.method === "GET") {
@@ -3426,7 +3530,7 @@ async function handleBlob(request, env, url) {
     if (range === null) {
       return new Response("invalid range\n", { status: 400 });
     }
-    const object = await env.PAYLOADS.get(key, range ? { range } : undefined);
+    const object = await payloads.get(env, key, range);
     if (object === null) {
       return new Response("not found\n", { status: 404 });
     }

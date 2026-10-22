@@ -597,6 +597,7 @@ const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pas
 	"    ssh paste.test rename <slug> \"label\"      set / change owner label\n" +
 	"    ssh paste.test delete <slug> [<ver>]      wipe the paste, or tombstone one version\n" +
 	"    ssh paste.test whoami                     identity + active count + quota\n" +
+	"    ssh paste.test pod link <webid>           store new uploads in your Solid pod\n" +
 	"\n" +
 	"VERSION HISTORY\n" +
 	"\n" +

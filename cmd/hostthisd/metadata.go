@@ -25,12 +25,15 @@ type metadataBundle struct {
 	Rooms   roomStore
 	// RoomRelay is the cell-backed real-time transport.
 	RoomRelay httpapi.RoomRelay
+	// Solid forwards the apex /_solid/ paths to the Worker.
+	Solid http.Handler
 }
 
 // metadataRepo is the union of every service-layer / http-layer interface the
 // metadata plane has to satisfy: a wiring-layer concern.
 type metadataRepo interface {
 	service.PasteRepo
+	service.PodLinkRepo
 	service.PasteAdmin
 	httpapi.PasteReader
 }
@@ -65,6 +68,10 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 	// rather than each surface opening its own.
 	client := &http.Client{Timeout: 30 * time.Second, Transport: rt}
 	repo := worker.NewPasteRepo(base, client)
+	solid, err := worker.NewSolidProxy(base, apex, rt)
+	if err != nil {
+		return nil, err
+	}
 	repo.Logger = logger
 	rooms := worker.NewRoomRepo(base, client)
 	rooms.PushSubject = "https://" + apex
@@ -77,6 +84,7 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 		Rooms:   rooms,
 		// Every socket terminates at its Room cell, which owns broadcast order.
 		RoomRelay: worker.NewRoomProxy(base, client),
+		Solid:     solid,
 	}, nil
 }
 

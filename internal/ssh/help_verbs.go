@@ -148,6 +148,22 @@ var verbDescriptors = map[string]verbDescriptor{
 			"ssh {{apex}} whoami -o json | jq .quota_bytes",
 		},
 	},
+	"pod": {
+		Name:      "pod",
+		Signature: "ssh {{apex}} pod link <webid> | pod status [-o json] | pod unlink",
+		Description: "Store the bytes of new uploads in your Solid pod. The WebID is the " +
+			"profile URL your provider shows (https://<you>.solidcommunity.net/profile/card#me). " +
+			"`pod link` prints a URL, valid for 15 minutes, that a person must open: they " +
+			"sign in to the pod provider and approve, and the link takes effect then. " +
+			"hostthis gets read and write on <pod>/hostthis/ only. Only bytes move: every " +
+			"upload made while linked, new versions included, is stored in the pod, and " +
+			"slugs, URLs and quota work the same. `pod unlink` sends new uploads back to " +
+			"hostthis; versions in the pod keep serving while the folder stays shared.",
+		Examples: []string{
+			"ssh {{apex}} pod link https://alice.example/profile/card#me",
+			"ssh {{apex}} pod status",
+		},
+	},
 	"help": {
 		Name:      "help",
 		Signature: "ssh {{apex}} help [<verb>]",

@@ -66,6 +66,9 @@ type DeploySite struct {
 	// MaxArchiveBytes caps the compressed archive read; 0 means
 	// domain.MaxSiteArchiveBytes.
 	MaxArchiveBytes int64
+	// UploadIDs mints each upload's id, which decides where its bytes are
+	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
+	UploadIDs UploadIDSource
 }
 
 // ErrSiteArchiveTooLarge is returned when the compressed archive itself
@@ -213,7 +216,10 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time, base *
 	}
 	budget := siteExtractBudget(int64(domain.UserQuotaBytes), int64(usedPaste), usedSite)
 
-	uploadID := domain.NewUploadID()
+	uploadID, err := d.UploadIDs.next(owner)
+	if err != nil {
+		return domain.Manifest{}, "", fmt.Errorf("upload id: %w", err)
+	}
 	sink := &blobSink{blob: d.Blob, uploadID: uploadID, base: base.standalone()}
 	defer sink.Close()
 	limit := d.MaxArchiveBytes

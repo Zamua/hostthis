@@ -179,6 +179,8 @@ type Public struct {
 	URLMode        string // HOSTTHIS_URL_MODE
 	Scheme         string // HOSTTHIS_PUBLIC_SCHEME
 	ClientIPSource string // HOSTTHIS_CLIENT_IP_SOURCE
+	SolidKey       string // HOSTTHIS_SOLID_KEY
+	SolidOrigin    string // HOSTTHIS_SOLID_ORIGIN
 }
 
 // PublicRuntime is a Worker with its public surface on, as a Cloudflare deploy
@@ -206,6 +208,8 @@ func StartPublic(t testing.TB, cfg Public) *PublicRuntime {
 		"HOSTTHIS_LOCALRT_URL_MODE="+cfg.URLMode,
 		"HOSTTHIS_LOCALRT_PUBLIC_SCHEME="+cfg.Scheme,
 		"HOSTTHIS_LOCALRT_CLIENT_IP_SOURCE="+cfg.ClientIPSource,
+		"HOSTTHIS_LOCALRT_SOLID_KEY="+cfg.SolidKey,
+		"HOSTTHIS_LOCALRT_SOLID_ORIGIN="+cfg.SolidOrigin,
 	)
 	logs := &syncBuffer{}
 	url, stdin, done, err := launch(env, logs)

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Zamua/hostthis/internal/domain"
 )
 
 // blobSizeHeader carries a GET's stored length: the Worker streams bodies
@@ -190,6 +193,13 @@ func expectNoContent(resp *http.Response, op string) error {
 func statusError(resp *http.Response, op string) error {
 	msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 	discardBody(resp)
+	var pod struct {
+		Error  string `json:"error"`
+		Status int    `json:"status"`
+	}
+	if resp.StatusCode == http.StatusBadGateway && json.Unmarshal(msg, &pod) == nil && pod.Error == "pod" {
+		return fmt.Errorf("blob worker: %s: %w", op, &domain.PodRefusedError{Status: pod.Status})
+	}
 	return fmt.Errorf("blob worker: %s: %s: %s", op, resp.Status, strings.TrimSpace(string(msg)))
 }
 

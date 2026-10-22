@@ -40,12 +40,15 @@ type BlobReader interface {
 
 // Server bundles the dependencies.
 type Server struct {
-	Pastes      PasteReader
-	Sites       SiteReader      // optional; nil disables static-site serving
-	Rooms       RoomService     // optional; nil disables the /api/rooms surface
-	RoomPush    RoomPushService // optional; nil disables the push routes
-	Relay       RoomRelay       // optional; nil disables the /api/rooms/<uuid>/ws relay
-	Blobs       BlobReader
+	Pastes   PasteReader
+	Sites    SiteReader      // optional; nil disables static-site serving
+	Rooms    RoomService     // optional; nil disables the /api/rooms surface
+	RoomPush RoomPushService // optional; nil disables the push routes
+	Relay    RoomRelay       // optional; nil disables the /api/rooms/<uuid>/ws relay
+	Blobs    BlobReader
+	// Solid answers the apex /_solid/ paths (docs/SPEC.md "Pod storage");
+	// nil leaves them 404.
+	Solid       http.Handler
 	LandingHTML []byte // optional; apex landing page bytes embedded at build
 	ApexDomain  string // e.g. "hostthis.dev"; used to peel slug subdomains
 	// Color labels the replica in blue/green deploys, echoed in the
@@ -72,6 +75,13 @@ func (s *Server) Handler() http.Handler {
 	// here ahead of the "/" catch-all, on any Host. serveAsset whitelists the
 	// asset names, so the prefix cannot reach any other path.
 	mux.HandleFunc("/_hostthis/", s.serveAsset)
+	mux.HandleFunc("/_solid/", func(w http.ResponseWriter, r *http.Request) {
+		if _, onSlug := s.slugFromHost(r.Host); onSlug || s.Solid == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.Solid.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Health endpoints answer on any Host and never enter slug routing.
 		if r.URL.Path == "/healthz" {
