@@ -49,6 +49,8 @@ unpin <slug>                 serve the latest version
 delete <slug>                delete everything
 delete <slug> <ver>          delete one version's bytes
 have <slug> [-o json]        a site's files as a keep list (see SITES)
+pod link <webid>             store new uploads' bytes in your Solid pod
+pod status | pod unlink      show the link; send new uploads back here
 ```
 
 Sizes are stored bytes after compression, the unit of the quota.

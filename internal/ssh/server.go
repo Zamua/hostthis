@@ -64,7 +64,10 @@ type Server struct {
 	Uploads     *UploadAdmission // optional; nil admits every upload at once
 	Now         func() time.Time // clock; defaults to time.Now when nil
 	BuildURL    URLBuilder
-	Logger      *log.Logger
+	// Pods and PodLinkURL serve `pod`; nil answers that pods are unavailable.
+	Pods       *service.Pods
+	PodLinkURL func(id, secret string) string
+	Logger     *log.Logger
 	// Metrics is optional; nil records nothing. Kept as a port so this package
 	// carries no Prometheus dependency and tests can assert on calls.
 	Metrics CommandRecorder
@@ -437,6 +440,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbUnpin(sess, owner, argv[1:])
 	case "whoami":
 		s.verbWhoami(sess, owner, argv[1:])
+	case "pod":
+		s.verbPod(sess, owner, argv[1:])
 	default:
 		// A bare slug is the update shortcut: `cat foo | ssh <apex> <slug>`.
 		if _, err := domain.ParseSlug(first); err == nil {
@@ -1093,6 +1098,7 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
     ssh {{apex}} rename <slug> "label"      set / change owner label
     ssh {{apex}} delete <slug> [<ver>]      wipe the paste, or tombstone one version
     ssh {{apex}} whoami                     identity + active count + quota
+    ssh {{apex}} pod link <webid>           store new uploads in your Solid pod
 
 VERSION HISTORY
 
@@ -1192,6 +1198,12 @@ func emitServiceErr(sess gossh.Session, err error) {
 		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: another change to this paste is still settling; retry shortly")
 	case errors.Is(err, domain.ErrStoreBusy):
 		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: busy storing other uploads; try again in a minute")
+	case errors.Is(err, domain.ErrPodsUnavailable):
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: "+domain.ErrPodsUnavailable.Error())
+	case errors.As(err, new(*domain.PodRefusedError)):
+		var refused *domain.PodRefusedError
+		errors.As(err, &refused)
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: "+refused.Error())
 	default:
 		fmt.Fprintf(sess.Stderr(), "hostthis: %v\n", err)
 	}

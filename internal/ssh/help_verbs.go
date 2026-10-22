@@ -148,6 +148,19 @@ var verbDescriptors = map[string]verbDescriptor{
 			"ssh {{apex}} whoami -o json | jq .quota_bytes",
 		},
 	},
+	"pod": {
+		Name:      "pod",
+		Signature: "ssh {{apex}} pod link <webid> | pod status [-o json] | pod unlink",
+		Description: "Store the bytes of new uploads in your Solid pod. `pod link` prints a " +
+			"URL; open it, sign in to your pod provider, and hostthis shares one " +
+			"folder of your pod, hostthis/, with its own identity. Everything else " +
+			"works the same. `pod unlink` sends new uploads back to hostthis; " +
+			"versions in your pod stay there while the folder stays shared.",
+		Examples: []string{
+			"ssh {{apex}} pod link https://alice.example/profile/card#me",
+			"ssh {{apex}} pod status",
+		},
+	},
 	"help": {
 		Name:      "help",
 		Signature: "ssh {{apex}} help [<verb>]",

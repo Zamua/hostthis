@@ -2261,6 +2261,26 @@ active:  4 paste(s)
 Sessions without a key never reach this verb - they're rejected at
 session startup with "ssh key required" on stderr and exit 3.
 
+### Pod
+```
+ssh hostthis.dev pod link https://alice.example/profile/card#me
+open within 15 minutes to link SHA256:abc...xyz:
+https://hostthis.dev/_solid/link/3f9c...?k=...
+
+ssh hostthis.dev pod status
+pod:     https://alice.example/hostthis/
+webid:   https://alice.example/profile/card#me
+linked:  2026-10-22
+
+ssh hostthis.dev pod unlink
+unlinked. new uploads are stored by hostthis; versions in your pod stay there.
+```
+Links a Solid pod so new uploads store their bytes in it (see "Pod storage").
+`pod status` prints `no pod linked.` when there is none; `pod unlink` with no
+link is the same no-op answer. `-o json` on `status` gives `{"pod", "webid",
+"linked"}`, or `null`. A second `pod link` replaces the first once its login
+completes.
+
 ### Help
 
 The bare `ssh hostthis.dev` (and `help`) prints the global banner. It is the
@@ -3060,6 +3080,111 @@ build it and the adapter ignores one if sent. Listing a site's history therefore
 costs the same whatever the site's file count, and a damaged version manifest
 cannot affect `versions`, `pin`, or version deletes.
 
+### Pod storage (bring your own storage)
+
+An owner may link a [Solid](https://solidproject.org) pod. From then on the
+bytes of that key's new uploads are stored in the pod instead of the payload
+bucket. Nothing else changes: the same verbs, URLs, headers, output, quota and
+reuse rules apply, and metadata (manifests, versions, ownership) stays in the
+Worker's cells. Only where an object's bytes live differs.
+
+**hostthis is its own Solid agent.** It never holds an owner's credentials.
+The deployment has a WebID, `<scheme>://<apex>/_solid/id#me`, whose profile
+names `<scheme>://<apex>/_solid` as its OIDC issuer. hostthis signs its own
+DPoP-bound access tokens for that WebID with `HOSTTHIS_SOLID_KEY`, a Worker
+secret holding an ES256 private JWK, and publishes the public half at
+`/_solid/jwks`. A pod verifies them as it verifies any Solid-OIDC token: from
+the issuer the WebID names. The owner grants that WebID read and write on one
+container of their pod, `<storage>hostthis/`, and on nothing else. Whoever
+holds `HOSTTHIS_SOLID_KEY` can therefore reach only those shared containers.
+`HOSTTHIS_SOLID_ORIGIN` replaces `<scheme>://<apex>` for a deployment whose
+public origin carries a port (dev and tests). Without the secret the Worker
+has no pod support: `pod link` answers that pods
+are not available, and every other path behaves as if no owner had linked one.
+
+**The apex endpoints.** The Worker's public router serves these on the apex
+host, and `hostthisd` forwards every apex `/_solid/` request to it (see
+"Public and internal hosts"):
+
+| Path | Answer |
+| --- | --- |
+| `/_solid/id` | the WebID profile (Turtle): `<#me> solid:oidcIssuer <…/_solid>` |
+| `/_solid/.well-known/openid-configuration` | `{"issuer", "jwks_uri"}` |
+| `/_solid/jwks` | the public key set |
+| `/_solid/client` | the Client ID Document used when an owner links |
+| `/_solid/link/<link-id>` | the link page (below) |
+| `/_solid/callback` | the OIDC redirect target |
+
+**Linking.** `ssh hostthis.dev pod link <webid>` prints a one-time URL,
+valid for 15 minutes, of the form `/_solid/link/<link-id>?k=<secret>`. The
+link id and secret are random; the Worker keeps the secret only as a hash.
+Opening the URL shows the SSH key fingerprint it will be linked to and says
+to continue only if you ran `pod link` yourself. Continuing:
+
+1. reads the WebID profile for its `solid:oidcIssuer` and `pim:storage`
+   (the first one listed), and redirects to that issuer: authorization code,
+   PKCE, scopes `openid webid`. No `offline_access` is requested, so no
+   refresh token is ever issued.
+2. On the callback, exchanges the code with a DPoP key made for this link
+   alone, checks that the token's `webid` is the WebID that was named, and
+   with that session finds the storage when the profile named none (the
+   nearest container above the WebID whose `Link` header types it
+   `pim:Storage`), creates `<storage>hostthis/` and writes its access rule:
+   the owner keeps read, write and control, hostthis's WebID gets read and
+   write, both for the container and everything in it. The rule is ACP when
+   the container's access resource advertises
+   `acp:AccessControlResource`, and WAC otherwise.
+3. Discards the session and records the link. Only then does the page say
+   linked.
+
+The login is what binds the pod to the key. One hostthis identity can reach
+every container shared with it, so a key may only be linked to a pod whose
+owner signed in through that key's own link URL. A link URL that expires, was
+already used, or whose secret is wrong fails without contacting the pod.
+
+**Where an object goes.** An upload made while its key has a link mints an
+upload id of the form `pod_<link-id>_<random>`, so its keys stay
+`uploads/<upload-id>/<n>` (see "Object keys") and every prefix, receipt and
+reuse rule is unchanged. The Worker's payload store sends a key whose upload
+id names a link to `<storage>hostthis/uploads/<upload-id>/<n>` in that link's
+pod, and every other key to the bucket. The link's record never changes once
+written, so the Worker caches it per isolate.
+
+- `PUT` writes the object with `Content-Type: application/octet-stream`.
+- `GET` reads it, with a `Range` header for a pack member; a pod that answers
+  200 to a range request fails the read.
+- A prefix delete reads the upload's container listing (`ldp:contains`),
+  deletes each object, then the container. Pod objects are never listed on
+  the request path otherwise.
+
+Each pod request carries a fresh DPoP proof and a hostthis access token the
+Worker reuses for up to two minutes, one per pod origin. The token is valid
+at every pod that shares with hostthis, so this relies on each pod enforcing
+its DPoP binding, as Solid-OIDC requires: without our DPoP key a token taken
+from one pod cannot be used at another.
+
+**History may mix.** Versions written before a link, or after `pod unlink`,
+keep their bytes in the bucket; versions written while linked keep theirs in
+the pod. Reuse references an object wherever it lives, since it copies keys,
+not bytes.
+
+**Failure.** A pod that refuses a request (401, 403), is unreachable, or
+answers 5xx makes the Worker answer 502 with a body naming the pod's
+answer. On a site deploy or a paste update that is a definitive failure:
+nothing is published, the upload's prefix is deleted as for any refused
+upload, and `hostthisd` prints `your pod refused the write (<status>); check
+that its hostthis/ folder is still shared with hostthis, or run pod link again`
+and exits 1. A new paste's bytes are written after its URL is printed (see
+"Paste lifecycle status"), so there it marks the paste failed. On a read it
+is a 500, the same as a missing object.
+
+**Unlinking.** `pod unlink` stops new uploads from going to the pod. It does
+not touch the pod or existing versions, which keep reading from it for as
+long as the owner leaves the container shared. Removing the share in any pod
+app revokes hostthis at once; versions stored there then fail to read.
+
+**Scope.** Paste and site bytes. Rooms stay in the Worker's cells.
+
 ---
 
 ## Metadata storage backends
@@ -3790,7 +3915,8 @@ warns.
 Every other request answers 404 with `404 page not found`,
 `Content-Type: text/plain; charset=utf-8` and `X-Content-Type-Options:
 nosniff`, the 404 `hostthisd` gives an unknown slug. The apex `/` is one: the
-landing page stays `hostthisd`'s. The Worker never redirects between schemes;
+landing page stays `hostthisd`'s. The apex `/_solid/` paths are the one
+exception (see "Pod storage"). The Worker never redirects between schemes;
 that is the front door's job.
 
 ### The public surface

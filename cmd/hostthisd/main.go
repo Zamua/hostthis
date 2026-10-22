@@ -107,6 +107,13 @@ func main() {
 	// content (docs/SPEC.md "One paste, not two aggregates").
 	uploadSvc.Archive = service.ArchiveAdapter{Deployer: deploySvc}
 
+	// Linked owners' uploads store their bytes in their pod (docs/SPEC.md "Pod
+	// storage").
+	pods := service.NewPods(pasteRepo)
+	uploadSvc.UploadIDs = pods.UploadID
+	manageSvc.UploadIDs = pods.UploadID
+	deploySvc.UploadIDs = pods.UploadID
+
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -157,8 +164,12 @@ func main() {
 		KeyGate:     keyGate,
 		Uploads:     uploadGate,
 		BuildURL:    build,
-		Logger:      logger,
-		Metrics:     appMetrics,
+		Pods:        pods,
+		PodLinkURL: func(id, secret string) string {
+			return *scheme + "://" + *apexDomain + "/_solid/link/" + id + "?k=" + secret
+		},
+		Logger:  logger,
+		Metrics: appMetrics,
 	}
 
 	httpServer := &httpapi.Server{
@@ -173,6 +184,7 @@ func main() {
 		// /api/rooms.
 		Rooms:    service.NewRooms(roomRepo),
 		RoomPush: service.NewRoomPush(roomRepo),
+		Solid:    metadata.Solid,
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
