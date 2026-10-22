@@ -606,6 +606,9 @@ async function cellRoute(state, request) {
   return CELL_ROUTES[name].run(state, request);
 }
 
+// Sign-in attempts one pending pod link keeps (docs/SPEC.md "Pod storage").
+const LINK_LOGIN_ATTEMPTS = 8;
+
 const IDENTITY_OPS = {
   bytes: read((self) => self.bytes()),
   list: read((self) => self.list()),
@@ -1057,14 +1060,16 @@ export class Identity {
     return link ? Response.json(link) : new Response("not found\n", { status: 404 });
   }
 
-  // The login under way: the state, PKCE verifier and DPoP key the callback
-  // needs, kept on the pending link until it completes.
+  // A login under way: the state, PKCE verifier and DPoP key its callback
+  // needs. Every attempt stays valid until one completes, so pressing
+  // Continue again never strands the first sign-in.
   async linkBegin(body) {
     const link = await this.state.storage.get("link");
     if (!link || link.state !== "pending") {
       return Response.json({ error: "link-not-pending" }, { status: 409 });
     }
-    await this.state.storage.put("link", { ...link, login: body.login, storage: body.storage });
+    const logins = [...(link.logins ?? []), body.login].slice(-LINK_LOGIN_ATTEMPTS);
+    await this.state.storage.put("link", { ...link, logins, storage: body.storage });
     return new Response(null, { status: 204 });
   }
 
