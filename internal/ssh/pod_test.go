@@ -242,18 +242,31 @@ func TestPodStorageEndToEnd(t *testing.T) {
 			if out, _, _ := s.run("pod status", nil); !strings.Contains(out, "no pod linked.") {
 				t.Fatalf("status before link: %q", out)
 			}
+			// Bytes uploaded before the link stay in the bucket and keep serving.
+			out, stderr, code := s.run("", []byte("# before the link\n"))
+			if code != 0 {
+				t.Fatalf("paste before link: %d %s", code, stderr)
+			}
+			beforeURL := strings.TrimSpace(out)
+			s.upload.WaitFinalize()
 			s.link(t)
+			if st, body := httpBody(t, beforeURL+"?raw"); st != 200 || body != "# before the link\n" {
+				t.Fatalf("pre-link paste after link: %d %q", st, body)
+			}
+			if len(s.pod.podKeys()) != 0 {
+				t.Fatalf("linking moved bytes into the pod: %v", s.pod.podKeys())
+			}
 			if rule := s.pod.rules[s.pod.aclOf("/alice/hostthis/")]; !strings.Contains(rule, s.pod.webid()) || !strings.Contains(rule, "/_solid/id#me") {
 				t.Fatalf("share rule names the owner and hostthis: %q", rule)
 			}
-			out, _, code := s.run("pod status -o json", nil)
+			out, _, code = s.run("pod status -o json", nil)
 			var status struct{ Pod, WebID string }
 			if code != 0 || json.Unmarshal([]byte(out), &status) != nil || status.Pod != s.pod.storage()+"hostthis/" || status.WebID != s.pod.webid() {
 				t.Fatalf("status: %d %q", code, out)
 			}
 
 			// A paste.
-			out, stderr, code := s.run("", []byte("# hello pod\n"))
+			out, stderr, code = s.run("", []byte("# hello pod\n"))
 			if code != 0 {
 				t.Fatalf("paste: %d %s", code, stderr)
 			}
