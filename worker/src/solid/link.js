@@ -46,7 +46,9 @@ function page(status, title, body) {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
-      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+      // No form-action: Continue posts here and is redirected to the owner's
+      // provider, and browsers apply form-action to that redirect too.
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
       "X-Content-Type-Options": "nosniff",
     },
   });
