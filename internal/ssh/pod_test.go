@@ -137,6 +137,9 @@ func (s *podStack) link(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("pod link: exit %d: %s", code, stderr)
 	}
+	if !strings.ContainsAny(stderr, qrGlyphs) || strings.ContainsAny(out, qrGlyphs) {
+		t.Fatalf("pod link: want the QR on stderr only")
+	}
 	linkURL := regexp.MustCompile(`http://\S+/_solid/link/\S+`).FindString(out)
 	if linkURL == "" {
 		t.Fatalf("pod link printed no URL: %q", out)

@@ -42,9 +42,11 @@ func (s *Server) verbPod(sess gossh.Session, owner string, argv []string) {
 			emitServiceErr(sess, err)
 			return
 		}
+		linkURL := s.PodLinkURL(start.ID, start.Secret)
 		_, _ = fmt.Fprintf(sess, "open within %d minutes to link %s:\n%s\n",
-			int(domain.PodLinkTTL.Minutes()), strings.TrimPrefix(owner, domain.IdentityKeyPrefix),
-			s.PodLinkURL(start.ID, start.Secret))
+			int(domain.PodLinkTTL.Minutes()), strings.TrimPrefix(owner, domain.IdentityKeyPrefix), linkURL)
+		// Usually opened on a phone, like an upload's URL.
+		writeQR(sess.Stderr(), linkURL)
 	case "status":
 		format, rest, err := parseOutputFormat(argv[1:])
 		if err != nil || len(rest) > 0 {

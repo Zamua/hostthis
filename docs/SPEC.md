@@ -2276,6 +2276,8 @@ ssh hostthis.dev pod unlink
 unlinked. new uploads are stored by hostthis; versions in your pod stay there.
 ```
 Links a Solid pod so new uploads store their bytes in it (see "Pod storage").
+`pod link` prints the URL on stdout and its QR code on stderr, as an upload
+does.
 `pod status` prints `no pod linked.` when there is none; `pod unlink` with no
 link is the same no-op answer. `-o json` on `status` gives `{"pod", "webid",
 "linked"}`, or `null`. A second `pod link` replaces the first once its login
