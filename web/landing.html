@@ -131,8 +131,7 @@ after the slug.</p>
   <dt>delete <em>slug</em></dt><dd>delete everything</dd>
   <dt>delete <em>slug</em> <em>ver</em></dt><dd>delete one version's bytes</dd>
   <dt>have <em>slug</em> [-o json]</dt><dd>a site's files as a keep list (see Sites)</dd>
-  <dt>pod link <em>webid</em></dt><dd>store new uploads' bytes in your Solid pod</dd>
-  <dt>pod status | pod unlink</dt><dd>show the link; send new uploads back here</dd>
+  <dt>pod link|status|unlink</dt><dd>keep your bytes in your Solid pod (see Pods)</dd>
 </dl>
 <p class="ink-soft">Sizes are stored bytes after compression, the unit of the quota.</p>
 </div>
@@ -205,6 +204,25 @@ any other value is a string. 256 KiB and 256 keys per room, 64 MiB per app.</p>
 <p class="ink-soft">"when" (RFC 3339) fires once instead of at/days. bodyKey reads a room key at
 send time. 16 devices and 16 items per room, 8 sends per device per day, one
 test a minute. push and push/* are reserved keys.</p>
+</div>
+
+<h2>Pods</h2>
+<div class="indent">
+<p>Keep the bytes of your uploads in your own Solid pod.</p>
+<dl>
+  <dt>pod link <em>webid</em></dt><dd>prints a URL valid for 15 minutes and returns. A person
+  opens it, signs in to the pod provider and approves (an agent cannot); pod status then shows it</dd>
+  <dt>pod status [-o json]</dt><dd>the linked folder, &lt;pod&gt;/hostthis/, or "no pod linked."</dd>
+  <dt>pod unlink</dt><dd>new uploads are stored by hostthis again</dd>
+</dl>
+<p class="ink-soft">The WebID is the profile URL your provider shows, e.g.
+https://&lt;you&gt;.solidcommunity.net/profile/card#me. Only bytes move: slugs,
+versions, URLs and quota stay on hostthis and work the same, delete included.
+Every upload made while linked, a new version of an existing slug included, is
+stored in the pod, except files a redeploy keeps unchanged, which stay where
+they were. Earlier versions stay where they were, and pod versions stay in the
+pod after unlink. hostthis can read and write &lt;pod&gt;/hostthis/ only. Unsharing that
+folder revokes it, and the versions stored there then fail to load.</p>
 </div>
 
 <h2>Limits</h2>

@@ -49,8 +49,7 @@ unpin <slug>                 serve the latest version
 delete <slug>                delete everything
 delete <slug> <ver>          delete one version's bytes
 have <slug> [-o json]        a site's files as a keep list (see SITES)
-pod link <webid>             store new uploads' bytes in your Solid pod
-pod status | pod unlink      show the link; send new uploads back here
+pod link|status|unlink       keep your bytes in your Solid pod (see PODS)
 ```
 
 Sizes are stored bytes after compression, the unit of the quota.
@@ -134,6 +133,27 @@ POST       /api/rooms/<id>/push/test           send now
 `"when"` (RFC 3339) fires once instead of at/days. `bodyKey` reads a room key
 at send time. 16 devices and 16 items per room, 8 sends per device per day,
 one test a minute. `push` and `push/*` are reserved keys.
+
+## PODS
+
+Keep the bytes of your uploads in your own [Solid](https://solidproject.org) pod.
+
+```
+pod link <webid>             prints a URL valid for 15 minutes and returns. A
+                             person opens it, signs in to the pod provider and
+                             approves (an agent cannot); pod status then shows it
+pod status [-o json]         the linked folder, <pod>/hostthis/, or "no pod linked."
+pod unlink                   new uploads are stored by hostthis again
+```
+
+The WebID is the profile URL your provider shows, e.g.
+`https://<you>.solidcommunity.net/profile/card#me`. Only bytes move: slugs,
+versions, URLs and quota stay on hostthis and work the same, `delete` included.
+Every upload made while linked, a new version of an existing slug included, is
+stored in the pod, except files a redeploy keeps unchanged, which stay where
+they were. Earlier versions stay where they were, and pod versions stay in the
+pod after unlink. hostthis can read and write `<pod>/hostthis/` only. Unsharing
+that folder revokes it, and the versions stored there then fail to load.
 
 ## LIMITS
 
