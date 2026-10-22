@@ -3126,7 +3126,9 @@ to continue only if you ran `pod link` yourself. Continuing:
 1. reads the WebID profile for its `solid:oidcIssuer` and `pim:storage`
    (the first one listed), and redirects to that issuer: authorization code,
    PKCE, scopes `openid webid`. No `offline_access` is requested, so no
-   refresh token is ever issued.
+   refresh token is ever issued. Pressing Continue again starts another sign-in;
+   each stays valid until one completes, so a later press never strands an
+   earlier one.
 2. On the callback, exchanges the code with a DPoP key made for this link
    alone, checks that the token's `webid` is the WebID that was named, and
    with that session finds the storage when the profile named none (the
