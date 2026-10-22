@@ -3,6 +3,7 @@
 // payload bucket: any call it makes is built from values it parsed.
 
 import { serveRooms } from "../rooms/routes.js";
+import { serveSolid } from "../solid/link.js";
 import { byteStringBytes, goText } from "../rooms/wire.js";
 import { isAssetPath, serveAsset } from "./assets.js";
 import { serveHealth } from "./health.js";
@@ -96,6 +97,12 @@ async function route(request, env, host, forwarded, surface) {
   const health = serveHealth(path);
   if (health) {
     return health;
+  }
+  if (host === apex) {
+    const solid = await serveSolid(request, env, path, url);
+    if (solid) {
+      return solid;
+    }
   }
   const app = appOf(host, apex, pathMode ? "path" : "subdomain", path);
   if (!app) {

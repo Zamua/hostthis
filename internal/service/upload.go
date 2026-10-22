@@ -49,6 +49,9 @@ type Upload struct {
 	// Archive handles the multi-file shape. nil disables archive uploads, which
 	// is what a deploy with no site support wants.
 	Archive ArchiveDeployer
+	// UploadIDs mints each upload's id, which decides where its bytes are
+	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
+	UploadIDs UploadIDSource
 	// finalizeWG tracks this instance's in-flight background finalizers.
 	finalizeWG sync.WaitGroup
 	// Logger records background-finalize outcomes: the blob write runs after
@@ -133,7 +136,10 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 		body = peeked
 	}
 
-	uploadID := domain.NewUploadID()
+	uploadID, err := u.UploadIDs.next(owner)
+	if err != nil {
+		return Result{}, fmt.Errorf("upload id: %w", err)
+	}
 	staged, err := streamUpload(body)
 	// Freed here EXCEPT where ownership transfers to the finalize goroutine,
 	// which discards it itself once the background write is done.

@@ -1,5 +1,6 @@
 // Stored payloads as response bodies: an object from PAYLOADS, its at-rest
 // encoding checked and decoded on the way out.
+import { payloads, PodError } from "../solid/pod.js";
 import { zstdDecoder } from "./zstd.js";
 
 // The object is missing or does not decode; the message names why.
@@ -58,7 +59,15 @@ export function reportingErrors(stream, onError) {
 
 // The decoded bytes an entry names: its whole object, or its pack slice.
 export async function openPayload(env, { key, offset, length }) {
-  const object = await env.PAYLOADS.get(key, length > 0 ? { range: { offset, length } } : undefined);
+  let object;
+  try {
+    object = await payloads.get(env, key, length > 0 ? { offset, length } : undefined);
+  } catch (error) {
+    if (error instanceof PodError) {
+      throw new BlobError(error.message);
+    }
+    throw error;
+  }
   if (object === null) {
     throw new BlobError(`object ${key} missing`);
   }

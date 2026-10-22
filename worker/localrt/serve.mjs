@@ -53,6 +53,8 @@ const PUBLIC_VARS = [
   "EDGE_CACHE_TTL_S",
   "EDGE_CACHE_MAX_BYTES",
   "BLOB_CACHE_MAX_BYTES",
+  "SOLID_KEY",
+  "SOLID_ORIGIN",
 ];
 const bindings = {};
 for (const [name, value] of Object.entries(process.env)) {
