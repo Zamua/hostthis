@@ -3121,10 +3121,16 @@ host, and `hostthisd` forwards every apex `/_solid/` request to it (see
 valid for 15 minutes, of the form `/_solid/link/<link-id>?k=<secret>`. The
 link id and secret are random; the Worker keeps the secret only as a hash.
 Opening the URL shows the SSH key fingerprint it will be linked to and says
-to continue only if you ran `pod link` yourself. Continuing:
+to continue only if you ran `pod link` yourself. When the profile lists more
+than one `pim:storage` (a provider that gives one WebID several pods), the page
+also lists them by host and URL for the owner to pick one. It preselects the
+first on the WebID's own host, marked as holding the WebID, or else the first
+listed; a single storage shows no choice. Switching pods later is another
+`pod link`: only a sign-in can write the share rule. Continuing:
 
-1. reads the WebID profile for its `solid:oidcIssuer` and `pim:storage`
-   (the first one listed), and redirects to that issuer: authorization code,
+1. reads the WebID profile for its `solid:oidcIssuer` and its storages, uses
+   the chosen one (a choice the profile does not list is refused), and
+   redirects to that issuer: authorization code,
    PKCE, scopes `openid webid`. hostthis signs in as a client the issuer
    registers on the spot when its configuration offers
    `registration_endpoint` (client secret sent as HTTP Basic), and as the
@@ -3132,7 +3138,7 @@ to continue only if you ran `pod link` yourself. Continuing:
    providers lose the authorization result for a Client ID Document client. No `offline_access` is requested, so no
    refresh token is ever issued. Pressing Continue again starts another sign-in;
    each stays valid until one completes, so a later press never strands an
-   earlier one.
+   earlier one, with the pod chosen for it.
 2. On the callback, exchanges the code with a DPoP key made for this link
    alone, checks that the token's `webid` is the WebID that was named, and
    with that session finds the storage when the profile named none (the

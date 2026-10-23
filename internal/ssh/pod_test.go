@@ -58,9 +58,12 @@ type podStack struct {
 	pod *fakePod
 }
 
-func startPodStack(t *testing.T, acp, register bool) *podStack {
+func startPodStack(t *testing.T, acp, register bool, storages ...string) *podStack {
 	t.Helper()
 	pod := newFakePod(t, acp, register)
+	if len(storages) > 0 {
+		pod.storages = storages
+	}
 
 	// The public origin is known before the Worker starts, so the WebID it
 	// signs for is the one hostthisd serves.
@@ -131,7 +134,10 @@ func startPodStack(t *testing.T, acp, register bool) *podStack {
 var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // link runs `pod link` and completes it the way a browser would.
-func (s *podStack) link(t *testing.T) {
+func (s *podStack) link(t *testing.T) { s.linkPicking(t, "") }
+
+// linkPicking links, choosing storage on the approval page when not empty.
+func (s *podStack) linkPicking(t *testing.T, storage string) {
 	t.Helper()
 	out, stderr, code := s.run("pod link "+s.pod.webid(), nil)
 	if code != 0 {
@@ -154,11 +160,18 @@ func (s *podStack) link(t *testing.T) {
 	if res.StatusCode != http.StatusOK || !strings.Contains(string(page), fp) {
 		t.Fatalf("link page: %d, names the key: %v\n%s", res.StatusCode, strings.Contains(string(page), fp), page)
 	}
+	if picker := strings.Contains(string(page), `name="storage"`); picker != (len(s.pod.storages) > 1) {
+		t.Fatalf("link page: picker shown %v for %d storages", picker, len(s.pod.storages))
+	}
 	u, _ := url.Parse(linkURL)
+	form := url.Values{"k": {u.Query().Get("k")}}
+	if storage != "" {
+		form.Set("storage", storage)
+	}
 	// Continue pressed twice: the first sign-in must still complete.
 	var first string
 	for i := range 2 {
-		res, err = noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, url.Values{"k": {u.Query().Get("k")}})
+		res, err = noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, form)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -346,5 +359,42 @@ func TestPodUnavailableWithoutKey(t *testing.T) {
 	_, stderr, code := s.run("pod link https://alice.example/profile/card#me", nil)
 	if code == 0 || !strings.Contains(stderr, "pods are not available") {
 		t.Fatalf("exit %d %q", code, stderr)
+	}
+}
+
+// A profile listing several pods gets a picker; the chosen pod holds the
+// uploads, and a pod the profile does not list is refused.
+func TestPodLinkPicksStorage(t *testing.T) {
+	s := startPodStack(t, false, false, "/alice/", "/work/")
+	out, stderr, code := s.run("pod link "+s.pod.webid(), nil)
+	if code != 0 {
+		t.Fatalf("pod link: exit %d: %s", code, stderr)
+	}
+	u, _ := url.Parse(regexp.MustCompile(`http://\S+/_solid/link/\S+`).FindString(out))
+	res, err := noRedirect.PostForm(u.Scheme+"://"+u.Host+u.Path, url.Values{"k": {u.Query().Get("k")}, "storage": {"https://elsewhere.example/"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unlisted pod: %d, want 400", res.StatusCode)
+	}
+
+	s.linkPicking(t, s.pod.origin+"/work/")
+	out, _, code = s.run("pod status -o json", nil)
+	var status struct{ Pod string }
+	if code != 0 || json.Unmarshal([]byte(out), &status) != nil || status.Pod != s.pod.origin+"/work/hostthis/" {
+		t.Fatalf("status: %d %q", code, out)
+	}
+	out, stderr, code = s.run("", []byte("# in work\n"))
+	if code != 0 {
+		t.Fatalf("paste: %d %s", code, stderr)
+	}
+	s.upload.WaitFinalize()
+	if st, body := httpBody(t, strings.TrimSpace(out)+"?raw"); st != 200 || body != "# in work\n" {
+		t.Fatalf("paste read: %d %q", st, body)
+	}
+	if len(podUploads(s.pod.podKeysIn("/work/"))) != 1 || len(s.pod.podKeys()) != 0 {
+		t.Fatalf("work holds %v, alice holds %v", s.pod.podKeysIn("/work/"), s.pod.podKeys())
 	}
 }

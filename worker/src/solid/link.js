@@ -83,7 +83,12 @@ function resolveIri(value, base) {
   }
 }
 
-// The WebID's issuer and storage, from its profile as JSON-LD or Turtle.
+function asContainer(iri) {
+  return iri.endsWith("/") ? iri : `${iri}/`;
+}
+
+// The WebID's issuer and every storage it lists, from its profile as JSON-LD
+// or Turtle.
 async function readProfile(webid) {
   const res = await fetch(webid, { headers: { Accept: "application/ld+json, text/turtle;q=0.9" } });
   if (!res.ok) {
@@ -91,27 +96,35 @@ async function readProfile(webid) {
   }
   const type = res.headers.get("Content-Type") ?? "";
   const text = await res.text();
-  const found = { issuer: null, storage: null };
+  let issuer = null;
+  const storages = [];
   if (type.includes("json")) {
     const doc = JSON.parse(text);
     const nodes = Array.isArray(doc) ? doc : (doc["@graph"] ?? [doc]);
-    const first = (node, iri) => {
-      const ref = [].concat(node[iri] ?? [])[0];
-      return typeof ref === "string" ? ref : ref?.["@id"];
-    };
+    const refs = (node, iri) => [].concat(node[iri] ?? []).map((ref) => (typeof ref === "string" ? ref : ref?.["@id"])).filter(Boolean);
     for (const node of nodes) {
       if (resolveIri(node["@id"] ?? "", webid) !== webid) continue;
-      found.issuer ??= first(node, `${SOLID}oidcIssuer`);
-      found.storage ??= first(node, `${PIM}storage`);
+      issuer ??= refs(node, `${SOLID}oidcIssuer`)[0];
+      storages.push(...refs(node, `${PIM}storage`));
     }
   } else {
-    found.issuer = /(?:solid:oidcIssuer|<http:\/\/www\.w3\.org\/ns\/solid\/terms#oidcIssuer>)\s+<([^>]*)>/.exec(text)?.[1];
-    found.storage = /(?:pim:storage|space:storage|<http:\/\/www\.w3\.org\/ns\/pim\/space#storage>)\s+<([^>]*)>/.exec(text)?.[1];
+    issuer = /(?:solid:oidcIssuer|<http:\/\/www\.w3\.org\/ns\/solid\/terms#oidcIssuer>)\s+<([^>]*)>/.exec(text)?.[1];
+    const lists = /(?:pim:storage|space:storage|<http:\/\/www\.w3\.org\/ns\/pim\/space#storage>)\s+(<[^>]*>(?:\s*,\s*<[^>]*>)*)/g;
+    for (const list of text.matchAll(lists)) {
+      storages.push(...[...list[1].matchAll(/<([^>]*)>/g)].map((m) => m[1]));
+    }
   }
-  const issuer = found.issuer && resolveIri(found.issuer, webid);
-  const storage = found.storage && resolveIri(found.storage, webid);
+  issuer = issuer && resolveIri(issuer, webid);
   if (!issuer) throw new Error("your WebID profile names no solid:oidcIssuer");
-  return { issuer, storage: storage ? (storage.endsWith("/") ? storage : `${storage}/`) : null };
+  const resolved = storages.map((s) => resolveIri(s, webid)).filter(Boolean).map(asContainer);
+  return { issuer, storages: [...new Set(resolved)] };
+}
+
+// The storage a link uses unless the owner picks another: the first one on
+// the WebID's own host, which on multi-pod providers is the pod holding it.
+function defaultStorage(storages, webid) {
+  const host = new URL(webid).host;
+  return storages.find((s) => new URL(s).host === host) ?? storages[0] ?? null;
 }
 
 async function issuerConfig(issuer) {
@@ -155,18 +168,41 @@ async function signInClient(env, config) {
   return { id: urls.client };
 }
 
+// A radio list of the profile's storages, or nothing when it lists one or
+// none: the choice only matters to providers that give a WebID several pods.
+async function storagePicker(webid) {
+  let storages;
+  try {
+    ({ storages } = await readProfile(webid));
+  } catch {
+    return "";
+  }
+  if (storages.length < 2) {
+    return "";
+  }
+  const preset = defaultStorage(storages, webid);
+  const home = new URL(webid).host;
+  const choices = storages.map((s) => {
+    const host = new URL(s).host;
+    const note = host === home ? " (holds your WebID)" : "";
+    return `<label><input type="radio" name="storage" value="${escapeHtml(s)}"${s === preset ? " checked" : ""}> ${escapeHtml(host)}${note}<br><code>${escapeHtml(s)}</code></label>`;
+  });
+  return `<fieldset><legend>Store uploads in</legend>${choices.join("<br>")}</fieldset>`;
+}
+
 async function confirmPage(env, id, url) {
   const secret = url.searchParams.get("k");
   const link = await liveLink(env, id, secret);
   if (!link) {
     return dead();
   }
+  const picker = await storagePicker(link.webid);
   return page(200, "Link your pod to hostthis", `
 <p>Key: <code>${escapeHtml(keyOf(link.owner))}</code></p>
 <p>WebID: <code>${escapeHtml(link.webid)}</code></p>
 <p>Continue only if you ran <code>pod link</code> yourself. You will sign in to your pod provider; hostthis
 then shares one folder of your pod, <code>hostthis/</code>, with its own identity, and forgets your session.</p>
-<form method="post" action="/_solid/link/${id}"><input type="hidden" name="k" value="${escapeHtml(secret)}"><button>Continue</button></form>`);
+<form method="post" action="/_solid/link/${id}"><input type="hidden" name="k" value="${escapeHtml(secret)}">${picker}<p><button>Continue</button></p></form>`);
 }
 
 async function beginLogin(env, id, request) {
@@ -183,15 +219,23 @@ async function beginLogin(env, id, request) {
   } catch (error) {
     return failed(error.message);
   }
+  const picked = form.get("storage");
+  let storage = defaultStorage(profile.storages, link.webid);
+  if (typeof picked === "string" && picked) {
+    if (!profile.storages.includes(picked)) {
+      return page(400, "Link failed", "<p>That pod is not listed in your WebID profile.</p><p>Nothing was linked. Open the link again to retry.</p>");
+    }
+    storage = picked;
+  }
   const urls = solidUrls(env);
   const verifier = randomToken(32);
   const state = `${id}.${randomToken(16)}`;
   const pair = await crypto.subtle.generateKey(ES256, true, ["sign", "verify"]);
   const dpop = await crypto.subtle.exportKey("jwk", pair.privateKey);
   const client = await signInClient(env, config);
+  // Per login: each press of Continue may pick a different pod.
   const begun = await cell(env, linkCellName(id), "linkbegin", {
-    storage: profile.storage,
-    login: { state, verifier, dpop, tokenEndpoint: config.token_endpoint, client },
+    login: { state, verifier, dpop, tokenEndpoint: config.token_endpoint, client, storage },
   });
   if (!begun.ok) {
     return dead();
@@ -349,7 +393,7 @@ async function callback(env, url) {
   }
   const call = ownerFetch(session, token.access_token);
   try {
-    link.storage ??= await discoverStorage(call, link.webid);
+    link.storage = login.storage ?? link.storage ?? await discoverStorage(call, link.webid);
     await shareContainer(env, link, call);
   } catch (error) {
     return failed(error.message);
