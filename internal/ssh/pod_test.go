@@ -58,9 +58,9 @@ type podStack struct {
 	pod *fakePod
 }
 
-func startPodStack(t *testing.T, acp bool) *podStack {
+func startPodStack(t *testing.T, acp, register bool) *podStack {
 	t.Helper()
-	pod := newFakePod(t, acp)
+	pod := newFakePod(t, acp, register)
 
 	// The public origin is known before the Worker starts, so the WebID it
 	// signs for is the one hostthisd serves.
@@ -241,11 +241,11 @@ func podUploads(keys []string) map[string]bool {
 // unchanged; deletes remove them; unlinking sends new uploads to the bucket.
 func TestPodStorageEndToEnd(t *testing.T) {
 	for _, mode := range []struct {
-		name string
-		acp  bool
-	}{{"wac", false}, {"acp", true}} {
+		name          string
+		acp, register bool
+	}{{"wac", false, false}, {"acp", true, false}, {"registered client", false, true}} {
 		t.Run(mode.name, func(t *testing.T) {
-			s := startPodStack(t, mode.acp)
+			s := startPodStack(t, mode.acp, mode.register)
 			if out, _, _ := s.run("pod status", nil); !strings.Contains(out, "no pod linked.") {
 				t.Fatalf("status before link: %q", out)
 			}

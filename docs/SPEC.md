@@ -3125,7 +3125,11 @@ to continue only if you ran `pod link` yourself. Continuing:
 
 1. reads the WebID profile for its `solid:oidcIssuer` and `pim:storage`
    (the first one listed), and redirects to that issuer: authorization code,
-   PKCE, scopes `openid webid`. No `offline_access` is requested, so no
+   PKCE, scopes `openid webid`. hostthis signs in as a client the issuer
+   registers on the spot when its configuration offers
+   `registration_endpoint` (client secret sent as HTTP Basic), and as the
+   `/_solid/client` document otherwise or when registration fails: some
+   providers lose the authorization result for a Client ID Document client. No `offline_access` is requested, so no
    refresh token is ever issued. Pressing Continue again starts another sign-in;
    each stays valid until one completes, so a later press never strands an
    earlier one.
