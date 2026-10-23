@@ -149,6 +149,8 @@ pod unlink                   new uploads are stored by hostthis again
 The WebID is the profile URL your provider shows, e.g.
 `https://<you>.solidcommunity.net/profile/card#me`. Only bytes move: slugs,
 versions, URLs and quota stay on hostthis and work the same, `delete` included.
+If the profile lists several pods, the link page asks which one; to switch,
+run `pod link` again.
 Every upload made while linked, a new version of an existing slug included, is
 stored in the pod, except files a redeploy keeps unchanged, which stay where
 they were. Earlier versions stay where they were, and pod versions stay in the
