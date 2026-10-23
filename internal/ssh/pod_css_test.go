@@ -144,7 +144,7 @@ func TestPodStorageAgainstCSS(t *testing.T) {
 	if base == "" {
 		t.Skip("HOSTTHIS_TEST_CSS not set")
 	}
-	s := startPodStack(t, false)
+	s := startPodStack(t, false, false)
 	acct := newCSSAccount(t, base)
 
 	out, stderr, code := s.run("pod link "+acct.webid, nil)

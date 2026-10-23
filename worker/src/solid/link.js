@@ -1,7 +1,7 @@
 // The apex /_solid/ surface: hostthis's identity documents and the pod link
 // flow (docs/SPEC.md "Pod storage").
 import {
-  clientDocument, issuerConfiguration, jwks, solidEnabled, solidUrls, webidProfile,
+  clientDocument, issuerConfiguration, jwks, solidEnabled, solidOrigin, solidUrls, webidProfile,
 } from "./identity.js";
 import { b64url, dpopProof, jwtClaims, randomToken, sha256 } from "./jose.js";
 import { linkCellName } from "./pod.js";
@@ -122,6 +122,39 @@ async function issuerConfig(issuer) {
   return res.json();
 }
 
+// The client this link signs in as. A provider that offers dynamic
+// registration gets a registered client: some (the Nextcloud Solid app among
+// them) lose the authorization result after their approval page for a Client
+// ID Document client. Otherwise, or if registration fails, the document.
+async function signInClient(env, config) {
+  const urls = solidUrls(env);
+  if (typeof config.registration_endpoint === "string") {
+    try {
+      const res = await fetch(config.registration_endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          client_name: "hostthis",
+          client_uri: solidOrigin(env),
+          redirect_uris: [urls.callback],
+          grant_types: ["authorization_code"],
+          response_types: ["code"],
+          scope: "openid webid",
+          application_type: "web",
+          token_endpoint_auth_method: "client_secret_basic",
+        }),
+      });
+      const reg = res.ok ? await res.json() : null;
+      if (typeof reg?.client_id === "string" && reg.client_id) {
+        return { id: reg.client_id, secret: typeof reg.client_secret === "string" ? reg.client_secret : undefined };
+      }
+    } catch {
+      // Fall back to the Client ID Document.
+    }
+  }
+  return { id: urls.client };
+}
+
 async function confirmPage(env, id, url) {
   const secret = url.searchParams.get("k");
   const link = await liveLink(env, id, secret);
@@ -155,16 +188,17 @@ async function beginLogin(env, id, request) {
   const state = `${id}.${randomToken(16)}`;
   const pair = await crypto.subtle.generateKey(ES256, true, ["sign", "verify"]);
   const dpop = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  const client = await signInClient(env, config);
   const begun = await cell(env, linkCellName(id), "linkbegin", {
     storage: profile.storage,
-    login: { state, verifier, dpop, tokenEndpoint: config.token_endpoint },
+    login: { state, verifier, dpop, tokenEndpoint: config.token_endpoint, client },
   });
   if (!begun.ok) {
     return dead();
   }
   const auth = new URL(config.authorization_endpoint);
   auth.search = new URLSearchParams({
-    client_id: urls.client,
+    client_id: client.id,
     redirect_uri: urls.callback,
     response_type: "code",
     scope: "openid webid",
@@ -291,12 +325,15 @@ async function callback(env, url) {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
         DPoP: await dpopProof(session, "POST", login.tokenEndpoint),
+        ...(login.client?.secret
+          ? { Authorization: `Basic ${btoa(`${encodeURIComponent(login.client.id)}:${encodeURIComponent(login.client.secret)}`)}` }
+          : {}),
       },
       body: new URLSearchParams({
         grant_type: "authorization_code",
         code,
         redirect_uri: urls.callback,
-        client_id: urls.client,
+        client_id: login.client?.id ?? urls.client,
         code_verifier: login.verifier,
       }),
     });
