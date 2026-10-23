@@ -27,22 +27,26 @@ import (
 // authorization-code login that approves at once, and storage that checks
 // hostthis's tokens the way a pod does (WebID issuer, signature, DPoP).
 type fakePod struct {
-	t      *testing.T
-	srv    *httptest.Server
-	acp    bool // advertise ACP access resources instead of WAC
-	origin string
+	t   *testing.T
+	srv *httptest.Server
+	acp bool // advertise ACP access resources instead of WAC
+	// register offers dynamic registration and, as the Nextcloud Solid app
+	// does, drops the authorization result for a Client ID Document client.
+	register bool
+	origin   string
 
 	mu       sync.Mutex
 	objects  map[string][]byte // path -> bytes; containers end in "/"
 	rules    map[string]string // access resource path -> body
 	codes    map[string]string // code -> PKCE challenge
+	clients  map[string]string // registered client id -> secret
 	userTok  string
 	deny     bool // refuse every hostthis request with 403
 	agentHit int  // requests authorized as hostthis
 }
 
-func newFakePod(t *testing.T, acp bool) *fakePod {
-	p := &fakePod{t: t, acp: acp, objects: map[string][]byte{"/alice/": nil}, rules: map[string]string{}, codes: map[string]string{}}
+func newFakePod(t *testing.T, acp, register bool) *fakePod {
+	p := &fakePod{t: t, acp: acp, register: register, objects: map[string][]byte{"/alice/": nil}, rules: map[string]string{}, codes: map[string]string{}, clients: map[string]string{}}
 	p.srv = httptest.NewServer(http.HandlerFunc(p.serve))
 	t.Cleanup(p.srv.Close)
 	p.origin = strings.Replace(p.srv.URL, "127.0.0.1", "localhost", 1)
@@ -60,11 +64,29 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 			"<#me> solid:oidcIssuer <%s/idp>; pim:storage </alice/>.\n", p.origin)
 		return
 	case "/idp/.well-known/openid-configuration":
-		writeJSONTo(w, map[string]string{
+		cfg := map[string]string{
 			"issuer":                 p.origin + "/idp",
 			"authorization_endpoint": p.origin + "/idp/auth",
 			"token_endpoint":         p.origin + "/idp/token",
-		})
+		}
+		if p.register {
+			cfg["registration_endpoint"] = p.origin + "/idp/register"
+		}
+		writeJSONTo(w, cfg)
+		return
+	case "/idp/register":
+		var req struct {
+			RedirectURIs []string `json:"redirect_uris"`
+		}
+		if !p.register || json.NewDecoder(r.Body).Decode(&req) != nil || len(req.RedirectURIs) != 1 {
+			http.Error(w, "bad registration", http.StatusBadRequest)
+			return
+		}
+		id, secret := randHex(8), randHex(16)
+		p.mu.Lock()
+		p.clients[id] = secret
+		p.mu.Unlock()
+		writeJSONTo(w, map[string]string{"client_id": id, "client_secret": secret})
 		return
 	case "/idp/auth":
 		p.authorize(w, r)
@@ -88,6 +110,22 @@ func (p *fakePod) authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.Contains(q.Get("scope"), "offline_access") {
 		http.Error(w, "hostthis must not ask for offline_access", http.StatusBadRequest)
+		return
+	}
+	if p.register {
+		p.mu.Lock()
+		_, registered := p.clients[q.Get("client_id")]
+		p.mu.Unlock()
+		if !registered {
+			// What the Nextcloud Solid app does after its approval page.
+			http.Redirect(w, r, q.Get("redirect_uri"), http.StatusFound)
+			return
+		}
+		code := randHex(8)
+		p.mu.Lock()
+		p.codes[code] = q.Get("code_challenge")
+		p.mu.Unlock()
+		http.Redirect(w, r, q.Get("redirect_uri")+"?code="+code+"&state="+q.Get("state"), http.StatusFound)
 		return
 	}
 	// The client must be a Client ID Document naming this redirect.
@@ -124,6 +162,17 @@ func (p *fakePod) token(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		writeJSONTo(w, map[string]string{"error": "invalid_grant"})
 		return
+	}
+	if p.register {
+		id, secret, ok := r.BasicAuth()
+		p.mu.Lock()
+		want, known := p.clients[id]
+		p.mu.Unlock()
+		if !ok || !known || secret != want {
+			w.WriteHeader(http.StatusUnauthorized)
+			writeJSONTo(w, map[string]string{"error": "invalid_client"})
+			return
+		}
 	}
 	if _, err := verifyProof(r.Header.Get("DPoP"), "POST", p.origin+"/idp/token", ""); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
