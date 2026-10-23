@@ -1069,7 +1069,7 @@ export class Identity {
       return Response.json({ error: "link-not-pending" }, { status: 409 });
     }
     const logins = [...(link.logins ?? []), body.login].slice(-LINK_LOGIN_ATTEMPTS);
-    await this.state.storage.put("link", { ...link, logins, storage: body.storage });
+    await this.state.storage.put("link", { ...link, logins });
     return new Response(null, { status: 204 });
   }
 
@@ -1080,14 +1080,14 @@ export class Identity {
     if (!link || link.state !== "pending") {
       return Response.json({ error: "link-not-pending" }, { status: 409 });
     }
-    if (typeof (link.storage ?? body.storage) !== "string") {
+    if (typeof (body.storage ?? link.storage) !== "string") {
       return Response.json({ error: "malformed-link" }, { status: 400 });
     }
     const done = {
       state: "linked",
       owner: link.owner,
       webid: link.webid,
-      storage: link.storage ?? body.storage,
+      storage: body.storage ?? link.storage,
       linked: body.linked,
     };
     await this.state.storage.put("link", done);

@@ -33,6 +33,7 @@ type fakePod struct {
 	// register offers dynamic registration and, as the Nextcloud Solid app
 	// does, drops the authorization result for a Client ID Document client.
 	register bool
+	storages []string // pod paths the profile lists, in order
 	origin   string
 
 	mu       sync.Mutex
@@ -46,7 +47,7 @@ type fakePod struct {
 }
 
 func newFakePod(t *testing.T, acp, register bool) *fakePod {
-	p := &fakePod{t: t, acp: acp, register: register, objects: map[string][]byte{"/alice/": nil}, rules: map[string]string{}, codes: map[string]string{}, clients: map[string]string{}}
+	p := &fakePod{t: t, acp: acp, register: register, storages: []string{"/alice/"}, objects: map[string][]byte{"/alice/": nil}, rules: map[string]string{}, codes: map[string]string{}, clients: map[string]string{}}
 	p.srv = httptest.NewServer(http.HandlerFunc(p.serve))
 	t.Cleanup(p.srv.Close)
 	p.origin = strings.Replace(p.srv.URL, "127.0.0.1", "localhost", 1)
@@ -61,7 +62,7 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 	case "/alice/profile/card":
 		w.Header().Set("Content-Type", "text/turtle")
 		_, _ = fmt.Fprintf(w, "@prefix solid: <http://www.w3.org/ns/solid/terms#>.\n@prefix pim: <http://www.w3.org/ns/pim/space#>.\n"+
-			"<#me> solid:oidcIssuer <%s/idp>; pim:storage </alice/>.\n", p.origin)
+			"<#me> solid:oidcIssuer <%s/idp>; pim:storage <%s>.\n", p.origin, strings.Join(p.storages, ">, <"))
 		return
 	case "/idp/.well-known/openid-configuration":
 		cfg := map[string]string{
@@ -95,11 +96,13 @@ func (p *fakePod) serve(w http.ResponseWriter, r *http.Request) {
 		p.token(w, r)
 		return
 	}
-	if !strings.HasPrefix(r.URL.Path, "/alice/") {
-		http.NotFound(w, r)
-		return
+	for _, st := range p.storages {
+		if strings.HasPrefix(r.URL.Path, st) {
+			p.resource(w, r)
+			return
+		}
 	}
-	p.resource(w, r)
+	http.NotFound(w, r)
 }
 
 func (p *fakePod) authorize(w http.ResponseWriter, r *http.Request) {
@@ -223,10 +226,18 @@ func (p *fakePod) aclOf(path string) string {
 	return path + ".acl"
 }
 
-// shared reports whether alice's hostthis/ rule grants path to hostthis.
+// shared reports whether a pod's hostthis/ rule grants path to hostthis.
 func (p *fakePod) shared(path string) bool {
-	rule, ok := p.rules[p.aclOf("/alice/hostthis/")]
-	return ok && strings.HasPrefix(path, "/alice/hostthis/") && strings.Contains(rule, "/_solid/id#me") && !strings.HasSuffix(path, ".acl") && !strings.HasSuffix(path, ".acr")
+	if strings.HasSuffix(path, ".acl") || strings.HasSuffix(path, ".acr") {
+		return false
+	}
+	for _, st := range p.storages {
+		rule, ok := p.rules[p.aclOf(st+"hostthis/")]
+		if ok && strings.HasPrefix(path, st+"hostthis/") && strings.Contains(rule, "/_solid/id#me") {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *fakePod) resource(w http.ResponseWriter, r *http.Request) {
@@ -323,12 +334,14 @@ func (p *fakePod) resource(w http.ResponseWriter, r *http.Request) {
 
 // podKeys are the object paths stored under alice's hostthis/ folder, files
 // only.
-func (p *fakePod) podKeys() []string {
+func (p *fakePod) podKeys() []string { return p.podKeysIn("/alice/") }
+
+func (p *fakePod) podKeysIn(storage string) []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var keys []string
 	for k := range p.objects {
-		if rest, ok := strings.CutPrefix(k, "/alice/hostthis/"); ok && rest != "" && !strings.HasSuffix(k, "/") {
+		if rest, ok := strings.CutPrefix(k, storage+"hostthis/"); ok && rest != "" && !strings.HasSuffix(k, "/") {
 			keys = append(keys, rest)
 		}
 	}
