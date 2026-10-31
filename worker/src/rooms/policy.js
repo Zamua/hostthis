@@ -11,6 +11,8 @@ export const ROOM_MAX_BYTES = 256 * 1024;
 export const ROOM_MAX_KEYS = 256;
 export const ROOM_MAX_KEY_BYTES = 256;
 export const APP_MAX_ROOM_BYTES = 64 * 1024 * 1024;
+// domain.UserQuotaBytes: an owner's pastes, sites and app rooms together.
+export const USER_QUOTA_BYTES = 1024 * 1024 * 1024;
 export const ROOMS_PER_SUBNET = 60;
 export const ROOMS_PER_APP = 300;
 export const ROOM_CREATE_WINDOW_MS = 60 * 60 * 1000;
