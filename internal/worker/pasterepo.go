@@ -126,63 +126,61 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 
 	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
 	//    rejected upload leaves nothing behind.
-	var refusal struct {
-		Error string `json:"error"`
-	}
-	status, err := r.call(ctx, http.MethodPost, "/identity/reserve", "scope", owner, map[string]any{
-		"slug": p.Slug.String(), "generation": generation,
-		"size": p.Size, "userCap": userCap,
-		"now": now.UTC().UnixMilli(), "status": string(p.Status),
-		"updatedAt": p.UpdatedAt.UTC().UnixMilli(),
-		"kind":      string(p.Kind), "name": p.Name,
-		"intent": map[string]any{
-			"id": intentID, "kind": "create_paste", "subject": p.Slug.String(),
-			"fingerprint": fingerprint,
-			"startedAt":   now.UTC().UnixMilli(),
+	var refused refusal
+	status, err := r.call(ctx, opIdentityReserve, owner, reserveRequest{
+		Slug: p.Slug.String(), Generation: generation,
+		Size: p.Size, UserCap: userCap,
+		Now: now.UTC().UnixMilli(), Status: p.Status,
+		UpdatedAt: p.UpdatedAt.UTC().UnixMilli(),
+		Kind:      p.Kind, Name: p.Name,
+		Intent: createIntent{
+			ID: intentID, Kind: intentCreatePaste, Subject: p.Slug.String(),
+			Fingerprint: fingerprint,
+			StartedAt:   now.UTC().UnixMilli(),
 		},
-	}, &refusal)
+	}, &refused)
 	switch {
 	case err != nil:
 		return err
 	case status == http.StatusInsufficientStorage:
 		return domain.ErrOverUserQuota
-	case status == http.StatusConflict && refusal.Error == "slug-taken":
+	case status == http.StatusConflict && refused.Error == codeSlugTaken:
 		return domain.ErrSlugTaken
 	case status >= 300:
-		return fmt.Errorf("worker: reserve: status %d %s", status, refusal.Error)
+		return fmt.Errorf("worker: reserve: status %d %s", status, refused.Error)
 	}
 
 	// 2. A lost response is ambiguous: retry the exact generation once so the
 	//    cell's same-generation replay can prove whether the row landed. A
 	//    transport failure is NOT released: the durable intent owns resolution,
 	//    and releasing could erase a row whose success response was lost.
-	status, err = r.callArtifactMutation(ctx, "/paste/put", p.Slug, map[string]any{
-		"row": wireRow, "generation": generation, "fingerprint": fingerprint,
-	}, &refusal)
+	status, err = r.callArtifactMutation(ctx, opPastePut, p.Slug, pastePutRequest{
+		Row: wireRow, Generation: generation, Fingerprint: fingerprint,
+	}, &refused)
 	if err != nil {
 		return err
 	}
-	if status == http.StatusConflict && (refusal.Error == "slug-taken" || refusal.Error == "create-aborted") {
+	if status == http.StatusConflict && (refused.Error == codeSlugTaken || refused.Error == codeCreateAborted) {
 		// This generation's row can never land, so its charge is released.
-		_, _ = r.call(ctx, http.MethodPost, "/identity/release", "scope", owner,
-			map[string]any{
-				"slug": p.Slug.String(), "generation": generation, "intentId": intentID,
+		_, _ = r.call(ctx, opIdentityRelease, owner,
+			releaseRequest{
+				Slug: p.Slug.String(), Generation: generation, IntentID: intentID,
 			}, nil)
 		return domain.ErrSlugTaken
 	}
 	if status >= 300 {
 		// Any other conflict may name this generation's own row; the intent
 		// resolves it.
-		return fmt.Errorf("worker: paste put: status %d %s", status, refusal.Error)
+		return fmt.Errorf("worker: paste put: status %d %s", status, refused.Error)
 	}
 
 	// 3. Confirm. The intent is discharged only once the row is durable. A
 	//    lost response is fine: the resolver observes the matching row and
 	//    completes the confirm.
-	status, err = r.call(ctx, http.MethodPost, "/identity/confirm", "scope", owner,
-		map[string]any{
-			"slug": p.Slug.String(), "generation": generation,
-			"status": string(p.Status), "intentId": intentID,
+	status, err = r.call(ctx, opIdentityConfirm, owner,
+		confirmRequest{
+			Slug: p.Slug.String(), Generation: generation,
+			Status: p.Status, IntentID: intentID,
 		}, nil)
 	if err != nil {
 		return nil
@@ -197,7 +195,7 @@ func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
 		pasteRow
 		Manifest json.RawMessage `json:"manifest"`
 	}
-	if err := r.ask(context.Background(), "paste get", http.MethodGet, "/paste/get", "slug", slug.String(),
+	if err := r.ask(context.Background(), "paste get", opPasteGet, slug.String(),
 		nil, &wire, notFound); err != nil {
 		return pasteRow{}, err
 	}
@@ -244,15 +242,14 @@ func (r *PasteRepo) MarkReady(paste domain.Paste) error {
 		Reason string `json:"reason"`
 		Error  string `json:"error"`
 	}
-	status, err := r.call(context.Background(), http.MethodPost, "/paste/status", "slug",
-		paste.Slug.String(), map[string]any{
-			"status": string(domain.PasteStatusReady), "generation": paste.Generation,
+	status, err := r.call(context.Background(), opPasteStatus,
+		paste.Slug.String(), pasteStatusRequest{
+			Status: domain.PasteStatusReady, Generation: paste.Generation,
 		}, &res)
 	switch {
 	case err != nil:
 		return err
-	case status < 300 && res.Reason == "absent",
-		status == http.StatusConflict && res.Error == "generation-mismatch":
+	case status < 300 && res.Reason == reasonAbsent, replaced(status, res.Error):
 		return domain.ErrNotFound
 	}
 	return answer("ready transition", status, nil, nil)
@@ -264,11 +261,11 @@ func (r *PasteRepo) MarkFailed(paste domain.Paste) error {
 	if paste.Generation == "" {
 		return fmt.Errorf("worker: failed paste has no accounting generation")
 	}
-	status, err := r.callArtifactMutation(context.Background(), "/paste/status", paste.Slug,
-		map[string]any{
-			"status":     string(domain.PasteStatusFailed),
-			"generation": paste.Generation,
-			"opId":       "fail:" + paste.Generation,
+	status, err := r.callArtifactMutation(context.Background(), opPasteStatus, paste.Slug,
+		pasteStatusRequest{
+			Status:     domain.PasteStatusFailed,
+			Generation: paste.Generation,
+			OpID:       "fail:" + paste.Generation,
 		}, nil)
 	return answer("fail accounting", status, err, map[int]error{http.StatusLocked: domain.ErrBusy})
 }
@@ -279,8 +276,7 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error
 	var res struct {
 		Bytes int `json:"bytes"`
 	}
-	if err := r.ask(context.Background(), "identity bytes", http.MethodGet, "/identity/bytes", "scope", owner,
-		nil, &res, nil); err != nil {
+	if err := r.ask(context.Background(), "identity bytes", opIdentityBytes, owner, nil, &res, nil); err != nil {
 		return 0, err
 	}
 	return res.Bytes, nil
@@ -312,8 +308,7 @@ type ownerEntry struct {
 
 func (r *PasteRepo) ownerEntries(owner string) ([]ownerEntry, error) {
 	var out []ownerEntry
-	if err := r.ask(context.Background(), "identity list", http.MethodGet, "/identity/list", "scope", owner,
-		nil, &out, nil); err != nil {
+	if err := r.ask(context.Background(), "identity list", opIdentityList, owner, nil, &out, nil); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -359,7 +354,7 @@ func (r *PasteRepo) OwnerFirstSeen(owner string) (time.Time, error) {
 	var res struct {
 		FirstSeen int64 `json:"firstSeen"`
 	}
-	if err := r.ask(context.Background(), "identity firstSeen", http.MethodGet, "/identity/firstSeen", "scope",
+	if err := r.ask(context.Background(), "identity firstSeen", opIdentityFirstSeen,
 		owner, nil, &res, nil); err != nil {
 		return time.Time{}, err
 	}
@@ -385,8 +380,8 @@ func (r *PasteRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, e
 	var res struct {
 		Dropped bool `json:"dropped"`
 	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/identity/drop", "scope", owner,
-		map[string]any{"slug": slug.String()}, &res); err != nil {
+	if _, err := r.call(context.Background(), opIdentityDrop, owner,
+		dropRequest{Slug: slug.String()}, &res); err != nil {
 		return false, err
 	}
 	return res.Dropped, nil
@@ -400,10 +395,10 @@ func (r *PasteRepo) SetName(slug domain.Slug, name string, wantIdentity domain.I
 	var res struct {
 		Changed bool `json:"changed"`
 	}
-	if _, err := r.call(context.Background(), http.MethodPost, "/paste/rename", "slug", slug.String(),
-		map[string]any{
-			"name": name, "identity": wantIdentity.String(),
-			"createdAt": wantCreatedAt.UTC().UnixMilli(),
+	if _, err := r.call(context.Background(), opPasteRename, slug.String(),
+		renameRequest{
+			Name: name, Identity: wantIdentity.String(),
+			CreatedAt: wantCreatedAt.UTC().UnixMilli(),
 		}, &res); err != nil {
 		return err
 	}
@@ -440,11 +435,11 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 		Uploads []string `json:"uploads"`
 		Error   string   `json:"error"`
 	}
-	status, err := r.callArtifactMutation(context.Background(), "/paste/remove", slug,
-		map[string]any{
-			"opId": opID, "generation": row.Generation,
-			"identity":  wantIdentity.String(),
-			"createdAt": wantCreatedAt.UTC().UnixMilli(),
+	status, err := r.callArtifactMutation(context.Background(), opPasteRemove, slug,
+		removeRequest{
+			OpID: opID, Generation: row.Generation,
+			Identity:  wantIdentity.String(),
+			CreatedAt: wantCreatedAt.UTC().UnixMilli(),
 		}, &res)
 	if err != nil {
 		return nil, err
@@ -470,13 +465,13 @@ func (r *PasteRepo) Delete(slug domain.Slug, wantIdentity domain.Identity, wantC
 	return uploads, nil
 }
 
-func (r *PasteRepo) callArtifactMutation(ctx context.Context, path string, slug domain.Slug,
+func (r *PasteRepo) callArtifactMutation(ctx context.Context, rt route, slug domain.Slug,
 	body, out any,
 ) (int, error) {
 	var status int
 	var err error
 	for range 2 {
-		status, err = r.call(ctx, http.MethodPost, path, "slug", slug.String(), body, out)
+		status, err = r.call(ctx, rt, slug.String(), body, out)
 		if err == nil {
 			return status, nil
 		}
@@ -499,15 +494,15 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		Ver       int    `json:"ver"`
 		WasPinned bool   `json:"wasPinned"`
 	}
-	body := map[string]any{
-		"opId": opID, "generation": generation, "userCap": userCap,
-		"kind": string(kind), "uploadId": uploadID, "size": size,
-		"manifest": manifest, "now": now.UTC().UnixMilli(),
+	body := appendRequest{
+		OpID: opID, Generation: generation, UserCap: userCap,
+		Kind: kind, UploadID: uploadID, Size: size,
+		Manifest: manifest, Now: now.UTC().UnixMilli(),
 	}
 	if base > 0 {
-		body["base"] = base
+		body.Base = &base
 	}
-	status, err := r.callArtifactMutation(ctx, "/paste/append", slug, body, &res)
+	status, err := r.callArtifactMutation(ctx, opPasteAppend, slug, body, &res)
 	// Only an identified refusal is definitive: the service deletes the upload's
 	// bytes on one, and any other answer may still publish the version.
 	switch {
@@ -521,15 +516,15 @@ func (r *PasteRepo) appendArtifact(ctx context.Context, slug domain.Slug, genera
 		return domain.AppendResult{}, domain.ErrBusy
 	case replaced(status, res.Error):
 		return domain.AppendResult{}, domain.ErrNotFound
-	case status == http.StatusConflict && res.Error == "base-moved":
+	case status == http.StatusConflict && res.Error == codeBaseMoved:
 		return domain.AppendResult{}, domain.ErrBaseMoved
-	case status == http.StatusConflict && res.Error == "bad-reuse":
+	case status == http.StatusConflict && res.Error == codeBadReuse:
 		return domain.AppendResult{}, domain.ErrBadReuse
 	case status >= 300 || res.Appended == nil:
 		return domain.AppendResult{}, fmt.Errorf("worker: append: unrecognised answer: status %d %s", status, res.Error)
 	case *res.Appended:
 		return domain.AppendResult{NewVer: res.Ver, WasPinned: res.WasPinned}, nil
-	case res.Reason == "absent":
+	case res.Reason == reasonAbsent:
 		return domain.AppendResult{}, domain.ErrNotFound
 	default:
 		return domain.AppendResult{}, fmt.Errorf("worker: append: unrecognised refusal %q", res.Reason)
@@ -553,7 +548,7 @@ func (r *PasteRepo) ListVersions(slug domain.Slug) ([]domain.Version, error) {
 		CreatedAt int64  `json:"createdAt"`
 		Deleted   bool   `json:"deleted"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/paste/versions", "slug", slug.String(), nil, &wire)
+	status, err := r.call(context.Background(), opPasteVersions, slug.String(), nil, &wire)
 	if err != nil {
 		return nil, err
 	}
@@ -594,8 +589,8 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) 
 		Freed    int       `json:"freed"`
 		Error    string    `json:"error"`
 	}
-	status, err := r.callArtifactMutation(context.Background(), "/paste/delversion", slug,
-		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
+	status, err := r.callArtifactMutation(context.Background(), opPasteDelVersion, slug,
+		versionRequest{OpID: opID, Generation: generation, Ver: ver}, &res)
 	if err != nil {
 		return domain.VersionRelease{}, err
 	}
@@ -606,7 +601,7 @@ func (r *PasteRepo) DeleteVersion(slug domain.Slug, generation string, ver int) 
 		return domain.VersionRelease{}, domain.ErrNotFound
 	}
 	if status == http.StatusConflict {
-		if res.Error == "version-served" {
+		if res.Error == codeVersionServed {
 			return domain.VersionRelease{}, domain.ErrVersionCurrentlyServed
 		}
 		return domain.VersionRelease{}, fmt.Errorf("worker: delete-version accounting conflict")
@@ -629,7 +624,7 @@ func (r *PasteRepo) HeadManifest(slug domain.Slug) (int, domain.Manifest, error)
 		Ver      int             `json:"ver"`
 		Manifest json.RawMessage `json:"manifest"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/paste/head", "slug", slug.String(), nil, &res)
+	status, err := r.call(context.Background(), opPasteHead, slug.String(), nil, &res)
 	if err != nil {
 		return 0, domain.Manifest{}, err
 	}
@@ -700,8 +695,8 @@ func (r *PasteRepo) setPin(slug domain.Slug, generation string, ver int) error {
 		Pinned bool   `json:"pinned"`
 		Error  string `json:"error"`
 	}
-	status, err := r.callArtifactMutation(context.Background(), "/paste/pin", slug,
-		map[string]any{"opId": opID, "generation": generation, "ver": ver}, &res)
+	status, err := r.callArtifactMutation(context.Background(), opPastePin, slug,
+		versionRequest{OpID: opID, Generation: generation, Ver: ver}, &res)
 	if err != nil {
 		return err
 	}
@@ -767,5 +762,5 @@ func urlQuery(v string) string { return url.QueryEscape(v) }
 // replaced reports the cell's refusal of a call addressed to an incarnation
 // the slug no longer holds: the paste the caller named is gone.
 func replaced(status int, code string) bool {
-	return status == http.StatusConflict && code == "generation-mismatch"
+	return status == http.StatusConflict && code == codeGenerationMismatch
 }
