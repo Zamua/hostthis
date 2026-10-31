@@ -120,14 +120,6 @@ export class FakeStorage {
   }
 }
 
-// A paste's version history as stored, in either layout, oldest first.
-export function storedVersions(storage) {
-  return storage.data.get("versions") ?? [...storage.data]
-    .filter(([key]) => key.startsWith("ver:"))
-    .map(([, version]) => version)
-    .sort((a, b) => a.ver - b.ver);
-}
-
 export function state(storage) {
   return {
     storage,

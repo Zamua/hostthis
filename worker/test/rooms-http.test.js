@@ -117,7 +117,8 @@ test("creating a room mints a UUIDv4 under the host's app", async () => {
 test("room creation needs a live app and a POST", async () => {
   const w = world();
   await notFound(await w.fetch(url("/api/rooms"), { method: "POST" }));
-  assert.deepEqual(w.calls.map((c) => `${c.ns}${c.path}`), ["PASTES/paste/exists"]);
+  assert.deepEqual(w.calls.filter((c) => c.ns === "ROOMS"), []);
+  assert.equal(w.storageOf("PASTES", APP).data.size, 0);
   w.app();
   for (const method of ["GET", "PUT", "DELETE", "HEAD", "OPTIONS"]) {
     const res = await w.fetch(url("/api/rooms"), { method });
@@ -448,8 +449,8 @@ test("a subscription is validated before any cell sees it", async () => {
   await goError(await w.fetch(subs, { method: "PUT", body: "" }), 400, "malformed JSON body\n\n");
   await goError(await w.fetch(subs, { method: "PUT", body: JSON.stringify({ ...subscription(1, p256dh), endpoint: "https://evil.com/x" }) }),
     400, "push: invalid: endpoint host is not a known push service\n\n");
-  // Only the existence check ran.
-  assert.deepEqual(w.calls.slice(before).map((c) => c.path), Array(4).fill("/paste/exists"));
+  assert.deepEqual(w.calls.slice(before).filter((c) => c.ns === "ROOMS"), []);
+  assert.deepEqual((await (await w.fetch(subs)).json()), []);
   // Go's decoder: trailing data is ignored and field names fold.
   const folded = `{"ENDPOINT":"${subscription(2).endpoint}","Keys":{"P256DH":"${p256dh}","AUTH":"${subscription(2).keys.auth}"}} trailing`;
   assert.equal((await w.fetch(subs, { method: "PUT", body: folded })).status, 204);
