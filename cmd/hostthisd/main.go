@@ -179,6 +179,10 @@ func main() {
 		ProxyProtocol: envTrue("HOSTTHIS_SSH_PROXY_PROTOCOL"),
 	}
 
+	clientIP, err := clientIPSource()
+	if err != nil {
+		logger.Fatalf("HOSTTHIS_HTTP_CLIENT_IP_SOURCE: %v", err)
+	}
 	httpServer := &httpapi.Server{
 		Pastes:      pasteRepo,
 		Blobs:       blobUnit,
@@ -192,7 +196,7 @@ func main() {
 		Rooms:    service.NewRooms(roomRepo),
 		RoomPush: service.NewRoomPush(roomRepo),
 		Solid:    metadata.Solid,
-		TrustXFF: envTrue("HOSTTHIS_HTTP_TRUST_XFF"),
+		ClientIP: clientIP,
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
@@ -372,6 +376,18 @@ func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder 
 }
 
 // envTrue reports whether key is set to "true", case-insensitively.
+// clientIPSource reads HOSTTHIS_HTTP_CLIENT_IP_SOURCE; the older
+// HOSTTHIS_HTTP_TRUST_XFF=true still means xff-rightmost.
+func clientIPSource() (httpapi.ClientIPSource, error) {
+	if v := os.Getenv("HOSTTHIS_HTTP_CLIENT_IP_SOURCE"); v != "" {
+		return httpapi.ParseClientIPSource(v)
+	}
+	if envTrue("HOSTTHIS_HTTP_TRUST_XFF") {
+		return httpapi.ClientIPForwardedFor, nil
+	}
+	return httpapi.ClientIPPeer, nil
+}
+
 func envTrue(key string) bool {
 	return strings.EqualFold(os.Getenv(key), "true")
 }
