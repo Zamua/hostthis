@@ -1024,6 +1024,9 @@ func (s *Server) verbWhoami(sess gossh.Session, owner domain.Owner, argv []strin
 		pct := float64(info.UsedBytes) * 100 / float64(info.QuotaBytes)
 		fmt.Fprintf(sess, "quota:   %s / %s (%.0f%%)\n",
 			humanBytes(info.UsedBytes), humanBytes(info.QuotaBytes), pct)
+		if info.RoomBytes > 0 {
+			_, _ = fmt.Fprintf(sess, "rooms:   %s of that in your apps' rooms\n", humanBytes(info.RoomBytes))
+		}
 	}
 	if info.Session.Subnet != "" {
 		fmt.Fprintln(sess)

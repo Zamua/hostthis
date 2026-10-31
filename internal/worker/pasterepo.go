@@ -735,7 +735,13 @@ func (r *PasteRepo) OwnerSummary(owner string, now time.Time) (domain.OwnerSumma
 	if err != nil {
 		return domain.OwnerSummary{}, err
 	}
-	return domain.OwnerSummary{Active: active, FirstSeen: first, PasteBytes: bytes}, nil
+	var charge struct {
+		RoomBytes int64 `json:"roomBytes"`
+	}
+	if err := r.ask(context.Background(), "identity bytes", opIdentityBytes, owner, nil, &charge, nil); err != nil {
+		return domain.OwnerSummary{}, err
+	}
+	return domain.OwnerSummary{Active: active, FirstSeen: first, PasteBytes: bytes, RoomBytes: charge.RoomBytes}, nil
 }
 
 // --- the site surface -------------------------------------------------------

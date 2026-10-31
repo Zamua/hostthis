@@ -379,6 +379,7 @@ export class Room {
     let decision;
     try {
       response = await this.appCall(doc.meta.appSlug, "roomdecide", {
+        app: doc.meta.appSlug,
         room: doc.meta.id,
         version,
         targetBytes: pending.targetBytes,
