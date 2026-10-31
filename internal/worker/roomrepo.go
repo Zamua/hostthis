@@ -38,13 +38,13 @@ func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now
 	var res struct {
 		Created *bool `json:"created"`
 	}
-	if err := r.ask(context.Background(), "room create", http.MethodPost, "/room/create", "room",
-		roomKey(room.AppSlug, room.ID), map[string]any{
-			"appSlug": room.AppSlug.String(), "id": room.ID.String(),
-			"createdAt": room.CreatedAt.UTC().UnixMilli(),
-			"updatedAt": room.UpdatedAt.UTC().UnixMilli(),
-			"subnet":    subnet, "at": now.UTC().UnixMilli(),
-			"appCap": appCap,
+	if err := r.ask(context.Background(), "room create", opRoomCreate,
+		roomKey(room.AppSlug, room.ID), roomCreateRequest{
+			AppSlug: room.AppSlug.String(), ID: room.ID.String(),
+			CreatedAt: room.CreatedAt.UTC().UnixMilli(),
+			UpdatedAt: room.UpdatedAt.UTC().UnixMilli(),
+			Subnet:    subnet, At: now.UTC().UnixMilli(),
+			AppCap: appCap,
 		}, &res, map[int]error{http.StatusInsufficientStorage: domain.ErrAppRoomsFull}); err != nil {
 		return err
 	}
@@ -61,8 +61,7 @@ func (r *RoomRepo) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, erro
 		CreatedAt int64  `json:"createdAt"`
 		UpdatedAt int64  `json:"updatedAt"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/room/meta", "room",
-		roomKey(app, id), nil, &wire)
+	status, err := r.call(context.Background(), opRoomMeta, roomKey(app, id), nil, &wire)
 	if err != nil {
 		return domain.Room{}, err
 	}
@@ -80,8 +79,8 @@ func (r *RoomRepo) GetValue(app domain.Slug, id domain.RoomID, key string) ([]by
 	var wire struct {
 		Value []byte `json:"value"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet,
-		"/room/get?key="+urlQuery(key), "room", roomKey(app, id), nil, &wire)
+	status, err := r.call(context.Background(), opRoomGet.withQuery("key="+urlQuery(key)),
+		roomKey(app, id), nil, &wire)
 	if err != nil {
 		return nil, err
 	}
@@ -103,8 +102,7 @@ func (r *RoomRepo) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, e
 		// The text the cell holds per value, which its frames carry.
 		Wire map[string]string `json:"wire"`
 	}
-	status, err := r.call(context.Background(), http.MethodGet, "/room/scan", "room",
-		roomKey(app, id), nil, &wire)
+	status, err := r.call(context.Background(), opRoomScan, roomKey(app, id), nil, &wire)
 	if err != nil {
 		return domain.RoomKV{}, err
 	}
@@ -139,16 +137,16 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 		Seq   uint64 `json:"seq"`
 		Bytes int    `json:"bytes"`
 	}
-	if err := r.ask(context.Background(), "room put", http.MethodPost, "/room/put", "room", roomKey(app, id),
-		map[string]any{
-			"key": key, "value": base64.StdEncoding.EncodeToString(val),
+	if err := r.ask(context.Background(), "room put", opRoomPut, roomKey(app, id),
+		roomPutRequest{
+			Key: key, Value: base64.StdEncoding.EncodeToString(val),
 			// The frame encoding computed HERE, with the same encoder the HTTP
 			// handlers use: the cell echoes it into snapshots and mirror frames
 			// without interpreting the bytes, so the subtle raw-JSON-or-string
 			// rule exists in exactly one place.
-			"wire":    string(domain.RoomWireValue(val)),
-			"roomCap": domain.MaxRoomBytes, "keyCap": domain.MaxRoomKeys,
-			"appCap": appCap, "now": now.UTC().UnixMilli(),
+			Wire:    string(domain.RoomWireValue(val)),
+			RoomCap: domain.MaxRoomBytes, KeyCap: domain.MaxRoomKeys,
+			AppCap: appCap, Now: now.UTC().UnixMilli(),
 		}, &res, map[int]error{
 			http.StatusNotFound:              domain.ErrNotFound,
 			http.StatusRequestEntityTooLarge: domain.ErrRoomDataFull,
@@ -164,8 +162,8 @@ func (r *RoomRepo) DeleteValue(app domain.Slug, id domain.RoomID, key string, no
 		Seq   uint64 `json:"seq"`
 		Bytes int    `json:"bytes"`
 	}
-	if err := r.ask(context.Background(), "room delete", http.MethodPost, "/room/del", "room",
-		roomKey(app, id), map[string]any{"key": key, "now": now.UTC().UnixMilli()}, &res, notFound); err != nil {
+	if err := r.ask(context.Background(), "room delete", opRoomDel,
+		roomKey(app, id), roomDelRequest{Key: key, Now: now.UTC().UnixMilli()}, &res, notFound); err != nil {
 		return 0, err
 	}
 	return res.Seq, nil
@@ -179,10 +177,9 @@ func (r *RoomRepo) CountRoomCreates(app domain.Slug, subnet string, now time.Tim
 		PerSubnet int `json:"perSubnet"`
 		PerApp    int `json:"perApp"`
 	}
-	u := fmt.Sprintf("/paste/roomcounts?subnet=%s&now=%d&window=%d",
+	q := fmt.Sprintf("subnet=%s&now=%d&window=%d",
 		urlQuery(subnet), now.UTC().UnixMilli(), window.Milliseconds())
-	if _, err := r.call(context.Background(), http.MethodGet, u, "slug",
-		app.String(), nil, &res); err != nil {
+	if _, err := r.call(context.Background(), opPasteRoomCounts.withQuery(q), app.String(), nil, &res); err != nil {
 		return 0, 0, err
 	}
 	return res.PerSubnet, res.PerApp, nil

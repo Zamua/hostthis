@@ -36,7 +36,7 @@ func TestCallFailsAnUnlistedStatusWithoutABody(t *testing.T) {
 	var out struct {
 		OK bool `json:"ok"`
 	}
-	if _, err := c.call(context.Background(), http.MethodGet, "/paste/get", "slug", "slugone1", nil, &out); err == nil {
+	if _, err := c.call(context.Background(), opPasteGet, "slugone1", nil, &out); err == nil {
 		t.Fatal("call on an empty-bodied 500 = nil error, want a failure")
 	}
 }

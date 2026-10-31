@@ -194,7 +194,7 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 
 	wsBase := strings.Replace(p.base, "http", "ws", 1)
 	dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
-	upstream, _, err := websocket.Dial(dialCtx, wsBase+"/room/join?room="+urlQuery(roomKey(key.App, key.ID)),
+	upstream, _, err := websocket.Dial(dialCtx, wsBase+opRoomJoin.target(roomKey(key.App, key.ID)),
 		&websocket.DialOptions{HTTPClient: p.client})
 	dialCancel()
 	p.mu.Lock()
