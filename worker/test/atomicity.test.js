@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker, { Identity, Paste, Room, Subnet } from "../src/index.js";
+import { CREATE_INTENT_GRACE_MS } from "../src/cells/records.js";
 import {
   FakeStorage, PASTE_CELL_ID, ROOM_CELL_ID, ROOM_ID, SimulatedCrash,
-  clone, fakeCellID, putBody, roomDoc, state, storedVersions,
+  clone, fakeCellID, putBody, roomDoc, state,
 } from "./harness.js";
 
 async function assertCrashAtomic({ seed, invoke }) {
@@ -30,8 +31,9 @@ async function assertCrashAtomic({ seed, invoke }) {
 
 // Sweeps every local commit boundary of a paste operation: a reference run
 // counts the commits, then each boundary gets a fresh harness crashed there,
-// recovered through the pending alarm, and handed to `converged`. Counting from
-// the reference run keeps a newly added commit inside the sweep.
+// recovered through the alarm it armed, and handed to `converged` with the
+// run's name. Counting from the reference run keeps a newly added commit inside
+// the sweep.
 async function assertCrashConverges({ harness, invoke, converged }) {
   const reference = harness();
   await invoke(reference, "reference");
@@ -43,10 +45,10 @@ async function assertCrashConverges({ harness, invoke, converged }) {
     await assert.rejects(() => invoke(h, `crash-${boundary}`), SimulatedCrash);
     h.pasteStorage.commits = 0;
     h.pasteStorage.crashAfter = Infinity;
-    if (h.pasteStorage.data.get("artifactPending")) {
+    if (h.pasteStorage.alarm !== null) {
       await h.paste().alarm();
     }
-    await converged(h);
+    await converged(h, `crash-${boundary}`);
   }
 }
 
@@ -61,6 +63,49 @@ function mapEqual(left, right) {
 
 function formatMap(value) {
   return JSON.stringify(Object.fromEntries(value), null, 2);
+}
+
+async function listing(storage) {
+  return (await responseJSON(await new Identity(state(storage)).list())).body;
+}
+
+async function entryOf(storage, slug = "slugone1") {
+  return (await listing(storage)).find((entry) => entry.slug === slug);
+}
+
+async function rowOf(paste) {
+  const response = await paste.get();
+  return response.status === 404 ? undefined : response.json();
+}
+
+// Oldest first.
+async function versionsOf(paste) {
+  return (await responseJSON(await paste.listVersions())).body.reverse();
+}
+
+// A mutation under a fresh operation id answers 423 exactly while another
+// operation's work is pending in the cell; this one names no version, so it
+// writes nothing.
+async function holdsPending(paste, generation = "generation-1") {
+  const probe = await paste.deleteVersion({ opId: "probe-pending", generation, ver: 0 });
+  return probe.status === 423;
+}
+
+// Granted only while the paste's accounting version agrees with Identity's.
+async function nextAppendGranted(h) {
+  return (await h.paste().append({ ...appendBody("append-next"), size: 0 })).status === 200;
+}
+
+// A put of a new incarnation is refused while the removed one is unreleased.
+async function putIncarnation(h, generation = "generation-2") {
+  return (await h.paste().put({
+    generation,
+    fingerprint: `fingerprint-${generation}`,
+    row: {
+      slug: "slugone1", identity: "other", kind: "html",
+      size: 1, status: "ready", createdAt: 9, updatedAt: 9,
+    },
+  })).status;
 }
 
 function serialState(storage) {
@@ -114,7 +159,7 @@ test("Identity.reserve requires a valid create intent before charging", async ()
       slug: "newslug2", generation: "generation-1", size: 3, userCap: 10, intent,
     });
     assert.equal(response.status, 400, name);
-    assert.equal(storage.data.get("entries"), undefined, name);
+    assert.deepStrictEqual(await listing(storage), [], name);
     assert.equal(storage.alarm, null, name);
   }
 });
@@ -142,7 +187,7 @@ test("Identity.reserve replays only an unresolved create and refuses a completed
   const repeated = await responseJSON(await identity.reserve(structuredClone(body)));
   assert.equal(repeated.status, 409);
   assert.equal(repeated.body.error, "slug-taken");
-  assert.equal(storage.data.get("entries").slugone1.status, "ready");
+  assert.equal((await entryOf(storage)).status, "ready");
 });
 
 test("Identity serializes concurrent quota reservations", async () => {
@@ -160,9 +205,9 @@ test("Identity serializes concurrent quota reservations", async () => {
   }));
   const responses = await Promise.all([reserve("slugone1"), reserve("slugtwo2")]);
   assert.deepStrictEqual(responses.map((response) => response.status).sort(), [200, 507]);
-  const entries = storage.data.get("entries");
-  assert.equal(Object.keys(entries).length, 1);
-  assert.equal(Object.values(entries)[0].size, 6);
+  const entries = await listing(storage);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].chargedSize, 6);
 });
 
 test("Identity rejects a competing generation for one owner slug", async () => {
@@ -179,7 +224,7 @@ test("Identity rejects a competing generation for one owner slug", async () => {
 
   assert.equal((await reserve("generation-a")).status, 200);
   assert.equal((await reserve("generation-b")).status, 409);
-  assert.equal(storage.data.get("entries").slugone1.generation, "generation-a");
+  assert.equal((await entryOf(storage)).generation, "generation-a");
 
   assert.equal((await identity.confirm({
     slug: "slugone1", generation: "generation-b", status: "ready",
@@ -187,8 +232,9 @@ test("Identity rejects a competing generation for one owner slug", async () => {
   assert.equal((await identity.release({
     slug: "slugone1", generation: "generation-b",
   })).status, 409);
-  assert.equal(storage.data.get("entries").slugone1.generation, "generation-a");
-  assert.equal(storage.data.get("entries").slugone1.status, "pending");
+  const entry = await entryOf(storage);
+  assert.equal(entry.generation, "generation-a");
+  assert.equal(entry.status, "pending");
 });
 
 // An empty or non-string generation is refused before any read.
@@ -277,13 +323,25 @@ function createIntentBody() {
   };
 }
 
-// Backdates a create intent past the recovery grace so alarm() acts on it.
-function ageIntent(h, id) {
-  const key = `intent:${id}`;
-  h.identityStorage.data.set(key, { ...h.identityStorage.data.get(key), reservedAt: 0 });
+// Moves the cell clock past the recovery grace so alarm() acts on a create.
+function passGrace(t) {
+  const realNow = Date.now;
+  const later = realNow() + CREATE_INTENT_GRACE_MS + 1;
+  Date.now = () => later;
+  t.after(() => { Date.now = realNow; });
 }
 
-test("Identity create alarm confirms a matching paste generation", async () => {
+// An unresolved create replays; a discharged one is a duplicate insert.
+async function intentRetained(h, body) {
+  const replay = await responseJSON(await h.identity.reserve(structuredClone(body)));
+  if (replay.status === 200 && replay.body.replayed === true) {
+    return true;
+  }
+  assert.deepStrictEqual(replay, { status: 409, body: { error: "slug-taken" } });
+  return false;
+}
+
+test("Identity create alarm confirms a matching paste generation", async (t) => {
   const h = createIntentHarness();
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
@@ -297,47 +355,46 @@ test("Identity create alarm confirms a matching paste generation", async () => {
     },
   })).status, 204);
 
-  ageIntent(h, body.intent.id);
+  passGrace(t);
   await h.identity.alarm();
-  assert.equal(h.identityStorage.data.get("entries").newslug2.status, "pending");
-  assert.equal(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
+  assert.equal((await entryOf(h.identityStorage, body.slug)).status, "pending");
+  assert.equal(await intentRetained(h, body), false);
   assert.equal(h.identityStorage.alarm, null);
 });
 
-test("Identity create alarm releases a definitely absent paste", async () => {
+test("Identity create alarm releases a definitely absent paste", async (t) => {
   const h = createIntentHarness();
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
 
-  ageIntent(h, body.intent.id);
+  passGrace(t);
   await h.identity.alarm();
-  assert.equal(h.identityStorage.data.get("entries").newslug2, undefined);
-  assert.equal(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
-  assert.equal(h.identityStorage.data.get(`artifact-account:${body.slug}:${body.generation}`).allocated, 0);
+  assert.deepStrictEqual(await listing(h.identityStorage), []);
+  assert.deepStrictEqual((await responseJSON(await h.identity.bytes())).body, { bytes: 0 });
   assert.equal(h.identityStorage.alarm, null);
 });
 
-test("Identity create alarm retains intent across a transient paste failure", async () => {
+test("Identity create alarm retains intent across a transient paste failure", async (t) => {
   const h = createIntentHarness();
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
   h.transport.failGet = 1;
 
-  ageIntent(h, body.intent.id);
+  passGrace(t);
   await h.identity.alarm();
-  assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
-  assert.equal(h.identityStorage.data.get("entries").newslug2.generation, body.generation);
+  assert.equal(await intentRetained(h, body), true);
+  assert.equal((await entryOf(h.identityStorage, body.slug)).generation, body.generation);
   assert.notEqual(h.identityStorage.alarm, null);
 });
 
-test("Identity create alarm fences a late put before releasing quota", async () => {
+test("Identity create alarm fences a late put before releasing quota", async (t) => {
   const h = createIntentHarness();
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
 
-  ageIntent(h, body.intent.id);
+  passGrace(t);
   await h.identity.alarm();
-  assert.equal(h.identityStorage.data.get("entries").newslug2, undefined);
+  assert.equal(await entryOf(h.identityStorage, body.slug), undefined);
   assert.equal((await h.paste.put({
     generation: body.generation,
     fingerprint: body.intent.fingerprint,
@@ -346,10 +403,10 @@ test("Identity create alarm fences a late put before releasing quota", async () 
       size: body.size, createdAt: 9, updatedAt: 9,
     },
   })).status, 409);
-  assert.equal(h.pasteStorage.data.get("row"), undefined);
+  assert.equal(await rowOf(h.paste), undefined);
 });
 
-test("Identity create alarm confirms the Paste row status monotonically", async () => {
+test("Identity create alarm confirms the Paste row status monotonically", async (t) => {
   const h = createIntentHarness();
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
@@ -361,17 +418,17 @@ test("Identity create alarm confirms the Paste row status monotonically", async 
       size: body.size, createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
-  const entries = h.identityStorage.data.get("entries");
-  entries.newslug2.status = "ready";
-  h.identityStorage.data.set("entries", entries);
+  assert.equal((await h.identity.confirm({
+    slug: body.slug, generation: body.generation, status: "ready",
+  })).status, 204);
 
-  ageIntent(h, body.intent.id);
+  passGrace(t);
   await h.identity.alarm();
-  assert.equal(h.identityStorage.data.get("entries").newslug2.status, "ready");
-  assert.equal(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
+  assert.equal((await entryOf(h.identityStorage, body.slug)).status, "ready");
+  assert.equal(await intentRetained(h, body), false);
 });
 
-test("Identity create alarm retains a conflicting same-generation row", async () => {
+test("Identity create alarm retains a conflicting same-generation row", async (t) => {
   const h = createIntentHarness();
   const body = createIntentBody();
   assert.equal((await h.identity.reserve(body)).status, 200);
@@ -384,10 +441,10 @@ test("Identity create alarm retains a conflicting same-generation row", async ()
     },
   })).status, 204);
 
-  ageIntent(h, body.intent.id);
+  passGrace(t);
   await h.identity.alarm();
-  assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
-  assert.equal(h.identityStorage.data.get("entries").newslug2.status, "pending");
+  assert.equal(await intentRetained(h, body), true);
+  assert.equal((await entryOf(h.identityStorage, body.slug)).status, "pending");
   assert.notEqual(h.identityStorage.alarm, null);
 });
 
@@ -399,8 +456,8 @@ test("Identity create alarm leaves an in-flight create alone until the grace ela
   assert.ok(h.identityStorage.alarm >= before + 30_000);
 
   await h.identity.alarm();
-  assert.notEqual(h.identityStorage.data.get(`intent:${body.intent.id}`), undefined);
-  assert.equal(h.identityStorage.data.get("entries").newslug2.generation, body.generation);
+  assert.equal(await intentRetained(h, body), true);
+  assert.equal((await entryOf(h.identityStorage, body.slug)).generation, body.generation);
   assert.ok(h.identityStorage.alarm >= before + 30_000);
 });
 
@@ -434,8 +491,8 @@ test("Paste.put replays only the exact creation fingerprint", async () => {
   assert.equal((await paste.put({
     row: replay, generation: "generation-1", fingerprint: "fingerprint-other",
   })).status, 409);
-  assert.equal(storage.data.get("row").size, 3);
-  assert.equal(storedVersions(storage).length, 1);
+  assert.equal((await rowOf(paste)).size, 3);
+  assert.equal((await versionsOf(paste)).length, 1);
   assert.equal((await paste.put({
     row: replay, generation: "generation-2", fingerprint: "fingerprint-2",
   })).status, 409);
@@ -457,14 +514,16 @@ test("Paste append converges after every local commit crash", async () => {
   await assertCrashConverges({
     harness: artifactHarness,
     invoke: (h, run) => h.paste().append({ ...appendBody(`append-${run}`), uploadId: "up-2" }),
-    converged(h) {
-      assert.equal(storedVersions(h.pasteStorage).length, 2);
-      assert.equal(storedVersions(h.pasteStorage)[1].uploadId, "up-2");
-      assert.equal(h.pasteStorage.data.get("maxVer"), 2);
-      assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
-      assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
-      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+    async converged(h) {
+      const versions = await versionsOf(h.paste());
+      assert.deepStrictEqual(versions.map(({ ver, uploadId }) => ({ ver, uploadId })), [
+        { ver: 1, uploadId: "" }, { ver: 2, uploadId: "up-2" },
+      ]);
+      assert.equal((await entryOf(h.identityStorage)).chargedSize, 6);
+      assert.equal(await holdsPending(h.paste()), false);
       assert.equal(h.pasteStorage.alarm, null);
+      assert.equal(await nextAppendGranted(h), true);
+      assert.equal((await versionsOf(h.paste())).at(-1).ver, 3);
     },
   });
 });
@@ -481,9 +540,8 @@ test("Paste serializes concurrent version appends", async () => {
   }));
   const results = await Promise.all([append("append-2"), append("append-3")]);
   assert.deepStrictEqual((await Promise.all(results.map(responseJSON))).map((result) => result.body.ver), [2, 3]);
-  assert.equal(h.pasteStorage.data.get("maxVer"), 3);
-  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1, 2, 3]);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+  assert.deepStrictEqual((await versionsOf(paste)).map((version) => version.ver), [1, 2, 3]);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 6);
 });
 
 test("Paste history grows without any value outgrowing one version", async () => {
@@ -495,8 +553,7 @@ test("Paste history grows without any value outgrowing one version", async () =>
     assert.equal(appended.status, 200);
   }
   assert.equal(h.pasteStorage.data.has("versions"), false);
-  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1, 2, 3, 4, 5, 6]);
-  assert.deepStrictEqual(h.pasteStorage.data.get("row").manifest, manifest);
+  assert.deepStrictEqual((await rowOf(h.paste())).manifest, manifest);
   const listed = await responseJSON(await h.paste().listVersions());
   assert.deepStrictEqual(listed.body.map((version) => version.ver), [6, 5, 4, 3, 2, 1]);
   assert.ok(listed.body.every((version) => !Object.hasOwn(version, "manifest")));
@@ -546,21 +603,16 @@ test("Paste alarm publishes an append granted before the storage limit refused i
   h.pasteStorage.tooBig = (key) => key === "versions";
   assert.equal((await h.paste().append(appendBody())).status, 200);
 
-  const stuck = artifactHarness({
-    identitySeed: h.identityStorage.data,
-    pasteSeed: new Map([...artifactPasteSeed(), ["artifactPending", {
-      kind: "append", stage: "decide", opId: "append-1", slug: "slugone1", owner: "owner",
-      generation: "generation-1", version: 1, target: 6, userCap: 10, latestVersion: 2,
-      wasPinned: false,
-      mutation: { ver: 2, kind: "markdown", size: 4, createdAt: 8, deleted: false, manifest: null },
-    }]]),
-  });
+  const stuck = artifactHarness();
   stuck.pasteStorage.tooBig = (key) => key === "versions";
+  stuck.transport.failAfter = 1;
+  assert.equal((await stuck.paste().append(appendBody())).status, 502);
+  assert.equal((await entryOf(stuck.identityStorage)).chargedSize, 6);
   await stuck.paste().alarm();
-  assert.deepStrictEqual(storedVersions(stuck.pasteStorage).map((version) => version.ver), [1, 2]);
-  assert.equal(stuck.pasteStorage.data.get("artifactPending"), undefined);
+  assert.deepStrictEqual((await versionsOf(stuck.paste())).map((version) => version.ver), [1, 2]);
+  assert.equal(await holdsPending(stuck.paste()), false);
   assert.equal(stuck.pasteStorage.alarm, null);
-  assert.equal(stuck.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+  assert.equal((await entryOf(stuck.identityStorage)).chargedSize, 6);
 });
 
 test("Paste append refused by storage settles its grant and answers 413 for good", async () => {
@@ -569,10 +621,9 @@ test("Paste append refused by storage settles its grant and answers 413 for good
   const body = { ...appendBody("append-huge"), manifest: { "/": { blob: "huge" } } };
   const refused = await responseJSON(await h.paste().append(body));
   assert.deepStrictEqual(refused, { status: 413, body: { error: "version-too-large" } });
-  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((version) => version.ver), [1]);
-  assert.equal(h.pasteStorage.data.get("row").accountingVersion, 2);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.deepStrictEqual((await versionsOf(h.paste())).map((version) => version.ver), [1]);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 2);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
 
   h.pasteStorage.tooBig = null;
@@ -602,7 +653,7 @@ test("Paste alarm retries back off to a ceiling and never throw", async (t) => {
   await h.paste().alarm();
   h.pasteStorage.get = get;
   assert.equal(h.pasteStorage.alarm - now, 300000);
-  assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await holdsPending(h.paste()), true);
 
   h.pasteStorage.alarm = now;
   h.pasteStorage.transaction = async () => { throw new Error("handler reset"); };
@@ -612,13 +663,15 @@ test("Paste alarm retries back off to a ceiling and never throw", async (t) => {
 
 test("Paste append refuses a version too large to persist before any charge", async () => {
   const h = artifactHarness();
-  h.pasteStorage.tooBig = (key) => key === "artifactPending";
-  const refused = await responseJSON(await h.paste().append(appendBody("append-huge")));
+  h.pasteStorage.tooBig = (_key, value) => JSON.stringify(value).length > 1000;
+  const refused = await responseJSON(await h.paste().append({
+    ...appendBody("append-huge"), manifest: { "/": { blob: "b".repeat(2000) } },
+  }));
   assert.deepStrictEqual(refused, { status: 413, body: { error: "version-too-large" } });
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
-  assert.deepStrictEqual(h.transport.calls, []);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 2);
+  assert.deepStrictEqual((await versionsOf(h.paste())).map((version) => version.ver), [1]);
 });
 
 test("Paste delete converges after every local commit crash", async () => {
@@ -627,12 +680,13 @@ test("Paste delete converges after every local commit crash", async () => {
     invoke: (h, run) => h.paste().deleteVersion({
       opId: `delete-${run}`, generation: "generation-1", ver: 1,
     }),
-    converged(h) {
-      assert.equal(storedVersions(h.pasteStorage)[0].deleted, true);
-      assert.equal(h.pasteStorage.data.get("row").size, 4);
-      assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
-      assert.equal(h.identityStorage.data.get("entries").slugone1.servedSize, 4);
-      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+    async converged(h) {
+      assert.equal((await versionsOf(h.paste()))[0].deleted, true);
+      assert.equal((await rowOf(h.paste())).size, 4);
+      const entry = await entryOf(h.identityStorage);
+      assert.equal(entry.chargedSize, 4);
+      assert.equal(entry.servedSize, 4);
+      assert.equal(await holdsPending(h.paste()), false);
       assert.equal(h.pasteStorage.alarm, null);
     },
   });
@@ -674,10 +728,9 @@ function artifactHarness(options = {}) {
   const pasteStorage = new FakeStorage(options.pasteSeed ?? artifactPasteSeed(options));
   const identityStorage = new FakeStorage(options.identitySeed ?? artifactIdentitySeed(options));
   const identity = new Identity(state(identityStorage));
-  const transport = { failBefore: 0, failAfter: 0, calls: [] };
+  const transport = { failBefore: 0, failAfter: 0 };
   const endpoint = {
     async fetch(request) {
-      transport.calls.push(new URL(request.url).pathname);
       if (transport.failBefore-- > 0) {
         throw new Error("identity unavailable");
       }
@@ -744,14 +797,13 @@ test("Paste append recovers a response-lost reservation without duplicating the 
   h.transport.failAfter = 1;
 
   assert.equal((await h.paste().append(appendBody())).status, 502);
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+  assert.equal((await versionsOf(h.paste())).length, 1);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 6);
   assert.notEqual(h.pasteStorage.alarm, null);
 
   await h.paste().alarm();
-  assert.equal(storedVersions(h.pasteStorage).length, 2);
-  assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal((await versionsOf(h.paste())).length, 2);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
 
   const replay = await responseJSON(await h.paste().append(appendBody()));
@@ -759,7 +811,8 @@ test("Paste append recovers a response-lost reservation without duplicating the 
     status: 200,
     body: { appended: true, ver: 2, wasPinned: false, totalSize: 6 },
   });
-  assert.equal(storedVersions(h.pasteStorage).length, 2);
+  assert.equal((await versionsOf(h.paste())).length, 2);
+  assert.equal(await nextAppendGranted(h), true);
 });
 
 test("Paste projection reloads state after recovering prior accounting", async () => {
@@ -771,33 +824,32 @@ test("Paste projection reloads state after recovering prior accounting", async (
     name: "after recovery", identity: "owner", createdAt: 7,
   }));
   assert.deepStrictEqual(renamed, { status: 200, body: { changed: true } });
-  const row = h.pasteStorage.data.get("row");
-  assert.equal(row.accountingVersion, 1);
+  const row = await rowOf(h.paste());
   assert.equal(row.kind, "markdown");
   assert.equal(row.size, 4);
   assert.equal(row.name, "after recovery");
-  const entry = h.identityStorage.data.get("entries").slugone1;
+  const entry = await entryOf(h.identityStorage);
   assert.equal(entry.name, "after recovery");
   assert.equal(entry.servedSize, 4);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
+  assert.equal(await nextAppendGranted(h), true);
 });
 
 test("Paste append keeps a quota refusal permanent across later capacity", async () => {
   const h = artifactHarness({ extra: 6 });
   const refused = await responseJSON(await h.paste().append(appendBody("append-refused")));
   assert.deepStrictEqual(refused, { status: 507, body: { error: "over-quota" } });
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
-  assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
+  assert.equal((await versionsOf(h.paste())).length, 1);
 
-  const entries = h.identityStorage.data.get("entries");
-  delete entries.other;
-  await h.identityStorage.put("entries", entries);
+  assert.equal((await new Identity(state(h.identityStorage)).release({
+    slug: "other", generation: "other-generation",
+  })).status, 204);
 
   assert.deepStrictEqual(await responseJSON(await h.paste().append(appendBody("append-refused"))), refused);
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
+  assert.equal((await versionsOf(h.paste())).length, 1);
   assert.equal((await h.paste().append(appendBody("append-2"))).status, 200);
-  assert.equal(storedVersions(h.pasteStorage).length, 2);
+  assert.equal((await versionsOf(h.paste())).length, 2);
 });
 
 test("Paste projection remains available after a quota refusal", async () => {
@@ -808,8 +860,8 @@ test("Paste projection remains available after a quota refusal", async () => {
     name: "still mutable", identity: "owner", createdAt: 7,
   }));
   assert.deepStrictEqual(renamed, { status: 200, body: { changed: true } });
-  assert.equal(h.identityStorage.data.get("entries").slugone1.name, "still mutable");
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal((await entryOf(h.identityStorage)).name, "still mutable");
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
 });
 
@@ -823,13 +875,13 @@ test("Paste delete commits before an unavailable allocation release", async () =
   assert.deepStrictEqual(deleted, {
     status: 200, body: { deleted: true, totalSize: 4, upload: "", prefixes: [], keys: [], freed: 2 },
   });
-  assert.equal(storedVersions(h.pasteStorage)[0].deleted, true);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 6);
+  assert.equal((await versionsOf(h.paste()))[0].deleted, true);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 6);
   assert.notEqual(h.pasteStorage.alarm, null);
 
   await h.paste().alarm();
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 4);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 4);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
 });
 
@@ -842,9 +894,9 @@ test("Paste delete refuses the version served at commit time", async () => {
   assert.deepStrictEqual(deleted, {
     status: 409, body: { error: "version-served" },
   });
-  assert.equal(storedVersions(h.pasteStorage)[1].deleted, false);
-  assert.equal(h.pasteStorage.data.get("row").pinnedVersion, 2);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal((await versionsOf(h.paste()))[1].deleted, false);
+  assert.equal((await rowOf(h.paste())).pinnedVersion, 2);
+  assert.equal(await holdsPending(h.paste()), false);
 });
 
 test("Paste pin fences unchanged charge and projects the served version", async () => {
@@ -855,12 +907,12 @@ test("Paste pin fences unchanged charge and projects the served version", async 
   })), {
     status: 200, body: { pinned: true, ver: 1 },
   });
-  assert.equal(h.pasteStorage.data.get("row").size, 2);
-  assert.equal(h.pasteStorage.data.get("row").accountingVersion, 1);
-  const entry = h.identityStorage.data.get("entries").slugone1;
+  assert.equal((await rowOf(h.paste())).size, 2);
+  const entry = await entryOf(h.identityStorage);
   assert.equal(entry.chargedSize, 6);
   assert.equal(entry.servedSize, 2);
   assert.equal(entry.pinnedVersion, 1);
+  assert.equal(await nextAppendGranted(h), true);
 });
 
 test("Paste removal fences release before allowing a new incarnation", async () => {
@@ -871,27 +923,19 @@ test("Paste removal fences release before allowing a new incarnation", async () 
     opId: "remove-1", generation: "generation-1", identity: "owner", createdAt: 7,
   }));
   assert.deepStrictEqual(removed, { status: 200, body: { removed: true, uploads: [] } });
-  assert.equal(h.pasteStorage.data.has("row"), false);
-  assert.equal(h.pasteStorage.data.get("artifactTombstone").generation, "generation-1");
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
+  assert.equal(await rowOf(h.paste()), undefined);
+  assert.equal(await putIncarnation(h), 409);
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 2);
 
   await h.paste().alarm();
-  assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-  assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
-  assert.equal((await h.paste().put({
-    generation: "generation-2",
-    fingerprint: "fingerprint-2",
-    row: {
-      slug: "slugone1", identity: "other", kind: "html",
-      size: 1, status: "ready", createdAt: 9, updatedAt: 9,
-    },
-  })).status, 204);
+  assert.equal(await entryOf(h.identityStorage), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
+  assert.equal(await putIncarnation(h), 204);
 
   assert.deepStrictEqual(await responseJSON(await h.paste().remove({
     opId: "remove-1", generation: "generation-1", identity: "owner", createdAt: 7,
   })), removed);
-  assert.equal(h.pasteStorage.data.get("row").generation, "generation-2");
+  assert.equal((await rowOf(h.paste())).generation, "generation-2");
 });
 
 test("Paste receipts are scoped to one artifact generation", async () => {
@@ -901,7 +945,6 @@ test("Paste receipts are scoped to one artifact generation", async () => {
     opId: "remove-generation-1", generation: "generation-1",
     identity: "owner", createdAt: 7,
   })).status, 200);
-  assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
 
   const identity = new Identity(state(h.identityStorage));
   assert.equal((await identity.reserve({
@@ -928,7 +971,7 @@ test("Paste receipts are scoped to one artifact generation", async () => {
     status: 200,
     body: { appended: true, ver: 2, wasPinned: false, totalSize: 2 },
   });
-  assert.equal(storedVersions(h.pasteStorage).length, 2);
+  assert.equal((await versionsOf(h.paste())).length, 2);
 });
 
 test("Paste rejects an old incarnation without mutating the replacement allocation", async () => {
@@ -936,9 +979,10 @@ test("Paste rejects an old incarnation without mutating the replacement allocati
   const h = artifactHarness({ identitySeed });
 
   assert.equal((await h.paste().append(appendBody("stale-generation"))).status, 409);
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
-  assert.equal(h.identityStorage.data.get("entries").slugone1.generation, "generation-2");
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
+  assert.equal((await versionsOf(h.paste())).length, 1);
+  const entry = await entryOf(h.identityStorage);
+  assert.equal(entry.generation, "generation-2");
+  assert.equal(entry.chargedSize, 2);
 });
 
 test("Paste row without a generation answers any mutation with generation-mismatch", async () => {
@@ -949,8 +993,8 @@ test("Paste row without a generation answers any mutation with generation-mismat
     const refused = await responseJSON(await h.paste().append({ ...appendBody(`op-${generation}`), generation }));
     assert.deepStrictEqual(refused, { status: 409, body: { error: "generation-mismatch" } });
   }
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
-  assert.equal(h.pasteStorage.data.get("row").generation, undefined);
+  assert.equal((await versionsOf(h.paste())).length, 1);
+  assert.equal((await rowOf(h.paste())).generation, undefined);
 });
 
 test("Paste empty generation is a generation-mismatch", async () => {
@@ -960,15 +1004,15 @@ test("Paste empty generation is a generation-mismatch", async () => {
   }));
   assert.equal(refused.status, 409);
   assert.equal(refused.body.error, "generation-mismatch");
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
+  assert.equal((await versionsOf(h.paste())).length, 1);
 });
 
 test("Paste append answers an accounting conflict with 409 whatever Identity answered", async () => {
   const h = artifactHarness({ identitySeed: new Map() });
   const conflict = await responseJSON(await h.paste().append({ ...appendBody(), uploadId: "up-2" }));
   assert.deepStrictEqual(conflict, { status: 409, body: { error: "artifact-accounting-conflict" } });
-  assert.equal(storedVersions(h.pasteStorage).length, 1);
-  assert.notEqual(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal((await versionsOf(h.paste())).length, 1);
+  assert.equal(await holdsPending(h.paste()), true);
 });
 
 test("Paste refuses a mutation behind another operation's pending work with 423 and persists nothing", async () => {
@@ -1008,12 +1052,12 @@ test("Paste rename persists a guarded projection through response loss", async (
     name: "new name", identity: "owner", createdAt: 7,
   }));
   assert.deepStrictEqual(renamed, { status: 200, body: { changed: true } });
-  assert.equal(h.pasteStorage.data.get("row").name, "new name");
-  assert.equal(h.identityStorage.data.get("entries").slugone1.name, "new name");
+  assert.equal((await rowOf(h.paste())).name, "new name");
+  assert.equal((await entryOf(h.identityStorage)).name, "new name");
   assert.notEqual(h.pasteStorage.alarm, null);
 
   await h.paste().alarm();
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
 });
 
@@ -1031,13 +1075,13 @@ test("Paste failure converges through target-zero accounting", async () => {
   assert.deepStrictEqual(await responseJSON(await h.paste().setStatus(body)), {
     status: 200, body: { changed: true, status: "failed" },
   });
-  assert.equal(h.pasteStorage.data.get("row").status, "failed");
-  assert.equal(h.identityStorage.data.get("entries").slugone1.chargedSize, 2);
+  assert.equal((await rowOf(h.paste())).status, "failed");
+  assert.equal((await entryOf(h.identityStorage)).chargedSize, 2);
   assert.notEqual(h.pasteStorage.alarm, null);
 
   await h.paste().alarm();
-  assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await entryOf(h.identityStorage), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
   assert.deepStrictEqual(await responseJSON(await h.paste().setStatus(body)), {
     status: 200, body: { changed: true, status: "failed" },
@@ -1054,17 +1098,17 @@ test("Paste removal clears a failed incarnation whose allocation is already abse
   assert.equal((await h.paste().setStatus({
     status: "failed", opId: "fail-before-remove", generation: "generation-1",
   })).status, 200);
-  assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
+  assert.equal(await entryOf(h.identityStorage), undefined);
 
   const removed = await responseJSON(await h.paste().remove({
     opId: "remove-failed", generation: "generation-1",
     identity: "owner", createdAt: 7,
   }));
   assert.deepStrictEqual(removed, { status: 200, body: { removed: true, uploads: [] } });
-  assert.equal(h.pasteStorage.data.get("row"), undefined);
-  assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await rowOf(h.paste()), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
   assert.equal(h.pasteStorage.alarm, null);
+  assert.equal(await putIncarnation(h), 204);
 });
 
 test("Paste failure converges after every local commit crash", async () => {
@@ -1079,10 +1123,10 @@ test("Paste failure converges after every local commit crash", async () => {
     invoke: (h, run) => h.paste().setStatus({
       status: "failed", generation: "generation-1", opId: `fail-${run}`,
     }),
-    converged(h) {
-      assert.equal(h.pasteStorage.data.get("row").status, "failed");
-      assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
-      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+    async converged(h) {
+      assert.equal((await rowOf(h.paste())).status, "failed");
+      assert.equal(await entryOf(h.identityStorage), undefined);
+      assert.equal(await holdsPending(h.paste()), false);
       assert.equal(h.pasteStorage.alarm, null);
     },
   });
@@ -1146,13 +1190,14 @@ test("Paste.put records the create's upload id on version 1", async () => {
 
   const storage = new FakeStorage();
   assert.equal((await create(storage, row)).status, 204);
-  assert.equal(storage.data.get("ver:1").uploadId, "up-1");
-  assert.equal(storage.data.get("row").uploadId, "up-1");
+  const paste = new Paste(state(storage));
+  assert.deepStrictEqual((await versionsOf(paste)).map((version) => version.uploadId), ["up-1"]);
+  assert.equal((await rowOf(paste)).uploadId, "up-1");
 
   const older = new FakeStorage();
   const { uploadId: _uploadId, ...oldRow } = row;
   assert.equal((await create(older, oldRow)).status, 204);
-  assert.equal(Object.hasOwn(older.data.get("ver:1"), "uploadId"), false);
+  assert.deepStrictEqual((await versionsOf(new Paste(state(older)))).map((version) => version.uploadId), [""]);
 
   const malformed = new FakeStorage();
   assert.equal((await create(malformed, { ...row, uploadId: 7 })).status, 400);
@@ -1165,10 +1210,9 @@ test("Paste append records its upload id and versions list every version's id", 
   assert.deepStrictEqual(legacy.body.map((version) => version.uploadId), [""]);
 
   assert.equal((await h.paste().append({ ...appendBody("append-bad"), uploadId: 7 })).status, 400);
-  assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
+  assert.equal(await holdsPending(h.paste()), false);
 
   assert.equal((await h.paste().append({ ...appendBody(), uploadId: "up-2" })).status, 200);
-  assert.equal(h.pasteStorage.data.get("ver:2").uploadId, "up-2");
   const listed = await responseJSON(await h.paste().listVersions());
   assert.deepStrictEqual(listed.body.map(({ ver, uploadId }) => ({ ver, uploadId })), [
     { ver: 2, uploadId: "up-2" },
@@ -1178,17 +1222,17 @@ test("Paste append records its upload id and versions list every version's id", 
 
 test("Paste head carries the served version's upload id through append, pin, and unpin", async () => {
   const h = artifactHarness();
-  const head = () => h.pasteStorage.data.get("row").uploadId;
+  const head = async () => (await rowOf(h.paste())).uploadId;
   assert.equal((await h.paste().append({ ...appendBody("append-2"), uploadId: "up-2" })).status, 200);
-  assert.equal(head(), "up-2");
+  assert.equal(await head(), "up-2");
   assert.equal((await h.paste().append({ ...appendBody("append-3"), uploadId: "up-3" })).status, 200);
-  assert.equal(head(), "up-3");
+  assert.equal(await head(), "up-3");
 
   const pin = (opId, ver) => h.paste().pin({ opId, generation: "generation-1", ver });
   assert.equal((await pin("pin-2", 2)).status, 200);
-  assert.equal(head(), "up-2");
+  assert.equal(await head(), "up-2");
   assert.equal((await pin("unpin", 0)).status, 200);
-  assert.equal(head(), "up-3");
+  assert.equal(await head(), "up-3");
 });
 
 const hasContentSha = (value) => Object.hasOwn(value, "contentSha");
@@ -1205,15 +1249,13 @@ test("Paste and Identity accept a sent contentSha without storing or answering i
       contentSha: "abc", size: reserve.size, createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
-  assert.equal(hasContentSha(created.identityStorage.data.get("entries").newslug2), false);
-  assert.equal(hasContentSha(created.pasteStorage.data.get("row")), false);
-  assert.equal(hasContentSha(created.pasteStorage.data.get("ver:1")), false);
-  assert.equal(hasContentSha((await responseJSON(await created.paste.get())).body), false);
+  assert.equal(hasContentSha(await entryOf(created.identityStorage, reserve.slug)), false);
+  assert.equal(hasContentSha(await rowOf(created.paste)), false);
+  assert.equal((await versionsOf(created.paste)).some(hasContentSha), false);
 
   const h = artifactHarness();
   assert.equal((await h.paste().append({ ...appendBody(), contentSha: "v2" })).status, 200);
-  assert.equal(hasContentSha(h.pasteStorage.data.get("ver:2")), false);
-  assert.equal(hasContentSha(h.pasteStorage.data.get("row")), false);
+  assert.equal(hasContentSha(await rowOf(h.paste())), false);
   const versions = await responseJSON(await h.paste().listVersions());
   assert.equal(versions.body.some(hasContentSha), false);
 
@@ -1234,8 +1276,8 @@ test("Paste and Identity drop a stored contentSha when they rewrite the head or 
   const h = artifactHarness({ pasteSeed, identitySeed });
 
   assert.equal((await h.paste().append(appendBody())).status, 200);
-  assert.equal(hasContentSha(h.pasteStorage.data.get("row")), false);
-  assert.equal(hasContentSha(h.identityStorage.data.get("entries").slugone1), false);
+  assert.equal(hasContentSha(await rowOf(h.paste())), false);
+  assert.equal(hasContentSha(await entryOf(h.identityStorage)), false);
 });
 
 test("Paste removal names every version's upload and replays it after re-creation", async () => {
@@ -1248,7 +1290,6 @@ test("Paste removal names every version's upload and replays it after re-creatio
 
   const removed = await responseJSON(await h.paste().remove(body));
   assert.deepStrictEqual(removed, { status: 200, body: { removed: true, uploads: ["up-2", "up-3"] } });
-  assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
 
   assert.equal((await h.paste().put({
     generation: "generation-2",
@@ -1277,15 +1318,14 @@ test("Paste removal keeps its named uploads after every local commit crash", asy
     invoke: (h, run) => h.paste().remove({
       opId: `remove-${run}`, generation: "generation-1", identity: "owner", createdAt: 7,
     }),
-    converged(h) {
-      const receipts = [...h.pasteStorage.data]
-        .filter(([key]) => key.startsWith("artifact-receipt:"))
-        .map(([, receipt]) => receipt.body);
-      assert.deepStrictEqual(receipts, [{ removed: true, uploads: ["up-1", "up-3"] }]);
-      assert.equal(h.pasteStorage.data.get("row"), undefined);
-      assert.equal(h.pasteStorage.data.get("artifactTombstone"), undefined);
-      assert.equal(h.pasteStorage.data.get("artifactPending"), undefined);
-      assert.equal(h.identityStorage.data.get("entries").slugone1, undefined);
+    async converged(h, run) {
+      assert.deepStrictEqual(await responseJSON(await h.paste().remove({
+        opId: `remove-${run}`, generation: "generation-1", identity: "owner", createdAt: 7,
+      })), { status: 200, body: { removed: true, uploads: ["up-1", "up-3"] } });
+      assert.equal(await rowOf(h.paste()), undefined);
+      assert.equal(await holdsPending(h.paste()), false);
+      assert.equal(await entryOf(h.identityStorage), undefined);
+      assert.equal(await putIncarnation(h), 204);
     },
   });
 });
@@ -1328,10 +1368,9 @@ function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
   const roomStorage = new FakeStorage(room ? new Map([["state", room]]) : new Map());
   const pasteStorage = new FakeStorage(pasteSeed);
   const paste = new Paste(state(pasteStorage));
-  const transport = { failBefore: 0, failAfter: 0, calls: [] };
+  const transport = { failBefore: 0, failAfter: 0 };
   const endpoint = {
     async fetch(request) {
-      transport.calls.push(new URL(request.url).pathname);
       if (transport.failBefore-- > 0) {
         throw new Error("coordinator unavailable");
       }
@@ -1356,7 +1395,7 @@ function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
   };
   return {
     roomStorage,
-    pasteStorage,
+    paste,
     transport,
     room: () => new Room(state(roomStorage), env),
   };
@@ -1364,6 +1403,22 @@ function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
 
 async function responseJSON(response) {
   return { status: response.status, body: await response.json() };
+}
+
+// Every room's allocated bytes, as the app's coordinator admits against them.
+async function appRoomBytes(paste) {
+  return (await responseJSON(await paste.roomPreflight({ appCap: 0 }))).body.total;
+}
+
+// What a reader of the room sees: its sequence and value bytes.
+async function roomView(room) {
+  const response = await room.fetch(new Request("https://cell/room/scan"));
+  if (response.status === 404) {
+    return undefined;
+  }
+  const { values, seq } = await response.json();
+  const bytes = Object.values(values).reduce((n, value) => n + Buffer.from(value, "base64").length, 0);
+  return { seq, bytes };
 }
 
 test("Subnet serializes concurrent admissions at the limit", async () => {
@@ -1376,7 +1431,8 @@ test("Subnet serializes concurrent admissions at the limit", async () => {
   const results = await Promise.all([admit("one"), admit("two")]);
   assert.deepStrictEqual((await Promise.all(results.map(responseJSON)))
     .map((result) => result.body.admitted).sort(), [false, true]);
-  assert.equal(Object.keys(storage.data.get("rows")).length, 1);
+  const snapshot = await subnet.fetch(new Request("https://cell/subnet/snapshot?now=1&window=1000"));
+  assert.equal((await snapshot.json()).freshCount, 1);
 });
 
 test("Paste room coordinator persists grants and exact replays", async () => {
@@ -1405,23 +1461,22 @@ test("Paste room coordinator fences refused, stale, and reordered calls", async 
 
   let result = await decide(paste, { version: 1, targetBytes: 7 });
   assert.equal(result.status, 507);
-  assert.deepStrictEqual(storage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111"), {
-    version: 1, allocated: 4, target: 7,
-  });
+  assert.deepStrictEqual(await decide(paste, { version: 1, targetBytes: 7 }), result);
+  assert.equal(await appRoomBytes(paste), 8);
 
   const release = await paste.roomDecide({
     room: "r2", version: 1, targetBytes: 0, appCap: 10,
   });
   assert.equal(release.status, 200);
-  assert.equal(storage.data.get("roomAllocated"), 4);
+  assert.equal(await appRoomBytes(paste), 4);
 
   result = await decide(paste, { version: 1, targetBytes: 7 });
   assert.equal(result.status, 507);
-  assert.equal(storage.data.get("roomAllocated"), 4);
+  assert.equal(await appRoomBytes(paste), 4);
 
   result = await decide(paste, { version: 2, targetBytes: 6 });
   assert.equal(result.status, 200);
-  assert.equal(storage.data.get("roomAllocated"), 6);
+  assert.equal(await appRoomBytes(paste), 6);
   const complete = clone(storage.data);
   assert.equal((await decide(paste, { version: 1, targetBytes: 7 })).status, 409);
   assert.deepStrictEqual(storage.data, complete);
@@ -1458,29 +1513,23 @@ test("Room growth reserves before commit", async () => {
   const h = roomHarness();
   const result = await responseJSON(await h.room().put(putBody("aaaaaa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 6 } });
-  const doc = h.roomStorage.data.get("state");
-  assert.equal(doc.bytes, 6);
-  assert.equal(doc.seq, 8);
-  assert.equal(doc.budgetVersion, 1);
-  assert.equal(doc.pending, undefined);
+  assert.deepStrictEqual(await roomView(h.room()), { seq: 8, bytes: 6 });
   assert.equal(h.roomStorage.alarm, null);
-  assert.equal(h.pasteStorage.data.get("roomAllocated"), 10);
-  assert.equal(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111").allocated, 6);
+  assert.equal(await appRoomBytes(h.paste), 10);
 });
 
 test("Room growth refusal advances only the budget version", async () => {
   const h = roomHarness();
   const result = await responseJSON(await h.room().put(putBody("aaaaaaa")));
   assert.equal(result.status, 507);
-  const doc = h.roomStorage.data.get("state");
-  assert.equal(doc.bytes, 4);
-  assert.equal(doc.seq, 7);
-  assert.equal(doc.budgetVersion, 1);
-  assert.equal(doc.pending, undefined);
+  assert.deepStrictEqual(await roomView(h.room()), { seq: 7, bytes: 4 });
   assert.equal(h.roomStorage.alarm, null);
-  assert.deepStrictEqual(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111"), {
-    version: 1, allocated: 4, target: 7,
+  assert.equal(await appRoomBytes(h.paste), 8);
+
+  assert.deepStrictEqual(await responseJSON(await h.room().put(putBody("aaaaa"))), {
+    status: 200, body: { seq: 8, bytes: 5 },
   });
+  assert.equal(await appRoomBytes(h.paste), 9);
 });
 
 test("Room alarm recovers a crash after growth preparation", async () => {
@@ -1488,31 +1537,16 @@ test("Room alarm recovers a crash after growth preparation", async () => {
   h.roomStorage.crashAfter = 1;
   await assert.rejects(() => h.room().put(putBody("aaaaaa")), SimulatedCrash);
 
-  let doc = h.roomStorage.data.get("state");
-  assert.equal(doc.bytes, 4);
-  assert.equal(doc.seq, 7);
-  const growth = putBody("aaaaaa");
-  assert.deepStrictEqual(doc.pending, {
-    targetBytes: 6,
-    appCap: 10,
-    mutation: {
-      key: "key",
-      value: growth.value,
-      wire: growth.wire,
-      now: 9,
-    },
-  });
+  assert.deepStrictEqual(await roomView(h.room()), { seq: 7, bytes: 4 });
   assert.notEqual(h.roomStorage.alarm, null);
-  assert.equal(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111").allocated, 4);
+  assert.equal(await appRoomBytes(h.paste), 8);
 
   h.roomStorage.commits = 0;
   h.roomStorage.crashAfter = Infinity;
   await h.room().alarm();
-  doc = h.roomStorage.data.get("state");
-  assert.equal(doc.bytes, 6);
-  assert.equal(doc.seq, 8);
-  assert.equal(doc.pending, undefined);
-  assert.equal(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111").allocated, 6);
+  assert.deepStrictEqual(await roomView(h.room()), { seq: 8, bytes: 6 });
+  assert.equal(await appRoomBytes(h.paste), 10);
+  assert.equal(h.roomStorage.alarm, null);
 });
 
 test("Room alarm replays a committed decision after response loss", async () => {
@@ -1520,13 +1554,13 @@ test("Room alarm replays a committed decision after response loss", async () => 
   h.transport.failAfter = 1;
   const result = await responseJSON(await h.room().put(putBody("aaaaaa")));
   assert.equal(result.status, 502);
-  assert.equal(h.roomStorage.data.get("state").bytes, 4);
-  assert.equal(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111").allocated, 6);
+  assert.equal((await roomView(h.room())).bytes, 4);
+  assert.equal(await appRoomBytes(h.paste), 10);
   assert.notEqual(h.roomStorage.alarm, null);
 
   await h.room().alarm();
-  assert.equal(h.roomStorage.data.get("state").bytes, 6);
-  assert.equal(h.roomStorage.data.get("state").seq, 8);
+  assert.deepStrictEqual(await roomView(h.room()), { seq: 8, bytes: 6 });
+  assert.equal(await appRoomBytes(h.paste), 10);
   assert.equal(h.roomStorage.alarm, null);
 });
 
@@ -1535,11 +1569,11 @@ test("Room alarm retries a transient coordinator failure", async () => {
   h.transport.failBefore = 1;
   const result = await responseJSON(await h.room().put(putBody("aaaaaa")));
   assert.equal(result.status, 502);
-  assert.equal(h.roomStorage.data.get("state").bytes, 4);
+  assert.equal((await roomView(h.room())).bytes, 4);
   assert.notEqual(h.roomStorage.alarm, null);
 
   await h.room().alarm();
-  assert.equal(h.roomStorage.data.get("state").bytes, 6);
+  assert.equal((await roomView(h.room())).bytes, 6);
   assert.equal(h.roomStorage.alarm, null);
 });
 
@@ -1547,20 +1581,19 @@ test("Room shrink commits before releasing sibling capacity", async () => {
   const h = roomHarness({ room: roomDoc({ bytes: 6 }), pasteSeed: budgetSeed(6, 4) });
   const result = await responseJSON(await h.room().put(putBody("aa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 2 } });
-  assert.equal(h.roomStorage.data.get("state").bytes, 2);
-  assert.equal(h.pasteStorage.data.get("roomAllocated"), 6);
-  assert.equal(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111").allocated, 2);
+  assert.equal((await roomView(h.room())).bytes, 2);
+  assert.equal(await appRoomBytes(h.paste), 6);
   assert.equal(h.roomStorage.alarm, null);
 });
 
 test("Room equal-size mutations bypass the coordinator", async () => {
   const h = roomHarness();
+  h.transport.failBefore = Infinity;
   let result = await responseJSON(await h.room().put(putBody("bbbb")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 4 } });
   result = await responseJSON(await h.room().del({ key: "absent", now: 10 }));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 9, bytes: 4 } });
-  assert.equal(h.roomStorage.data.get("state").budgetVersion, 0);
-  assert.equal(h.transport.calls.filter((path) => path.endsWith("/roomdecide")).length, 0);
+  assert.equal(h.roomStorage.alarm, null);
 });
 
 test("Room serializes concurrent equal-size mutations", async () => {
@@ -1574,7 +1607,7 @@ test("Room serializes concurrent equal-size mutations", async () => {
     { status: 200, body: { seq: 8, bytes: 4 } },
     { status: 200, body: { seq: 9, bytes: 4 } },
   ]);
-  assert.equal(storage.data.get("state").seq, 9);
+  assert.equal((await roomView(room)).seq, 9);
 });
 
 test("Room shrink succeeds after commit when allocation release is unavailable", async () => {
@@ -1582,11 +1615,13 @@ test("Room shrink succeeds after commit when allocation release is unavailable",
   h.transport.failBefore = 1;
   const result = await responseJSON(await h.room().put(putBody("aa")));
   assert.deepStrictEqual(result, { status: 200, body: { seq: 8, bytes: 2 } });
-  const doc = h.roomStorage.data.get("state");
-  assert.equal(doc.bytes, 2);
-  assert.deepStrictEqual(doc.pending, { targetBytes: 2, appCap: 10 });
+  assert.equal((await roomView(h.room())).bytes, 2);
   assert.notEqual(h.roomStorage.alarm, null);
-  assert.equal(h.pasteStorage.data.get("roomAllocation:11111111-1111-4111-8111-111111111111").allocated, 6);
+  assert.equal(await appRoomBytes(h.paste), 10);
+
+  await h.room().alarm();
+  assert.equal(await appRoomBytes(h.paste), 6);
+  assert.equal(h.roomStorage.alarm, null);
 });
 
 test("Room rejects client frames that impersonate durable control", async () => {
@@ -1629,7 +1664,7 @@ test("Room creation does not persist when its ledger is unavailable", async () =
     subnet: "192.0.2.0/24", at: 1, appCap: 10,
   });
   assert.equal(response.status, 502);
-  assert.equal(roomStorage.data.has("state"), false);
+  assert.equal(await roomView(room), undefined);
 });
 
 test("Paste ops are reachable by id through the op query when the path names none", async () => {
@@ -1660,8 +1695,9 @@ test("Room creation refuses a full app before persisting", async () => {
     appCap: 10,
   }));
   assert.equal(result.status, 507);
-  assert.equal(h.roomStorage.data.has("state"), false);
-  assert.equal(h.pasteStorage.data.has("roomLedger"), false);
+  assert.equal(await roomView(h.room()), undefined);
+  const counts = await h.paste.roomCounts(new URL("https://cell/paste/roomcounts?now=1&window=1000&subnet=192.0.2.0/24"));
+  assert.deepStrictEqual(await counts.json(), { perSubnet: 0, perApp: 0 });
 });
 
 test("Paste append splits a long legacy history within the 128-entry write limit", async () => {
@@ -1673,7 +1709,7 @@ test("Paste append splits a long legacy history within the 128-entry write limit
   const h = artifactHarness({ pasteSeed: seed });
   assert.equal((await h.paste().append({ ...appendBody("append-1", 1000), size: 1 })).status, 200);
   assert.equal(h.pasteStorage.data.get("versions"), undefined);
-  assert.equal(storedVersions(h.pasteStorage).length, 101);
+  assert.equal((await versionsOf(h.paste())).length, 101);
 });
 
 test("Paste put re-creates a slug whose old history passed the 128-key delete limit", async () => {
@@ -1691,7 +1727,7 @@ test("Paste put re-creates a slug whose old history passed the 128-key delete li
       size: 1, status: "ready", createdAt: 9, updatedAt: 9,
     },
   })).status, 204);
-  assert.deepStrictEqual(storedVersions(h.pasteStorage).map((v) => v.ver), [1]);
+  assert.deepStrictEqual((await versionsOf(h.paste())).map((v) => v.ver), [1]);
   assert.equal(h.pasteStorage.data.get("manifest:100"), undefined);
 });
 
@@ -1713,8 +1749,8 @@ async function appendSite(h, { opId, uploadId, base, files }) {
   }));
 }
 
-function chargedSize(h) {
-  return h.identityStorage.data.get("entries").slugone1.chargedSize;
+async function chargedSize(h) {
+  return (await entryOf(h.identityStorage)).chargedSize;
 }
 
 // docs/SPEC.md "Redeploy reuse": an append against the head shares its
@@ -1738,13 +1774,13 @@ test("Paste redeploy reuse shares standalone objects and frees from neighbours",
 
   const v3 = await appendSite(h, { opId: "a3", uploadId: "u3", base: 2, files: { "a.m4a": audio, ...packed } });
   assert.equal(v3.body.totalSize, 2 + 115 + 15);
-  assert.equal(chargedSize(h), 132);
+  assert.equal(await chargedSize(h), 132);
 
   const del2 = await responseJSON(await h.paste().deleteVersion({ opId: "d2", generation: "generation-1", ver: 2 }));
   assert.deepStrictEqual(del2.body, {
     deleted: true, totalSize: 117, upload: "", prefixes: [], keys: ["uploads/u2/1"], freed: 15,
   });
-  assert.equal(h.pasteStorage.data.get("ver:3").charge, 115);
+  assert.equal((await versionsOf(h.paste())).find((version) => version.ver === 3).charge, 115);
 
   await appendSite(h, { opId: "a4", uploadId: "u4", base: 3, files: { "a.m4a": audio, "x.js": ["uploads/u4/0", 10, 0, 10] } });
   const del3 = await responseJSON(await h.paste().deleteVersion({ opId: "d3", generation: "generation-1", ver: 3 }));
@@ -1757,7 +1793,7 @@ test("Paste redeploy reuse shares standalone objects and frees from neighbours",
   assert.deepStrictEqual(del4.body, {
     deleted: true, totalSize: 2, upload: "u4", prefixes: ["uploads/u2/", "uploads/u4/"], keys: [], freed: 110,
   });
-  assert.equal(chargedSize(h), 2);
+  assert.equal(await chargedSize(h), 2);
 
   // A repeat under a new operation names nothing: those bytes are already
   // accounted for.
