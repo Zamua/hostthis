@@ -2,6 +2,7 @@ import { b64url } from "../solid/jose.js";
 import { ECDSA_P256, VAPID_KEY, VAPID_TTL_MS, httpsOrigin, rawPoint, signVapid } from "../push.js";
 import { manifestObjects, resolveRead } from "../read.js";
 import { cellRoute } from "./image.js";
+import { USER_QUOTA_BYTES } from "../rooms/policy.js";
 import { cellCall, dispatch, mutation, read, requireShape } from "./ops.js";
 import { ARTIFACT_PENDING, ARTIFACT_RECEIPT_PREFIX, LEGACY_VERSIONS, chargeOf, createAbortKey, deleteInBatches, fence, isTooBig, isUploadId, latestLive, loadManifest, loadVersions, manifestKey, prefixOf, retryDelay, servedOf, splitLegacyVersions, uploadPrefix, versionKey, withUploadId } from "./records.js";
 
@@ -23,6 +24,7 @@ const PASTE_OPS = {
   roomcounts: mutation((self, _body, url) => self.roomCounts(url), { body: false }),
   roompreflight: mutation((self, body) => self.roomPreflight(body)),
   roomdecide: mutation((self, body) => self.roomDecide(body)),
+  roomchargesync: mutation((self) => self.roomChargeSync()),
   remove: mutation((self, body) => self.remove(body)),
   append: mutation((self, body) => self.append(body)),
   delversion: mutation((self, body) => self.deleteVersion(body)),
@@ -204,26 +206,161 @@ export class Paste {
     return Response.json({ total });
   }
 
+  // A room's byte decision against the app's ceiling and, when it raises the
+  // app's total, its owner's quota (docs/SPEC.md "Room storage"). One decision
+  // at a time: the owner charge is a round trip that must not interleave.
   async roomDecide(body) {
     if (!requireShape(body, { version: "posint", targetBytes: "uint" })) {
       return Response.json({ error: "invalid-budget-decision" }, { status: 400 });
     }
-    return this.state.storage.transaction(async (tx) => {
+    return this.state.blockConcurrencyWhile(async () => {
+      const storage = this.state.storage;
       const key = `roomAllocation:${body.room}`;
-      const current = (await tx.get(key)) ?? {
-        version: 0, allocated: 0, target: 0,
-      };
-      const total = (await tx.get("roomAllocated")) ?? 0;
+      const current = (await storage.get(key)) ?? { version: 0, allocated: 0, target: 0 };
+      const total = (await storage.get("roomAllocated")) ?? 0;
       const decision = fence(current, total, body.version, body.targetBytes, body.appCap);
-      if (decision.record) {
-        const updates = new Map([[key, decision.record]]);
-        if (decision.body.granted && decision.nextTotal !== total) {
-          updates.set("roomAllocated", decision.nextTotal);
+      if (!decision.record) {
+        return Response.json(decision.body, { status: decision.status });
+      }
+      // Only a decision that moves the app's total touches the owner charge,
+      // and only while room ceilings are enforced at all (appCap 0 is none).
+      const moves = decision.body.granted && decision.nextTotal !== total && body.appCap > 0;
+      const owner = moves ? await this.settleRoomOwner(body.app) : { identity: null };
+      if (owner.unavailable) {
+        return Response.json({ error: "owner-charge-unavailable" }, { status: 502 });
+      }
+      const refuse = async (error) => {
+        await storage.put(key, { version: body.version, allocated: current.allocated, target: body.targetBytes });
+        return Response.json({ granted: false, version: body.version, allocated: current.allocated, total, error }, { status: 507 });
+      };
+      const grows = moves && decision.nextTotal > total;
+      if (grows && owner.identity) {
+        const charged = await this.chargeRoomOwner(owner, decision.nextTotal);
+        if (charged === "unavailable") {
+          return Response.json({ error: "owner-charge-unavailable" }, { status: 502 });
         }
-        await tx.put(Object.fromEntries(updates));
+        if (charged === "refused") {
+          return refuse("owner-over-quota");
+        }
+      }
+      const updates = new Map([[key, decision.record]]);
+      if (decision.body.granted && decision.nextTotal !== total) {
+        updates.set("roomAllocated", decision.nextTotal);
+      }
+      await storage.put(Object.fromEntries(updates));
+      if (decision.body.granted && decision.nextTotal < total && owner.identity) {
+        // A failed release leaves the owner over-charged until the next decision
+        // settles it, which the accounting allows.
+        await this.chargeRoomOwner(owner, decision.nextTotal);
       }
       return Response.json(decision.body, { status: decision.status });
     });
+  }
+
+  // Seeds or refreshes the owner charge with no cap: bytes that predate the
+  // owner quota, and an operator's repair.
+  async roomChargeSync() {
+    return this.state.blockConcurrencyWhile(async () => {
+      const owner = await this.settleRoomOwner();
+      if (owner.unavailable) {
+        return Response.json({ error: "owner-charge-unavailable" }, { status: 502 });
+      }
+      return Response.json({
+        owner: owner.identity !== null, roomAllocated: (await this.state.storage.get("roomAllocated")) ?? 0,
+        charge: (await this.state.storage.get("roomOwnerCharge")) ?? null,
+      });
+    });
+  }
+
+  // Brings `roomOwnerCharge` in line with the row's owner and the committed
+  // app total: replays an unsettled charge, seeds a first one, moves it on a
+  // re-mint, and lowers an over-charge. Answers { identity, slug, charge } or
+  // { unavailable } when the owner's cell could not be reached.
+  async settleRoomOwner(appSlug) {
+    const storage = this.state.storage;
+    const row = await storage.get("row");
+    const slug = row?.slug ?? appSlug ?? this.state.id?.name;
+    let charge = (await storage.get("roomOwnerCharge")) ?? null;
+    // A deleted app's rooms stay charged to its last owner; a slug that never
+    // had one is bounded by the app ceiling alone.
+    const identity = row?.identity ?? charge?.owner ?? null;
+    const total = (await storage.get("roomAllocated")) ?? 0;
+    if (!identity || !slug) {
+      return { identity: null, slug, charge };
+    }
+    try {
+      if (charge && charge.owner !== identity) {
+        if (!await this.seedRoomOwner(charge.owner, slug, 0)) {
+          return { unavailable: true };
+        }
+        charge = null;
+      }
+      if (charge && !charge.settled) {
+        const res = await this.identityCall(identity, "roomcharge", {
+          slug, version: charge.version, target: charge.target, userCap: USER_QUOTA_BYTES,
+        });
+        const answer = await res.json();
+        if (res.status === 200 || res.status === 507) {
+          charge = { ...charge, target: answer.allocated, settled: true };
+          await storage.put("roomOwnerCharge", charge);
+        } else if (res.status === 409) {
+          charge = null;
+        } else {
+          return { unavailable: true };
+        }
+      }
+      if (!charge) {
+        const version = await this.seedRoomOwner(identity, slug, total);
+        if (!version) {
+          return { unavailable: true };
+        }
+        charge = { owner: identity, version, target: total, settled: true };
+        await storage.put("roomOwnerCharge", charge);
+      }
+    } catch {
+      return { unavailable: true };
+    }
+    const settled = { identity, slug, charge };
+    if (charge.target > total && await this.chargeRoomOwner(settled, total) === "unavailable") {
+      return { unavailable: true };
+    }
+    return settled;
+  }
+
+  // The new version of a seeded charge, or 0 when the owner's cell failed.
+  async seedRoomOwner(identity, slug, target) {
+    const res = await this.identityCall(identity, "roomcharge", { slug, seed: true, target });
+    if (res.status !== 200) {
+      await res.body?.cancel();
+      return 0;
+    }
+    return (await res.json()).version;
+  }
+
+  // Moves the owner charge to target at the next version, recording it
+  // unsettled first so a lost answer is replayed: "granted", "refused" or
+  // "unavailable".
+  async chargeRoomOwner(owner, target) {
+    const storage = this.state.storage;
+    const next = { owner: owner.identity, version: owner.charge.version + 1, target, settled: false };
+    await storage.put("roomOwnerCharge", next);
+    owner.charge = next;
+    let res;
+    let answer;
+    try {
+      res = await this.identityCall(owner.identity, "roomcharge", {
+        slug: owner.slug, version: next.version, target, userCap: USER_QUOTA_BYTES,
+      });
+      answer = await res.json();
+    } catch {
+      return "unavailable";
+    }
+    if (res.status !== 200 && res.status !== 507) {
+      return "unavailable";
+    }
+    owner.charge = { ...next, target: answer.allocated, settled: true };
+    await storage.put("roomOwnerCharge", owner.charge);
+    return answer.granted ? "granted" : "refused";
   }
 
   async get() {

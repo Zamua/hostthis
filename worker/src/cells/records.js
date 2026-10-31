@@ -20,6 +20,13 @@ export const LEGACY_VERSIONS = "versions";
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 5 * 60_000;
 
+export const ROOM_CHARGE_PREFIX = "roomCharge:";
+
+// An app's room bytes as its owner's Identity cell holds them.
+export function roomChargeKey(slug) {
+  return ROOM_CHARGE_PREFIX + slug;
+}
+
 export function artifactAccountKey(slug, generation) {
   return `${ARTIFACT_ACCOUNT_PREFIX}${slug}:${generation}`;
 }

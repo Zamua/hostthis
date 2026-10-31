@@ -275,6 +275,7 @@ type whoamiView struct {
 	FirstSeen    *string      `json:"first_seen"` // RFC3339, null when unknown/zero
 	ActivePastes int          `json:"active_pastes"`
 	UsedBytes    int          `json:"used_bytes"`
+	RoomBytes    int          `json:"room_bytes"`  // the part of used_bytes the owner's apps hold in rooms
 	QuotaBytes   *int         `json:"quota_bytes"` // null when the owner has no quota cap
 	Session      *sessionView `json:"session"`     // null when the keygate isn't wired / no subnet
 }
@@ -294,6 +295,7 @@ func newWhoamiView(info service.WhoamiInfo) whoamiView {
 		Key:          info.Owner.Fingerprint(),
 		ActivePastes: info.Active,
 		UsedBytes:    info.UsedBytes,
+		RoomBytes:    info.RoomBytes,
 	}
 	if !info.FirstSeen.IsZero() {
 		fs := info.FirstSeen.UTC().Format(time.RFC3339)

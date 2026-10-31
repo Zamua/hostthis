@@ -11,4 +11,5 @@ type OwnerSummary struct {
 	FirstSeen  time.Time // zero when the owner has never uploaded
 	PasteBytes int64     // active compressed paste bytes, the quota basis
 	SiteBytes  int64     // active site bytes counted outside the paste sum
+	RoomBytes  int64     // bytes the owner's apps hold in rooms
 }

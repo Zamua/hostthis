@@ -369,7 +369,8 @@ type WhoamiInfo struct {
 	Owner      domain.Owner
 	Active     int
 	FirstSeen  time.Time
-	UsedBytes  int         // compressed bytes summed across active non-deleted versions
+	UsedBytes  int         // compressed bytes summed across active non-deleted versions, plus RoomBytes
+	RoomBytes  int         // bytes the owner's apps hold in rooms
 	QuotaBytes int         // domain.UserQuotaBytes, surfaced so the SSH formatter need not import domain
 	Session    SessionInfo // per-session keygate state; zero value if KeyGate isn't wired
 }
@@ -387,7 +388,8 @@ func (m *Manage) Whoami(owner domain.Owner, subnet string) (WhoamiInfo, error) {
 		FirstSeen: sum.FirstSeen,
 		// Paste + site bytes: the same combined total the quota check
 		// enforces, so whoami never under-reports against the cap.
-		UsedBytes:  int(sum.PasteBytes + sum.SiteBytes),
+		UsedBytes:  int(sum.PasteBytes + sum.SiteBytes + sum.RoomBytes),
+		RoomBytes:  int(sum.RoomBytes),
 		QuotaBytes: domain.UserQuotaBytes,
 	}
 	if m.KeyGate != nil && subnet != "" {
