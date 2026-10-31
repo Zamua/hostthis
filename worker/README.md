@@ -5,6 +5,18 @@ implementation of the domain. The Go service reaches its HTTP and WebSocket
 routes through the `internal/worker` and `internal/storage` adapters; public SSH
 and HTTP remain owned by `hostthisd`.
 
+## Layout
+
+| path | holds |
+| --- | --- |
+| `src/index.js` | the entry: host-picked routers, bearer auth, the cell class exports |
+| `src/cells/` | one module per cell class (`identity`, `paste`, `room`, `subnet`, `intentlog`), the op-table machinery (`ops.js`), shared storage records and the allocation fence (`records.js`), and the cell image and restore routes (`image.js`) |
+| `src/push.js` | Web Push: encryption, VAPID, subscription and schedule validation, time zones |
+| `src/blobs.js` | the internal `/blob/` payload routes |
+| `src/public/`, `src/read.js` | the public read surface |
+| `src/rooms/` | room policy, wire values and public room routes |
+| `src/solid/` | hostthis's Solid identity, pod link flow and pod payload store |
+
 ## Build
 
 The source is split into modules under `src/`, entry `src/index.js`. celld
