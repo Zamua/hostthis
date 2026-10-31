@@ -57,7 +57,10 @@ func (s *WorkerBlobStore) objectURL(key string) string {
 }
 
 // Put streams r to key with size as its Content-Length. A negative size sends
-// the body chunked.
+// the body chunked. A seekable body (a spill file) is resent once when the
+// exchange fails before any response: the edge in front of the Worker resets
+// an occasional stream, and a PUT of the same bytes to the same key is
+// idempotent.
 func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 	if err := checkKey(key); err != nil {
 		return err
@@ -67,11 +70,31 @@ func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 		return fmt.Errorf("blob worker: put %s: %w", key, err)
 	}
 	req.ContentLength = size
-	if size == 0 {
+	switch rs, ok := r.(io.ReadSeeker); {
+	case size == 0:
 		req.Body = http.NoBody
+	case ok:
+		// The transport closes a request body; the caller owns the file.
+		req.Body = io.NopCloser(rs)
+		start, err := rs.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return fmt.Errorf("blob worker: put %s: %w", key, err)
+		}
+		req.GetBody = func() (io.ReadCloser, error) {
+			if _, err := rs.Seek(start, io.SeekStart); err != nil {
+				return nil, err
+			}
+			return io.NopCloser(rs), nil
+		}
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	resp, err := s.client.Do(req)
+	if err != nil && req.GetBody != nil && req.Context().Err() == nil {
+		retry := req.Clone(req.Context())
+		if retry.Body, err = req.GetBody(); err == nil {
+			resp, err = s.client.Do(retry)
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("blob worker: put %s: %w", key, err)
 	}
