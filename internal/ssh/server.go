@@ -71,6 +71,9 @@ type Server struct {
 	// Metrics is optional; nil records nothing. Kept as a port so this package
 	// carries no Prometheus dependency and tests can assert on calls.
 	Metrics CommandRecorder
+	// ProxyProtocol requires a PROXY v1/v2 header on every connection and takes
+	// the client address from it; set only behind a TCP forwarder that sends one.
+	ProxyProtocol bool
 
 	lifecycleMu    sync.Mutex
 	server         *gossh.Server
@@ -193,11 +196,11 @@ func (s *Server) Close() error {
 // ListenAndServe blocks, returning whatever the listener returns (nil after a
 // clean shutdown or net.ErrClosed).
 //
-// HOSTTHIS_SSH_PROXY_PROTOCOL=true wraps the listener so PROXY protocol v1/v2
-// headers from a TCP-level forwarder are parsed and RemoteAddr() carries the
-// real client IP. Required behind a TCP router: without it every session
-// appears to originate from the forwarder and the Sybil per-subnet limit
-// collapses to a global cap. With the flag set the header is mandatory.
+// ProxyProtocol wraps the listener so PROXY protocol v1/v2 headers from a
+// TCP-level forwarder are parsed and RemoteAddr() carries the real client IP.
+// Required behind a TCP router: without it every session appears to originate
+// from the forwarder and the Sybil per-subnet limit collapses to a global cap.
+// With it set the header is mandatory.
 func (s *Server) ListenAndServe() error {
 	signer, err := s.hostSigner()
 	if err != nil {
@@ -239,7 +242,7 @@ func (s *Server) ListenAndServe() error {
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", s.Addr, err)
 	}
-	if strings.EqualFold(os.Getenv("HOSTTHIS_SSH_PROXY_PROTOCOL"), "true") {
+	if s.ProxyProtocol {
 		// REQUIRE, explicitly: only the reverse proxy should reach this
 		// listener, and it always sends a header. A headerless connection means
 		// the front door was bypassed, and serving it would attribute the client
@@ -325,6 +328,19 @@ func (s *Server) keyRequiredMiddleware() wish.Middleware {
 	}
 }
 
+// sessionOwner parses the session's key fingerprint into its owner. On failure
+// it answers on stderr, exits ExitAuth and reports false.
+func sessionOwner(sess gossh.Session) (domain.Owner, bool) {
+	keyedFP, _ := sess.Context().Value("ownerHash").(string)
+	owner, err := domain.OwnerFromKeyFingerprint(keyedFP)
+	if err != nil {
+		fmt.Fprintln(sess.Stderr(), "hostthis: add an ssh key. this command needs an identity") //nolint:errcheck
+		_ = sess.Exit(ExitAuth)
+		return domain.Owner{}, false
+	}
+	return owner, true
+}
+
 // ratelimitMiddleware enforces the Sybil cap on how many distinct fresh
 // fingerprints one IP subnet may introduce per window. Any (key, subnet) pair
 // already seen passes with no accounting. A nil KeyGate makes this a no-op.
@@ -335,15 +351,16 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 				next(sess)
 				return
 			}
-			// keyRequired runs first, so the fingerprint is never empty here.
-			keyedFP, _ := sess.Context().Value("ownerHash").(string)
-			owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
-			subnet := ipSubnet(remoteIP(sess))
+			owner, ok := sessionOwner(sess)
+			if !ok {
+				return
+			}
+			subnet := domain.SubnetOf(remoteIP(sess))
 			if err := s.KeyGate.Admit(owner, subnet); err != nil {
 				if ref, ok := errors.AsType[*service.SybilRefusal](err); ok {
 					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")                                    //nolint:errcheck
 					fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap) //nolint:errcheck
-					fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", strings.TrimPrefix(owner, domain.IdentityKeyPrefix))
+					_, _ = fmt.Fprintf(sess.Stderr(), "  your key %s isn't yet registered here\n", owner.Fingerprint())
 					fmt.Fprintln(sess.Stderr(), "to get in:") //nolint:errcheck
 					fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
 					if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
@@ -382,8 +399,10 @@ func (s *Server) terminalMiddleware() wish.Middleware {
 // command means an implicit upload of whatever is on stdin. Upstream
 // middlewares guarantee the session carries a public key the gate admitted.
 func (s *Server) handleSession(sess gossh.Session) {
-	keyedFP, _ := sess.Context().Value("ownerHash").(string)
-	owner := domain.IdentityFromKeyFingerprint(keyedFP).String()
+	owner, ok := sessionOwner(sess)
+	if !ok {
+		return
+	}
 
 	argv := sess.Command()
 
@@ -456,7 +475,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 
 // -- upload (new + update) --------------------------------------------------
 
-func (s *Server) verbUpload(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []string) {
 	// argv may be:
 	//   nil / []              → new upload
 	//   [<slug>]              → update an existing slug
@@ -581,7 +600,7 @@ func (s *Server) emitURL(sess gossh.Session, slug domain.Slug) {
 
 // -- list -------------------------------------------------------------------
 
-func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbList(sess gossh.Session, owner domain.Owner, argv []string) {
 	format, _, err := parseOutputFormat(argv)
 	if err != nil {
 		emitUsageErr(sess, err)
@@ -648,7 +667,7 @@ func (s *Server) verbList(sess gossh.Session, owner string, argv []string) {
 
 // -- show -------------------------------------------------------------------
 
-func (s *Server) verbGet(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbGet(sess gossh.Session, owner domain.Owner, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
 		emitUsageErr(sess, err)
@@ -710,7 +729,7 @@ func (s *Server) resolveExistingURL(slug domain.Slug) (string, bool) {
 
 // -- rename ------------------------------------------------------------------
 
-func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbRename(sess gossh.Session, owner domain.Owner, argv []string) {
 	if len(argv) < 1 {
 		emitUsageErr(sess, errors.New("usage: rename <slug> [label]  (omit the label to clear it)"))
 		return
@@ -739,7 +758,7 @@ func (s *Server) verbRename(sess gossh.Session, owner string, argv []string) {
 
 // -- delete -----------------------------------------------------------------
 
-func (s *Server) verbDelete(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbDelete(sess gossh.Session, owner domain.Owner, argv []string) {
 	// Two-shape dispatch:
 	//   delete <slug>           → wipe the whole paste
 	//   delete <slug> <verN>    → tombstone just that version
@@ -820,7 +839,7 @@ func parseVersionArg(s string) (int, error) {
 // -- versions / pin ---------------------------------------------------------
 
 // verbHave prints a site's head as a keep list (docs/SPEC.md "Redeploy reuse").
-func (s *Server) verbHave(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbHave(sess gossh.Session, owner domain.Owner, argv []string) {
 	format, rest, err := parseOutputFormat(argv)
 	if err != nil {
 		emitUsageErr(sess, err)
@@ -857,7 +876,7 @@ func (s *Server) verbHave(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbVersions(sess gossh.Session, owner domain.Owner, argv []string) {
 	format, rest, err := parseOutputFormat(argv)
 	if err != nil {
 		emitUsageErr(sess, err)
@@ -932,7 +951,7 @@ func (s *Server) verbVersions(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbUnpin(sess gossh.Session, owner domain.Owner, argv []string) {
 	slug, err := requireSlug(argv)
 	if err != nil {
 		emitUsageErr(sess, err)
@@ -946,7 +965,7 @@ func (s *Server) verbUnpin(sess gossh.Session, owner string, argv []string) {
 	_ = sess.Exit(ExitOK)
 }
 
-func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbPin(sess gossh.Session, owner domain.Owner, argv []string) {
 	if len(argv) < 2 {
 		emitUsageErr(sess, errors.New("usage: pin <slug> <ver-num>"))
 		return
@@ -972,14 +991,13 @@ func (s *Server) verbPin(sess gossh.Session, owner string, argv []string) {
 
 // -- whoami -----------------------------------------------------------------
 
-func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbWhoami(sess gossh.Session, owner domain.Owner, argv []string) {
 	format, _, err := parseOutputFormat(argv)
 	if err != nil {
 		emitUsageErr(sess, err)
 		return
 	}
-	// keyRequiredMiddleware ran first, so owner is always a key:<fp> identity.
-	subnet := ipSubnet(remoteIP(sess))
+	subnet := domain.SubnetOf(remoteIP(sess))
 	info, err := s.Manage.Whoami(owner, subnet)
 	if err != nil {
 		emitServiceErr(sess, err)
@@ -995,10 +1013,10 @@ func (s *Server) verbWhoami(sess gossh.Session, owner string, argv []string) {
 		return
 	}
 
-	// info.Identity is "key:SHA256:<hex>"; the "key:" prefix is an internal
-	// identity namespace, so only the fingerprint is shown. The digest is hex,
-	// not `ssh-keygen -lf`'s base64 (see fingerprintKey).
-	fmt.Fprintf(sess, "key:     %s\n", strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix))
+	// The "key:" prefix is an internal identity namespace, so only the
+	// fingerprint is shown. The digest is hex, not `ssh-keygen -lf`'s base64
+	// (see fingerprintKey).
+	_, _ = fmt.Fprintf(sess, "key:     %s\n", info.Owner.Fingerprint())
 	if !info.FirstSeen.IsZero() {
 		fmt.Fprintf(sess, "joined:  %s\n", info.FirstSeen.Format("2006-01-02"))
 	}
@@ -1180,8 +1198,6 @@ func emitUsageErr(sess gossh.Session, err error) {
 
 func emitServiceErr(sess gossh.Session, err error) {
 	switch {
-	case errors.Is(err, service.ErrEmptyOwner):
-		fmt.Fprintln(sess.Stderr(), "hostthis: add an ssh key. this command needs an identity")
 	case errors.Is(err, service.ErrNotFound):
 		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
 	case errors.Is(err, service.ErrInvalidName):
@@ -1215,14 +1231,10 @@ func emitServiceErr(sess gossh.Session, err error) {
 // to ErrNotFound so existence cannot leak across identities, so a
 // foreign-identity verb attempt and a missing slug both exit ExitNotFound.
 func exitForServiceErr(err error) int {
-	switch {
-	case errors.Is(err, service.ErrEmptyOwner):
-		return ExitAuth
-	case errors.Is(err, service.ErrNotFound):
+	if errors.Is(err, service.ErrNotFound) {
 		return ExitNotFound
-	default:
-		return ExitErr
 	}
+	return ExitErr
 }
 
 // remoteIP extracts the client IP from a session's RemoteAddr, nil when
@@ -1240,19 +1252,6 @@ func remoteIP(sess gossh.Session) net.IP {
 		return nil
 	}
 	return net.ParseIP(host)
-}
-
-// ipSubnet returns the canonical subnet string for the Sybil gate: IPv4 → /24,
-// IPv6 → /48. A nil IP becomes "unknown" so the gate treats it as one stable
-// bucket rather than crashing.
-func ipSubnet(ip net.IP) string {
-	if ip == nil {
-		return "unknown"
-	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
-	}
-	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
 // fingerprintKey returns an ssh public key's SHA256 fingerprint as

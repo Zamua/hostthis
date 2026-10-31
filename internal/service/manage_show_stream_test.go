@@ -59,7 +59,7 @@ func TestShow_StreamsAndNeverBuffers(t *testing.T) {
 	blob := &streamOnlyBlobUnit{body: body}
 	m := NewManage(&showRepoStub{owner: showOwner}, blob)
 
-	_, rc, err := m.Show(domain.Slug("abcd1234"), showOwner)
+	_, rc, err := m.Show(domain.Slug("abcd1234"), ownerOf(showOwner))
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestShow_ReturnsAnUndrainedStream(t *testing.T) {
 	blob := &streamOnlyBlobUnit{body: "abcdefghij"}
 	m := NewManage(&showRepoStub{owner: showOwner}, blob)
 
-	_, rc, err := m.Show(domain.Slug("abcd1234"), showOwner)
+	_, rc, err := m.Show(domain.Slug("abcd1234"), ownerOf(showOwner))
 	if err != nil {
 		t.Fatalf("Show: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestShow_ReadsTheRootEntry(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			unit := &entryRecordingUnit{}
-			_, rc, err := NewManage(pasteStub{p: tc.paste}, unit).Show("abcd1234", showOwner)
+			_, rc, err := NewManage(pasteStub{p: tc.paste}, unit).Show("abcd1234", ownerOf(showOwner))
 			if err != nil {
 				t.Fatalf("Show: %v", err)
 			}
@@ -166,7 +166,7 @@ func TestShow_KeylessRootIsNotFound(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			unit := &streamOnlyBlobUnit{body: "bytes under an old address"}
-			_, rc, err := NewManage(pasteStub{p: p}, unit).Show("abcd1234", showOwner)
+			_, rc, err := NewManage(pasteStub{p: p}, unit).Show("abcd1234", ownerOf(showOwner))
 			if !errors.Is(err, ErrNotFound) || rc != nil || unit.reads != 0 {
 				t.Fatalf("Show = (%v, %v) with %d reads, want ErrNotFound and none", rc, err, unit.reads)
 			}
@@ -181,7 +181,7 @@ func TestShow_RefusesNonOwnerWithoutTouchingTheBlob(t *testing.T) {
 	blob := &streamOnlyBlobUnit{body: "secret"}
 	m := NewManage(&showRepoStub{owner: showOwner}, blob)
 
-	_, _, err := m.Show(domain.Slug("abcd1234"), "key:someone-else")
+	_, _, err := m.Show(domain.Slug("abcd1234"), ownerOf("key:someone-else"))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Show as a non-owner = %v; want ErrNotFound", err)
 	}

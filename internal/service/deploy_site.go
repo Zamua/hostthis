@@ -69,6 +69,8 @@ type DeploySite struct {
 	// UploadIDs mints each upload's id, which decides where its bytes are
 	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
 	UploadIDs UploadIDSource
+	// StagingDir holds file spill files; "" is the OS temp dir.
+	StagingDir string
 }
 
 // ErrSiteArchiveTooLarge is returned when the compressed archive itself
@@ -78,11 +80,11 @@ var ErrSiteArchiveTooLarge = fmt.Errorf("service: site archive too large to cons
 // SiteDeployer is the site surface the SSH layer consumes, an interface so
 // cache invalidation can be a decorator the composition root layers on.
 type SiteDeployer interface {
-	Deploy(body io.Reader, owner string) (SiteResult, error)
-	DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error)
-	Delete(slug domain.Slug, owner string) error
-	ListSites(owner string) ([]domain.Site, error)
-	Have(slug domain.Slug, owner string) (Held, error)
+	Deploy(body io.Reader, owner domain.Owner) (SiteResult, error)
+	DeployToSlug(slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error)
+	Delete(slug domain.Slug, owner domain.Owner) error
+	ListSites(owner domain.Owner) ([]domain.Site, error)
+	Have(slug domain.Slug, owner domain.Owner) (Held, error)
 }
 
 // Held is a site head as a keep list: its version and each file's digest,
@@ -100,11 +102,8 @@ type HeldFile struct {
 
 // Have reads an owned site's head as a keep list (docs/SPEC.md "Redeploy
 // reuse"), sorted by path. A foreign or non-site slug is ErrNotFound.
-func (d *DeploySite) Have(slug domain.Slug, owner string) (Held, error) {
-	if owner == "" {
-		return Held{}, ErrEmptyOwner
-	}
-	ver, man, err := d.Sites.Head(slug, domain.Identity(owner))
+func (d *DeploySite) Have(slug domain.Slug, owner domain.Owner) (Held, error) {
+	ver, man, err := d.Sites.Head(slug, owner.Identity())
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return Held{}, ErrNotFound
@@ -127,13 +126,9 @@ func NewDeploySite(sites SiteRepo, pastes PasteByteSummer, blob BlobUnit) *Deplo
 	return &DeploySite{Sites: sites, Pastes: pastes, Blob: blob, Now: time.Now}
 }
 
-// ListSites returns the owner's active static sites. Anonymous / empty owners
-// get an empty list: only keyed identities own content.
-func (d *DeploySite) ListSites(owner string) ([]domain.Site, error) {
-	if !domain.Identity(owner).IsKeyed() {
-		return nil, nil
-	}
-	return d.Sites.ListSitesByOwner(owner, d.Now().UTC())
+// ListSites returns the owner's active static sites.
+func (d *DeploySite) ListSites(owner domain.Owner) ([]domain.Site, error) {
+	return d.Sites.ListSitesByOwner(owner.String(), d.Now().UTC())
 }
 
 // SiteResult is what Deploy produced for the SSH layer to format.
@@ -157,10 +152,7 @@ const maxDeployRetries = 5
 //     caught mid-untar by the decompression-bomb guard or at persistence time
 //     by the atomic check
 //   - ErrTooManyFiles-family errors surfaced verbatim via domain
-func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
-	if owner == "" {
-		return SiteResult{}, ErrEmptyOwner
-	}
+func (d *DeploySite) Deploy(body io.Reader, owner domain.Owner) (SiteResult, error) {
 	now := d.Now().UTC()
 	man, uploadID, err := d.extract(body, owner, now, nil)
 	if err != nil {
@@ -168,7 +160,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 	}
 
 	site := domain.Site{
-		Identity: domain.Identity(owner),
+		Identity: owner.Identity(),
 		// The shape is decided here, from THIS deploy's manifest, and stored on
 		// the row; serving never re-derives it.
 		Kind:      man.ArchiveKind(),
@@ -205,12 +197,12 @@ func (d *DeploySite) Deploy(body io.Reader, owner string) (SiteResult, error) {
 // classifier; ErrUnsafeArchive / ErrTooManyFiles surface verbatim so the
 // SSH layer can message them precisely. A failed extract deletes whatever it
 // staged.
-func (d *DeploySite) extract(body io.Reader, owner string, now time.Time, base *siteBase) (domain.Manifest, string, error) {
-	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner, now)
+func (d *DeploySite) extract(body io.Reader, owner domain.Owner, now time.Time, base *siteBase) (domain.Manifest, string, error) {
+	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner.String(), now)
 	if err != nil {
 		return domain.Manifest{}, "", fmt.Errorf("sum paste bytes: %w", err)
 	}
-	usedSite, err := d.Sites.SumActiveBytesByOwner(owner, now)
+	usedSite, err := d.Sites.SumActiveBytesByOwner(owner.String(), now)
 	if err != nil {
 		return domain.Manifest{}, "", fmt.Errorf("sum site bytes: %w", err)
 	}
@@ -220,7 +212,7 @@ func (d *DeploySite) extract(body io.Reader, owner string, now time.Time, base *
 	if err != nil {
 		return domain.Manifest{}, "", fmt.Errorf("upload id: %w", err)
 	}
-	sink := &blobSink{blob: d.Blob, uploadID: uploadID, base: base.standalone()}
+	sink := &blobSink{blob: d.Blob, uploadID: uploadID, base: base.standalone(), stagingDir: d.StagingDir}
 	defer sink.Close()
 	limit := d.MaxArchiveBytes
 	if limit <= 0 {
@@ -285,10 +277,7 @@ func (c *archiveCapReader) Read(p []byte) (int, error) {
 // version's bytes. A non-site slug and a foreign-owned site both collapse to
 // ErrNotFound, the same sentinel the paste-delete path returns, so existence
 // and ownership never leak.
-func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
-	if owner == "" {
-		return ErrEmptyOwner
-	}
+func (d *DeploySite) Delete(slug domain.Slug, owner domain.Owner) error {
 	existing, err := d.Sites.Get(slug)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
@@ -296,7 +285,7 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 		}
 		return fmt.Errorf("get site: %w", err)
 	}
-	if existing.Identity.String() != owner {
+	if existing.Identity != owner.Identity() {
 		return ErrNotFound
 	}
 	uploads, err := d.Sites.Delete(slug, existing.Identity, existing.CreatedAt)
@@ -316,15 +305,11 @@ func (d *DeploySite) Delete(slug domain.Slug, owner string) error {
 // The untar budget is the owner's remaining allowance. Prior versions remain
 // retained and charged, so a targeted redeploy receives no replacement credit.
 // Returns:
-//   - ErrEmptyOwner: anonymous / empty identity
 //   - ErrNotFound: slug is not a site owned by owner
 //   - domain.ErrUnsupportedKind: not a valid gzip-tar
 //   - ErrOverQuota: over the per-identity cap
 //   - ErrEmptySite: the archive safe-untars to zero files
-func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error) {
-	if owner == "" {
-		return SiteResult{}, ErrEmptyOwner
-	}
+func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error) {
 	now := d.Now().UTC()
 
 	// Verify ownership BEFORE reading the body.
@@ -335,11 +320,11 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 		}
 		return SiteResult{}, fmt.Errorf("get site: %w", err)
 	}
-	if existing.Identity.String() != owner {
+	if existing.Identity != owner.Identity() {
 		return SiteResult{}, ErrNotFound
 	}
 
-	baseVer, baseMan, err := d.Sites.Head(slug, domain.Identity(owner))
+	baseVer, baseMan, err := d.Sites.Head(slug, owner.Identity())
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
 			return SiteResult{}, ErrNotFound
@@ -356,7 +341,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner string
 	site := domain.Site{
 		Base:     baseVer,
 		Slug:     slug,
-		Identity: domain.Identity(owner),
+		Identity: owner.Identity(),
 		// A redeploy re-decides the shape from its own manifest, so adding a
 		// root index.html turns a knowledge base into a site at the same slug.
 		Kind:      man.ArchiveKind(),
@@ -390,10 +375,11 @@ type blobSink struct {
 	uploadID string
 	// base maps the digest of each standalone file of the version this deploy
 	// is computed against to its entry; a file matching one is not stored.
-	base    map[string]domain.ManifestEntry
-	next    int
-	pack    domain.BlobPack
-	packKey string
+	base       map[string]domain.ManifestEntry
+	stagingDir string
+	next       int
+	pack       domain.BlobPack
+	packKey    string
 }
 
 // siteExtractBudget is the unallocated owner quota available to the next
@@ -432,7 +418,7 @@ func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int
 // base's object when that holds the same bytes, and stores the spill
 // otherwise. Disk, not memory, is the buffer.
 func (s *blobSink) storeUnlessHeld(p string, r *domain.DigestReader) (domain.BlobRef, int, error) {
-	spill, err := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-file-*")
+	spill, err := os.CreateTemp(s.stagingDir, "hostthis-file-*")
 	if err != nil {
 		return domain.BlobRef{}, 0, fmt.Errorf("create file spill: %w", err)
 	}
@@ -612,7 +598,7 @@ func storeErr(p string, err error) error {
 // there are two services behind it.
 type ArchiveAdapter struct{ Deployer *DeploySite }
 
-func (a ArchiveAdapter) Deploy(body io.Reader, owner string) (Result, error) {
+func (a ArchiveAdapter) Deploy(body io.Reader, owner domain.Owner) (Result, error) {
 	res, err := a.Deployer.Deploy(body, owner)
 	if err != nil {
 		return Result{}, err

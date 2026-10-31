@@ -43,7 +43,7 @@ func TestDelete_HealDecisionFlow(t *testing.T) {
 	t.Run("dropped residue is success", func(t *testing.T) {
 		stub := &healRepoStub{dropped: true}
 		m := &Manage{Repo: stub}
-		if err := m.Delete(slug, owner); err != nil {
+		if err := m.Delete(slug, ownerOf(owner)); err != nil {
 			t.Fatalf("delete = %v, want nil", err)
 		}
 		if stub.calls != 1 || stub.gotSlug != slug || stub.gotOwn != owner {
@@ -55,7 +55,7 @@ func TestDelete_HealDecisionFlow(t *testing.T) {
 	t.Run("nothing to drop stays not-found", func(t *testing.T) {
 		stub := &healRepoStub{dropped: false}
 		m := &Manage{Repo: stub}
-		if err := m.Delete(slug, owner); !errors.Is(err, ErrNotFound) {
+		if err := m.Delete(slug, ownerOf(owner)); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("delete = %v, want ErrNotFound", err)
 		}
 		if stub.calls != 1 {
@@ -67,7 +67,7 @@ func TestDelete_HealDecisionFlow(t *testing.T) {
 		boom := errors.New("cas conflict")
 		stub := &healRepoStub{dropErr: boom}
 		m := &Manage{Repo: stub}
-		err := m.Delete(slug, owner)
+		err := m.Delete(slug, ownerOf(owner))
 		if !errors.Is(err, boom) {
 			t.Fatalf("delete = %v, want the heal error", err)
 		}
@@ -76,14 +76,4 @@ func TestDelete_HealDecisionFlow(t *testing.T) {
 		}
 	})
 
-	t.Run("anonymous caller never reaches the heal", func(t *testing.T) {
-		stub := &healRepoStub{dropped: true}
-		m := &Manage{Repo: stub}
-		if err := m.Delete(slug, ""); !errors.Is(err, ErrEmptyOwner) {
-			t.Fatalf("delete = %v, want ErrEmptyOwner", err)
-		}
-		if stub.calls != 0 {
-			t.Fatalf("heal calls = %d, want 0", stub.calls)
-		}
-	})
 }

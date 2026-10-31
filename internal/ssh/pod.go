@@ -3,7 +3,6 @@ package ssh
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	gossh "github.com/charmbracelet/ssh"
 
@@ -18,7 +17,7 @@ type podView struct {
 }
 
 // verbPod links, shows and unlinks the owner's Solid pod (docs/SPEC.md "Pod").
-func (s *Server) verbPod(sess gossh.Session, owner string, argv []string) {
+func (s *Server) verbPod(sess gossh.Session, owner domain.Owner, argv []string) {
 	if s.Pods == nil || s.PodLinkURL == nil {
 		emitServiceErr(sess, domain.ErrPodsUnavailable)
 		return
@@ -44,7 +43,7 @@ func (s *Server) verbPod(sess gossh.Session, owner string, argv []string) {
 		}
 		linkURL := s.PodLinkURL(start.ID, start.Secret)
 		_, _ = fmt.Fprintf(sess, "open within %d minutes to link %s:\n%s\n",
-			int(domain.PodLinkTTL.Minutes()), strings.TrimPrefix(owner, domain.IdentityKeyPrefix), linkURL)
+			int(domain.PodLinkTTL.Minutes()), owner.Fingerprint(), linkURL)
 		// Usually opened on a phone, like an upload's URL.
 		writeQR(sess.Stderr(), linkURL)
 	case "status":

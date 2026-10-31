@@ -32,7 +32,7 @@ func bytesStack(t *testing.T) (*Upload, *Manage, *worker.PasteRepo, *storage.Com
 
 func createReady(t *testing.T, up *Upload, body string) domain.Paste {
 	t.Helper()
-	res, err := up.Create(strings.NewReader(body), bytesOwner, "", "")
+	res, err := up.Create(strings.NewReader(body), ownerOf(bytesOwner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -45,18 +45,18 @@ func TestDelete_RemovesEveryVersionsBytes(t *testing.T) {
 	keep := createReady(t, up, "<!doctype html><p>keep</p>")
 	doomed := createReady(t, up, "<!doctype html><p>v1</p>")
 	for _, body := range []string{"<!doctype html><p>v2</p>", "<!doctype html><p>v3</p>"} {
-		if _, err := m.Update(doomed.Slug, bytesOwner, strings.NewReader(body), ""); err != nil {
+		if _, err := m.Update(doomed.Slug, ownerOf(bytesOwner), strings.NewReader(body), ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 	}
 
-	if _, err := m.DeleteVersion(doomed.Slug, bytesOwner, 1); err != nil {
+	if _, err := m.DeleteVersion(doomed.Slug, ownerOf(bytesOwner), 1); err != nil {
 		t.Fatalf("delete v1: %v", err)
 	}
 	if n := objectsUnder(t, root); n != 3 {
 		t.Fatalf("objects after deleting v1 = %d, want 3 (the kept paste, v2, v3)", n)
 	}
-	if err := m.Delete(doomed.Slug, bytesOwner); err != nil {
+	if err := m.Delete(doomed.Slug, ownerOf(bytesOwner)); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if n := objectsUnder(t, root); n != 1 {
@@ -70,7 +70,7 @@ func TestDelete_RemovesEveryVersionsBytes(t *testing.T) {
 func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 	up, m, repo, blobs, _ := bytesStack(t)
 	p := createReady(t, up, "<!doctype html><p>v1</p>")
-	if _, err := m.Update(p.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
+	if _, err := m.Update(p.Slug, ownerOf(bytesOwner), strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	v2, err := repo.GetVersion(p.Slug, 2)
@@ -78,7 +78,7 @@ func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 		t.Fatalf("get v2: %v", err)
 	}
 
-	if _, err := m.DeleteVersion(p.Slug, bytesOwner, 1); err != nil {
+	if _, err := m.DeleteVersion(p.Slug, ownerOf(bytesOwner), 1); err != nil {
 		t.Fatalf("delete v1: %v", err)
 	}
 	if _, err := readObject(t, blobs, p.RootEntry().Key); !errors.Is(err, storage.ErrNotFound) {
@@ -115,7 +115,7 @@ func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(context.Background(), unkeyed, 0, fixedNow); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
-	if _, err := m.Update(unkeyed.Slug, bytesOwner, strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
+	if _, err := m.Update(unkeyed.Slug, ownerOf(bytesOwner), strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	v2, err := repo.GetVersion(unkeyed.Slug, 2)
@@ -126,7 +126,7 @@ func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 		t.Fatalf("upload objects before delete = %d, want 2 (another paste, v2)", n)
 	}
 
-	if err := m.Delete(unkeyed.Slug, bytesOwner); err != nil {
+	if err := m.Delete(unkeyed.Slug, ownerOf(bytesOwner)); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if want := []string{v2.UploadID}; !slices.Equal(unit.deleted, want) {
@@ -156,7 +156,7 @@ func TestDelete_ByteFailureDoesNotFailTheDelete(t *testing.T) {
 	m := NewManage(repo, failingDeleteUnit{BlobUnit: blobs})
 	m.Logger = log.New(&logs, "", 0)
 
-	if err := m.Delete(p.Slug, bytesOwner); err != nil {
+	if err := m.Delete(p.Slug, ownerOf(bytesOwner)); err != nil {
 		t.Fatalf("delete = %v, want nil", err)
 	}
 	if _, err := repo.Get(p.Slug); !errors.Is(err, storage.ErrNotFound) {
@@ -203,7 +203,7 @@ func TestDelete_BytesComeFromTheDeleteAnswer(t *testing.T) {
 		CreatedAt: fixedNow.Add(time.Hour), UpdatedAt: fixedNow.Add(time.Hour),
 	}}, unit)
 
-	if err := m.Delete(old.Slug, bytesOwner); err != nil {
+	if err := m.Delete(old.Slug, ownerOf(bytesOwner)); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if _, err := readObject(t, blobs, old.RootEntry().Key); !errors.Is(err, storage.ErrNotFound) {

@@ -52,6 +52,8 @@ type Upload struct {
 	// UploadIDs mints each upload's id, which decides where its bytes are
 	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
 	UploadIDs UploadIDSource
+	// StagingDir holds upload spill files; "" is the OS temp dir.
+	StagingDir string
 	// finalizeWG tracks this instance's in-flight background finalizers.
 	finalizeWG sync.WaitGroup
 	// Logger records background-finalize outcomes: the blob write runs after
@@ -87,7 +89,7 @@ type Result struct {
 // the two can be merged without a circular dependency and the transport keeps
 // one entry point either way (docs/SPEC.md "One paste, not two aggregates").
 type ArchiveDeployer interface {
-	Deploy(body io.Reader, owner string) (Result, error)
+	Deploy(body io.Reader, owner domain.Owner) (Result, error)
 }
 
 // archivePeek is the buffered-reader size for the gzip-magic peek. Only 2
@@ -115,14 +117,14 @@ var ErrEmptyUpload = errors.New("empty upload")
 // write reaches storage.
 var errStaging = errors.New("staging")
 
-// Create persists a new paste owned by owner, a "key:<fp>" identity built from
-// the uploader's ssh public key fingerprint. That identity gates quota: its
-// active pastes plus this body cannot exceed UserQuotaBytes.
+// Create persists a new paste owned by owner, the identity of the uploader's
+// ssh public key. That identity gates quota: its active pastes plus this body
+// cannot exceed UserQuotaBytes.
 //
 // body is consumed in a single streaming pass; type detection runs on the
 // captured prefix so the source is never re-read. Unsupported types return
 // domain.ErrUnsupportedKind for the caller to surface verbatim.
-func (u *Upload) Create(body io.Reader, owner string, name string, typeHint string) (Result, error) {
+func (u *Upload) Create(body io.Reader, owner domain.Owner, name string, typeHint string) (Result, error) {
 	// A gzip-tar archive is the SAME paste at a different cardinality, so the
 	// decision is made here, once, rather than by each transport (docs/SPEC.md
 	// "One paste, not two aggregates"). It must precede staging, which consumes
@@ -140,7 +142,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	if err != nil {
 		return Result{}, fmt.Errorf("upload id: %w", err)
 	}
-	staged, err := streamUpload(body)
+	staged, err := streamUpload(body, u.StagingDir)
 	// Freed here EXCEPT where ownership transfers to the finalize goroutine,
 	// which discards it itself once the background write is done.
 	transferred := false
@@ -172,7 +174,7 @@ func (u *Upload) Create(body io.Reader, owner string, name string, typeHint stri
 	}
 	now := u.Now().UTC()
 	p := domain.Paste{
-		Identity:      domain.Identity(owner),
+		Identity:      owner.Identity(),
 		Generation:    domain.NewPasteGeneration(),
 		Status:        domain.PasteStatusPending,
 		Kind:          kind,

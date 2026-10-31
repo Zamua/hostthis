@@ -736,7 +736,7 @@ func TestSybilGate_Characterization(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 11. PROXY protocol (HOSTTHIS_SSH_PROXY_PROTOCOL=true)
+// 11. PROXY protocol (Server.ProxyProtocol)
 // ---------------------------------------------------------------------------
 
 func TestProxyProtocol_Characterization(t *testing.T) {

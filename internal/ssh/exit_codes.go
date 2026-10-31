@@ -10,7 +10,7 @@ const (
 	ExitOK          = 0 // success
 	ExitErr         = 1 // generic / unclassified failure
 	ExitUsage       = 2 // malformed args, bad verb, parser failure
-	ExitAuth        = 3 // identity required (no key) or missing-owner service error
+	ExitAuth        = 3 // identity required (no usable key)
 	ExitNotFound    = 4 // not found, including owner-collapsed permission failures
 	_               = 5 // reserved, do not reuse
 	ExitSybilRefuse = 6 // Sybil per-subnet rate-limit refusal
