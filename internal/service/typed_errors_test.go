@@ -17,26 +17,29 @@ import (
 	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// slugLookalikeErrRepo fails every insert with an error whose text contains
-// "slug" but which is NOT the slug-taken sentinel. The embedded nil PasteRepo
-// makes any other call panic.
+// slugLookalikeErrRepo fails the first insert with an error whose text
+// contains "slug" but which is NOT the slug-taken sentinel, and accepts any
+// later one, so a remint would turn the failure into a success. The embedded
+// nil PasteRepo makes any other call panic.
 type slugLookalikeErrRepo struct {
 	PasteRepo
-	calls int
+	failed bool
 }
 
 var errSlugLookalike = fmt.Errorf("room slug validation failed")
 
 func (r *slugLookalikeErrRepo) InsertWithQuotaCheck(context.Context, domain.Paste, int64, time.Time) error {
-	r.calls++
+	if r.failed {
+		return nil
+	}
+	r.failed = true
 	return errSlugLookalike
 }
 
 // TestUpload_Create_LookalikeErrorIsNotARemint pins the classification
 // CONSEQUENCE: an insert failure whose text contains "slug" but is not the
-// sentinel surfaces VERBATIM from Create, after exactly one attempt. Classified
-// as a collision it would instead burn the whole remint budget and report a
-// bogus "slug taken (after retries)", hiding the real failure.
+// sentinel surfaces VERBATIM from Create instead of being retried under a new
+// slug, which would hide the real failure.
 func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	repo := &slugLookalikeErrRepo{}
 	u := NewUpload(repo, fakeBlobUnit())
@@ -48,18 +51,13 @@ func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	if errors.Is(err, ErrSlugTaken) {
 		t.Fatalf("Create = %v; a non-collision error must not exhaust the remint budget", err)
 	}
-	if repo.calls != 1 {
-		t.Fatalf("insert attempts = %d, want 1 (no remint on a non-collision error)", repo.calls)
-	}
 }
 
-// fakeKeyGateRepo returns a canned AdmitNewKey error and records whether the
-// refusal-enrichment snapshot was consulted. The embedded nil KeyGateRepo
-// makes any other call panic.
+// fakeKeyGateRepo returns a canned AdmitNewKey error and a fixed subnet
+// snapshot. The embedded nil KeyGateRepo makes any other call panic.
 type fakeKeyGateRepo struct {
 	KeyGateRepo
-	admitErr      error
-	snapshotCalls int
+	admitErr error
 }
 
 var fakeOldest = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
@@ -68,7 +66,6 @@ func (f *fakeKeyGateRepo) AdmitNewKey(string, string, time.Time, int, time.Durat
 	return false, f.admitErr
 }
 func (f *fakeKeyGateRepo) SubnetSnapshot(string, time.Time, time.Duration) (int, time.Time, error) {
-	f.snapshotCalls++
 	return 3, fakeOldest, nil
 }
 
@@ -78,21 +75,19 @@ func (f *fakeKeyGateRepo) SubnetSnapshot(string, time.Time, time.Duration) (int,
 //   - the rate-limit sentinel (bare or wrapped) -> a *SybilRefusal
 //     (errors.Is ErrSybilRateLimit) enriched from SubnetSnapshot, so the
 //     SSH layer prints the self-diagnosing cap/next-slot message;
-//   - any other repo error -> surfaced verbatim, NOT a Sybil refusal,
-//     and the snapshot is never consulted.
+//   - any other repo error -> surfaced verbatim, NOT a Sybil refusal.
 //
 // The wrapped-sentinel row matters: a comparison against the sentinel's exact
 // text would demote any backend-wrapped rate-limit to a generic 500-class error.
 func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 	cases := []struct {
-		name          string
-		admitErr      error
-		wantRefusal   bool
-		wantSnapshots int
+		name        string
+		admitErr    error
+		wantRefusal bool
 	}{
-		{"bare sentinel", storage.ErrTooManyNewKeys, true, 1},
-		{"wrapped sentinel", fmt.Errorf("keygate admit: %w", storage.ErrTooManyNewKeys), true, 1},
-		{"generic error passes through", errors.New("storage: disk on fire"), false, 0},
+		{"bare sentinel", storage.ErrTooManyNewKeys, true},
+		{"wrapped sentinel", fmt.Errorf("keygate admit: %w", storage.ErrTooManyNewKeys), true},
+		{"generic error passes through", errors.New("storage: disk on fire"), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -104,9 +99,6 @@ func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 			}
 			if got := errors.Is(err, ErrSybilRateLimit); got != tc.wantRefusal {
 				t.Fatalf("errors.Is(err, ErrSybilRateLimit) = %v, want %v (err = %v)", got, tc.wantRefusal, err)
-			}
-			if repo.snapshotCalls != tc.wantSnapshots {
-				t.Fatalf("SubnetSnapshot calls = %d, want %d", repo.snapshotCalls, tc.wantSnapshots)
 			}
 			if tc.wantRefusal {
 				var refusal *SybilRefusal

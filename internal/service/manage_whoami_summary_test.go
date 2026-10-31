@@ -1,51 +1,53 @@
 package service
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/storage"
 )
 
-// summaryRepoStub provides ONLY OwnerSummary; the embedded nil PasteAdmin
-// makes any other repo call panic, so a pass proves whoami is one call.
-type summaryRepoStub struct {
-	PasteAdmin
-	sum   domain.OwnerSummary
-	calls int
-}
+// used_bytes is the figure the quota charges, across pastes and sites, and
+// first_seen and active follow the owner's uploads.
+func TestWhoami_ReportsTheQuotaFigure(t *testing.T) {
+	blobs, repo := realBlobs(t), newRepo(t)
+	upload, manage := NewUpload(repo, blobs), NewManage(repo, blobs)
+	deploy := NewDeploySite(storage.NewSites(repo), repo, blobs)
+	fixedNowFn := func() time.Time { return fixedNow }
+	upload.Now, manage.Now, deploy.Now = fixedNowFn, fixedNowFn, fixedNowFn
+	owner := ownerOf("key:whoami")
 
-func (s *summaryRepoStub) OwnerSummary(string, time.Time) (domain.OwnerSummary, error) {
-	s.calls++
-	return s.sum, nil
-}
-
-// Whoami is exactly one OwnerSummary call, and used_bytes is the summary's
-// paste + site total (the same combined figure the quota cap enforces).
-func TestWhoami_IsOneOwnerSummaryCall(t *testing.T) {
-	first := time.Unix(1_700_000_000, 0)
-	stub := &summaryRepoStub{sum: domain.OwnerSummary{
-		Active: 4, FirstSeen: first, PasteBytes: 1000, SiteBytes: 200,
-	}}
-	m := &Manage{Repo: stub, Now: time.Now}
-
-	got, err := m.Whoami(ownerOf("key:abc"), "")
+	empty, err := manage.Whoami(owner, "")
 	if err != nil {
 		t.Fatalf("whoami: %v", err)
 	}
-	if stub.calls != 1 {
-		t.Fatalf("OwnerSummary calls: got %d, want 1", stub.calls)
+	if empty.Active != 0 || !empty.FirstSeen.IsZero() || empty.UsedBytes != 0 || empty.QuotaBytes != domain.UserQuotaBytes {
+		t.Fatalf("new owner: %+v", empty)
 	}
-	if got.Active != 4 {
-		t.Fatalf("active: got %d, want 4", got.Active)
+
+	if _, err := upload.Create(strings.NewReader("# a paste\n\nbody\n"), owner, "", ""); err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	if !got.FirstSeen.Equal(first) {
-		t.Fatalf("first seen: got %v, want %v", got.FirstSeen, first)
+	upload.WaitFinalize()
+	pasted, err := manage.Whoami(owner, "")
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
 	}
-	if got.UsedBytes != 1200 {
-		t.Fatalf("used bytes: got %d, want 1200 (paste 1000 + site 200)", got.UsedBytes)
+	if pasted.Active != 1 || !pasted.FirstSeen.Equal(fixedNow) || pasted.UsedBytes <= 0 {
+		t.Fatalf("after a paste: %+v", pasted)
 	}
-	if got.QuotaBytes != domain.UserQuotaBytes {
-		t.Fatalf("quota bytes: got %d, want %d", got.QuotaBytes, domain.UserQuotaBytes)
+
+	if _, err := deploy.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})), owner); err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	both, err := manage.Whoami(owner, "")
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	if charged := ownerCharge(t, owner.String()); both.Active != 2 || both.UsedBytes <= pasted.UsedBytes || int64(both.UsedBytes) != charged {
+		t.Fatalf("with a site: %+v, want 2 active and the %d bytes the quota charges", both, charged)
 	}
 }

@@ -1,10 +1,8 @@
 package service
 
-// Delete's heal decision (docs/SPEC.md "Delete heals its own lost tail"):
-// requireOwner's not-found routes through DropStaleOwnerEntry exactly once;
-// a drop means success, no drop means not-found, a heal error surfaces. The
-// end-to-end version against the real repo lives with the storage tests
-// (service_heal_e2e_test.go), which own the raw seams that plant the damage.
+// Delete's heal decision (docs/SPEC.md "Delete heals its own lost tail"). The
+// end-to-end version against the real repo lives with the storage tests,
+// which own the raw seams that plant the damage.
 
 import (
 	"errors"
@@ -13,60 +11,61 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// healRepoStub provides ONLY Get (not found) and DropStaleOwnerEntry; the
-// embedded nil PasteAdmin makes any other repo call panic, and the nil Blob
-// on Manage makes any blob call panic, so a pass proves the heal path touches
-// neither.
-type healRepoStub struct {
+// strandedIndex holds owner index entries with no paste row behind them, as a
+// crash between delete's two transactions leaves.
+type strandedIndex struct {
 	PasteAdmin
-	dropped bool
+	entries map[string]map[domain.Slug]bool
 	dropErr error
-	calls   int
-	gotSlug domain.Slug
-	gotOwn  string
 }
 
-func (s *healRepoStub) Get(domain.Slug) (domain.Paste, error) {
+func (s *strandedIndex) Get(domain.Slug) (domain.Paste, error) {
 	return domain.Paste{}, ErrNotFound
 }
 
-func (s *healRepoStub) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error) {
-	s.calls++
-	s.gotSlug, s.gotOwn = slug, owner
-	return s.dropped, s.dropErr
+func (s *strandedIndex) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, error) {
+	if s.dropErr != nil {
+		return false, s.dropErr
+	}
+	if !s.entries[owner][slug] {
+		return false, nil
+	}
+	delete(s.entries[owner], slug)
+	return true, nil
 }
 
 func TestDelete_HealDecisionFlow(t *testing.T) {
-	const owner = "key:heal-flow"
+	const owner, other = "key:heal-flow", "key:heal-other"
 	slug := domain.Slug("healflow")
 
-	t.Run("dropped residue is success", func(t *testing.T) {
-		stub := &healRepoStub{dropped: true}
-		m := &Manage{Repo: stub}
+	t.Run("the caller's residue is dropped and the delete succeeds", func(t *testing.T) {
+		idx := &strandedIndex{entries: map[string]map[domain.Slug]bool{owner: {slug: true}}}
+		m := &Manage{Repo: idx}
 		if err := m.Delete(slug, ownerOf(owner)); err != nil {
 			t.Fatalf("delete = %v, want nil", err)
 		}
-		if stub.calls != 1 || stub.gotSlug != slug || stub.gotOwn != owner {
-			t.Fatalf("heal called %d times with (%s, %s), want once with (%s, %s)",
-				stub.calls, stub.gotSlug, stub.gotOwn, slug, owner)
+		if idx.entries[owner][slug] {
+			t.Fatal("residue still indexed after the delete")
+		}
+		if err := m.Delete(slug, ownerOf(owner)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("second delete = %v, want ErrNotFound", err)
 		}
 	})
 
-	t.Run("nothing to drop stays not-found", func(t *testing.T) {
-		stub := &healRepoStub{dropped: false}
-		m := &Manage{Repo: stub}
+	t.Run("another owner's residue stays not-found and untouched", func(t *testing.T) {
+		idx := &strandedIndex{entries: map[string]map[domain.Slug]bool{other: {slug: true}}}
+		m := &Manage{Repo: idx}
 		if err := m.Delete(slug, ownerOf(owner)); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("delete = %v, want ErrNotFound", err)
 		}
-		if stub.calls != 1 {
-			t.Fatalf("heal calls = %d, want 1", stub.calls)
+		if !idx.entries[other][slug] {
+			t.Fatal("dropped another owner's index entry")
 		}
 	})
 
 	t.Run("heal failure surfaces, not swallowed", func(t *testing.T) {
 		boom := errors.New("cas conflict")
-		stub := &healRepoStub{dropErr: boom}
-		m := &Manage{Repo: stub}
+		m := &Manage{Repo: &strandedIndex{dropErr: boom}}
 		err := m.Delete(slug, ownerOf(owner))
 		if !errors.Is(err, boom) {
 			t.Fatalf("delete = %v, want the heal error", err)
@@ -75,5 +74,4 @@ func TestDelete_HealDecisionFlow(t *testing.T) {
 			t.Fatal("a failed heal must not masquerade as not-found")
 		}
 	})
-
 }

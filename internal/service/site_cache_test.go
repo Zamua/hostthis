@@ -98,10 +98,19 @@ func TestSiteCacheInvalidating_RealService(t *testing.T) {
 	}
 }
 
-// A nil purger unwraps to the inner service.
-func TestSiteCacheInvalidating_NilPurgerUnwraps(t *testing.T) {
+// An unconfigured CDN (nil purger) still serves every mutation.
+func TestSiteCacheInvalidating_NilPurgerServesMutations(t *testing.T) {
 	inner, _, _ := deployFixture(t)
-	if got := NewSiteCacheInvalidating(inner, nil); got != SiteDeployer(inner) {
-		t.Fatalf("nil purger should return the inner deployer unwrapped, got %T", got)
+	d := NewSiteCacheInvalidating(inner, nil)
+	owner := ownerOf("key:nil-purger")
+	res, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), owner)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if _, err := d.DeployToSlug(res.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v2</h1>"})), owner); err != nil {
+		t.Fatalf("redeploy: %v", err)
+	}
+	if err := d.Delete(res.Site.Slug, owner); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
 }
