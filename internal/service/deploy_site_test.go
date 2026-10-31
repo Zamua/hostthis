@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"testing"
 	"time"
@@ -559,124 +558,64 @@ func TestDeployToSlug_RefusedRedeployDeletesItsUpload(t *testing.T) {
 
 // --- slug collisions ------------------------------------------------------
 
-// collisionSiteRepo fails the first `collisions` inserts with the slug-taken
-// sentinel. The embedded nil SiteRepo makes any other call panic.
-type collisionSiteRepo struct {
+// collidingSites reports the slug-taken sentinel for the first `left` inserts
+// and hands the rest to the real repo.
+type collidingSites struct {
 	SiteRepo
-	collisions int
-	inserts    []domain.Slug
+	left int
 }
 
-func (r *collisionSiteRepo) InsertWithQuotaCheck(_ context.Context, site domain.Site, _ int, _ int64, _ time.Time) error {
-	r.inserts = append(r.inserts, site.Slug)
-	if len(r.inserts) <= r.collisions {
+func (r *collidingSites) InsertWithQuotaCheck(ctx context.Context, site domain.Site, versionCap int, estimated int64, now time.Time) error {
+	if r.left > 0 {
+		r.left--
 		return domain.ErrSlugTaken
 	}
-	return nil
+	return r.SiteRepo.InsertWithQuotaCheck(ctx, site, versionCap, estimated, now)
 }
 
-func (*collisionSiteRepo) SumActiveBytesByOwner(string, time.Time) (int64, error) { return 0, nil }
-
-type zeroPasteBytes struct{}
-
-func (zeroPasteBytes) SumActiveBytesByOwner(string, time.Time) (int, error) { return 0, nil }
-
-// countingBlobUnit counts StageEncoding and DeleteUpload calls. The embedded
-// nil BlobUnit makes any other call panic.
-type countingBlobUnit struct {
-	BlobUnit
-	stages  int
-	deletes []string
-}
-
-func (b *countingBlobUnit) StageEncoding(_ context.Context, _ string, r io.Reader) (int, error) {
-	b.stages++
-	n, err := io.Copy(io.Discard, r)
-	return int(n), err
-}
-
-func (b *countingBlobUnit) OpenPack(string) (domain.BlobPack, error) {
-	return &countingPack{unit: b}, nil
-}
-
-// countingPack counts a committed pack as one stage.
-type countingPack struct {
-	unit *countingBlobUnit
-	n    int64
-}
-
-func (p *countingPack) Append(r io.Reader) (int64, int64, error) {
-	n, err := io.Copy(io.Discard, r)
-	off := p.n
-	p.n += n + 1
-	return off, n + 1, err
-}
-
-func (p *countingPack) AppendStored(r io.Reader) (int64, int64, error) {
-	n, err := io.Copy(io.Discard, r)
-	off := p.n
-	p.n += n
-	return off, n, err
-}
-
-func (p *countingPack) Len() int64 { return p.n }
-
-func (p *countingPack) Commit(context.Context) error {
-	p.unit.stages++
-	return nil
-}
-
-func (p *countingPack) Close() error { return nil }
-
-func (b *countingBlobUnit) DeleteUpload(_ context.Context, uploadID string) error {
-	b.deletes = append(b.deletes, uploadID)
-	return nil
-}
-
-// A slug collision retries metadata only: the one-shot archive is staged once,
-// whether the retry lands or the budget is exhausted, and an exhausted budget
-// deletes the staged upload.
+// A slug collision retries metadata only: the one-shot archive still deploys
+// whole when a retry lands, and an exhausted budget leaves no site and no
+// staged bytes.
 func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		collisions  int
-		wantErr     error
-		wantInserts int
-		wantDeletes int
-	}{
-		{"one collision then lands", 1, nil, 2, 0},
-		{"budget exhausted", maxDeployRetries, ErrSlugTaken, maxDeployRetries, 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			repo := &collisionSiteRepo{collisions: tc.collisions}
-			blobs := &countingBlobUnit{}
-			deploy := NewDeploySite(repo, zeroPasteBytes{}, blobs)
-			archive := gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})
+	files := map[string]string{"index.html": "<h1>hi</h1>", "app.js": "console.log(1)"}
+	baseline := func() int {
+		d, _, _, root := deployStack(t)
+		if _, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:baseline")); err != nil {
+			t.Fatalf("baseline deploy: %v", err)
+		}
+		return objectsUnder(t, root)
+	}()
 
-			result, err := deploy.Deploy(bytes.NewReader(archive), ownerOf("key:owner"))
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("deploy error = %v, want %v", err, tc.wantErr)
+	t.Run("one collision then lands", func(t *testing.T) {
+		d, sites, blobs, root := deployStack(t)
+		d.Sites = &collidingSites{SiteRepo: sites, left: 1}
+		res, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:owner"))
+		if err != nil {
+			t.Fatalf("deploy: %v", err)
+		}
+		got, err := sites.Get(res.Site.Slug)
+		if err != nil {
+			t.Fatalf("get committed site: %v", err)
+		}
+		for name, want := range files {
+			if body, err := readEntry(t, blobs, got.Manifest.Files[name]); err != nil || string(body) != want {
+				t.Fatalf("%s = (%q, %v), want %q", name, body, err, want)
 			}
-			if blobs.stages != 1 {
-				t.Fatalf("blob stages = %d, want 1", blobs.stages)
-			}
-			if len(repo.inserts) != tc.wantInserts {
-				t.Fatalf("metadata inserts = %d, want %d", len(repo.inserts), tc.wantInserts)
-			}
-			if len(blobs.deletes) != tc.wantDeletes {
-				t.Fatalf("upload deletes = %v, want %d", blobs.deletes, tc.wantDeletes)
-			}
-			if tc.wantErr != nil {
-				return
-			}
-			if repo.inserts[0] == repo.inserts[1] {
-				t.Fatalf("collision reused slug %q", repo.inserts[0])
-			}
-			if result.Site.Slug != repo.inserts[1] {
-				t.Fatalf("result slug = %q, want committed slug %q", result.Site.Slug, repo.inserts[1])
-			}
-		})
-	}
+		}
+		if n := objectsUnder(t, root); n != baseline {
+			t.Fatalf("store holds %d upload objects, want %d as for one deploy", n, baseline)
+		}
+	})
+
+	t.Run("budget exhausted", func(t *testing.T) {
+		d, sites, _, root := deployStack(t)
+		d.Sites = &collidingSites{SiteRepo: sites, left: maxDeployRetries}
+		if _, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:owner")); !errors.Is(err, ErrSlugTaken) {
+			t.Fatalf("deploy = %v, want ErrSlugTaken", err)
+		}
+		noSites(t, d, sites, "key:owner")
+		assertNoObjects(t, root)
+	})
 }
 
 // emptyGzipMembers is n gzip members that each inflate to nothing.
