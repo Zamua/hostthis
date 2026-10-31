@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -44,16 +42,9 @@ func isCellAnswer(status int) bool {
 // do sends one cell request and returns the raw response; call is the usual
 // wrapper. Callers needing the body of an answer status (a 429 carrying its
 // wait) use do directly.
-func (c *cell) do(ctx context.Context, method, path, key, val string, body any) (*http.Response, error) {
-	// The routing param is MERGED rather than appended: a path may already carry
-	// query params of its own, and a second bare "?" makes the whole string one
-	// unparseable query, which presents as the cell rejecting a param that is
-	// plainly in the URL.
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-	u := fmt.Sprintf("%s%s%s%s=%s", c.base, path, sep, key, url.QueryEscape(val))
+func (c *cell) do(ctx context.Context, rt route, val string, body any) (*http.Response, error) {
+	path := rt.path
+	u := c.base + rt.target(val)
 	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -63,7 +54,7 @@ func (c *cell) do(ctx context.Context, method, path, key, val string, body any) 
 		payload = b
 	}
 	send := func() (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, method, u, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, rt.method, u, bytes.NewReader(payload))
 		if err != nil {
 			return nil, err
 		}
@@ -73,7 +64,7 @@ func (c *cell) do(ctx context.Context, method, path, key, val string, body any) 
 	resp, err := send()
 	// A read is safe to send twice, and a pooled connection the far side has
 	// already closed fails one exchange with nothing answered.
-	if err != nil && method == http.MethodGet && ctx.Err() == nil {
+	if err != nil && rt.method == http.MethodGet && ctx.Err() == nil {
 		resp, err = send()
 	}
 	if err != nil {
@@ -82,8 +73,9 @@ func (c *cell) do(ctx context.Context, method, path, key, val string, body any) 
 	return resp, nil
 }
 
-func (c *cell) call(ctx context.Context, method, path, key, val string, body, out any) (int, error) {
-	resp, err := c.do(ctx, method, path, key, val, body)
+func (c *cell) call(ctx context.Context, rt route, val string, body, out any) (int, error) {
+	path := rt.path
+	resp, err := c.do(ctx, rt, val, body)
 	if err != nil {
 		return 0, err
 	}
@@ -132,9 +124,9 @@ func answer(op string, status int, err error, answers map[int]error) error {
 }
 
 // ask is call with its status mapped by answer.
-func (c *cell) ask(ctx context.Context, op, method, path, key, val string, body, out any,
+func (c *cell) ask(ctx context.Context, op string, rt route, val string, body, out any,
 	answers map[int]error,
 ) error {
-	status, err := c.call(ctx, method, path, key, val, body, out)
+	status, err := c.call(ctx, rt, val, body, out)
 	return answer(op, status, err, answers)
 }

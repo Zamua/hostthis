@@ -27,8 +27,7 @@ func (r *PasteRepo) ActivePodLink(owner string) (*domain.PodLink, error) {
 	var res struct {
 		Link *podLinkRow `json:"link"`
 	}
-	if err := r.ask(context.Background(), "identity podget", http.MethodGet, "/identity/podget", "scope", owner,
-		nil, &res, nil); err != nil {
+	if err := r.ask(context.Background(), "identity podget", opIdentityPodGet, owner, nil, &res, nil); err != nil {
 		return nil, err
 	}
 	if res.Link == nil {
@@ -44,24 +43,22 @@ func (r *PasteRepo) ActivePodLink(owner string) (*domain.PodLink, error) {
 
 // StartPodLink records a pending link the owner completes in a browser.
 func (r *PasteRepo) StartPodLink(owner, webid, linkID, secretHash string, expires time.Time) error {
-	var refusal struct {
-		Error string `json:"error"`
-	}
-	status, err := r.call(context.Background(), http.MethodPost, "/identity/linkstart", "scope", podLinkCell(linkID),
-		map[string]any{
-			"owner":      owner,
-			"webid":      webid,
-			"secretHash": secretHash,
-			"expires":    expires.UnixMilli(),
-		}, &refusal)
+	var refused refusal
+	status, err := r.call(context.Background(), opIdentityLinkStart, podLinkCell(linkID),
+		linkStartRequest{
+			Owner:      owner,
+			WebID:      webid,
+			SecretHash: secretHash,
+			Expires:    expires.UnixMilli(),
+		}, &refused)
 	if err != nil {
 		return err
 	}
-	if status == http.StatusConflict && refusal.Error == "pods-unavailable" {
+	if status == http.StatusConflict && refused.Error == codePodsUnavailable {
 		return domain.ErrPodsUnavailable
 	}
 	if status >= 300 {
-		return fmt.Errorf("worker: link start: status %d %s", status, refusal.Error)
+		return fmt.Errorf("worker: link start: status %d %s", status, refused.Error)
 	}
 	return nil
 }
@@ -71,8 +68,8 @@ func (r *PasteRepo) ClearPodLink(owner string) (bool, error) {
 	var res struct {
 		Cleared bool `json:"cleared"`
 	}
-	if err := r.ask(context.Background(), "identity podclear", http.MethodPost, "/identity/podclear", "scope", owner,
-		map[string]any{}, &res, nil); err != nil {
+	if err := r.ask(context.Background(), "identity podclear", opIdentityPodClear, owner,
+		podClearRequest{}, &res, nil); err != nil {
 		return false, err
 	}
 	return res.Cleared, nil
