@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  Paste, Room, encryptPush, signVapid, localDate, nextDue, zonedToUTC,
-} from "../src/index.js";
+import { Paste, Room } from "../src/index.js";
+import { encryptPush, localDate, nextDue, signVapid, zonedToUTC } from "../src/push.js";
 import { FakeStorage, ROOM_ID, putBody, roomDoc, state } from "./harness.js";
 
 const HOUR = 3600 * 1000;

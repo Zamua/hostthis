@@ -372,7 +372,8 @@ test("the cell sees only the parsed slug, path and flags, and nothing changes", 
   w.row(SLUG, hiRow());
   w.blob("uploads/a/0", "<h1>hi</h1>");
   const before = structuredClone([...w.storageOf(SLUG).data]);
-  const opsSource = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+  const opsSource = ["identity", "paste", "room", "subnet"]
+    .map((cell) => readFileSync(new URL(`../src/cells/${cell}.js`, import.meta.url), "utf8")).join("\n");
   const ops = [...opsSource.matchAll(/^ {2}(\w+): (?:read|mutation)\(/gm)].map((m) => m[1]);
   assert.ok(ops.includes("put") && ops.includes("remove") && ops.length > 20, `${ops}`);
   const paths = [

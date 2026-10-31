@@ -25,11 +25,13 @@ test("every binding the Worker reads is declared", () => {
 
 // celld registers only classes with a binding, so an unbound cell class
 // cannot activate even when a migration declares it.
-test("every exported cell class has a durable object binding", () => {
-  const src = readFileSync(new URL("../src/index.js", import.meta.url), "utf8");
+test("every exported cell class has a durable object binding", async () => {
+  const entry = await import("../src/index.js");
   const cfg = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   const bound = new Set([...cfg.matchAll(/"class_name":\s*"([A-Za-z]+)"/g)].map((m) => m[1]));
-  const classes = [...src.matchAll(/^export class ([A-Za-z]+)/gm)].map((m) => m[1]);
+  const classes = Object.entries(entry)
+    .filter(([name, value]) => name !== "default" && typeof value === "function" && /^class\b/.test(value.toString()))
+    .map(([name]) => name);
   assert.ok(classes.length > 0, "no exported classes matched");
   for (const name of classes) assert.ok(bound.has(name), `class ${name} has no binding`);
 });
