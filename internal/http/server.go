@@ -54,7 +54,10 @@ type Server struct {
 	// Color labels the replica in blue/green deploys, echoed in the
 	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
-	Now   func() time.Time
+	// TrustXFF derives the room-creation client IP from X-Forwarded-For; set
+	// only behind a reverse proxy that appends it.
+	TrustXFF bool
+	Now      func() time.Time
 	// Logf, when set, receives one warn line per 5xx served by the paste/site
 	// read path (docs/SPEC.md "5xx observability on the read surface"): slug +
 	// underlying error, so a read 500 is attributable from the logs while the

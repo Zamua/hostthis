@@ -7,7 +7,6 @@ import (
 	"maps"
 	"net"
 	"net/http"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -145,7 +144,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 		http.NotFound(w, r)
 		return
 	}
-	subnet := clientSubnet(r)
+	subnet := clientSubnet(r, s.TrustXFF)
 	room, err := s.Rooms.Create(appSlug, subnet)
 	if err != nil {
 		s.writeRoomError(w, r, err)
@@ -283,25 +282,16 @@ func roomMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 	http.Error(w, "method not allowed\n", http.StatusMethodNotAllowed)
 }
 
-// trustXFFEnv reports whether the operator has opted into trusting
-// X-Forwarded-For for client-IP derivation. Read fresh from the environment so
-// tests can flip it per case. A client-supplied header is NEVER trusted by
-// default, only when an operator behind a reverse proxy enables it.
-func trustXFFEnv() bool {
-	return strings.EqualFold(os.Getenv("HOSTTHIS_HTTP_TRUST_XFF"), "true")
-}
-
 // clientSubnet derives the canonical /24 (IPv4) or /48 (IPv6) subnet of the
 // requester for the per-IP room-creation rate limit.
 //
 // By DEFAULT the address is the TCP RemoteAddr only: trusting X-Forwarded-For
 // would be a rate-limit bypass, a fresh value per POST landing in a new bucket.
-// With HOSTTHIS_HTTP_TRUST_XFF=true the RIGHT-MOST X-Forwarded-For value is
-// used, the hop the trusted proxy itself recorded; the left-most is fully
-// attacker-controlled. An unparseable address becomes the "unknown" bucket.
-func clientSubnet(r *http.Request) string {
+// With trustXFF set the RIGHT-MOST X-Forwarded-For value is used, the hop the
+// trusted proxy itself recorded; the left-most is fully attacker-controlled. An unparseable address becomes the "unknown" bucket.
+func clientSubnet(r *http.Request, trustXFF bool) string {
 	host := ""
-	if trustXFFEnv() {
+	if trustXFF {
 		host = rightmostForwardedFor(r.Header.Values("X-Forwarded-For"))
 	}
 	if host == "" {
@@ -312,8 +302,7 @@ func clientSubnet(r *http.Request) string {
 			host = h
 		}
 	}
-	ip := net.ParseIP(host)
-	return ipSubnet(ip)
+	return domain.SubnetOf(net.ParseIP(host))
 }
 
 // rightmostForwardedFor is the last value of the X-Forwarded-For list that the
@@ -326,16 +315,4 @@ func rightmostForwardedFor(lines []string) string {
 	}
 	last := lines[len(lines)-1]
 	return strings.TrimSpace(last[strings.LastIndexByte(last, ',')+1:])
-}
-
-// ipSubnet returns the canonical subnet string: IPv4 -> "/24", IPv6 -> "/48".
-// A nil IP becomes "unknown" so the rate limit treats it as one stable bucket.
-func ipSubnet(ip net.IP) string {
-	if ip == nil {
-		return "unknown"
-	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
-	}
-	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }

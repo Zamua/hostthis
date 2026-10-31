@@ -24,13 +24,13 @@ func NewSiteCacheInvalidating(inner SiteDeployer, purger CachePurger) SiteDeploy
 	return &SiteCacheInvalidating{SiteDeployer: inner, purger: purger}
 }
 
-func (c *SiteCacheInvalidating) DeployToSlug(slug domain.Slug, body io.Reader, owner string) (SiteResult, error) {
+func (c *SiteCacheInvalidating) DeployToSlug(slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error) {
 	res, err := c.SiteDeployer.DeployToSlug(slug, body, owner)
 	purgeUnlessUntouched(c.purger, slug, err)
 	return res, err
 }
 
-func (c *SiteCacheInvalidating) Delete(slug domain.Slug, owner string) error {
+func (c *SiteCacheInvalidating) Delete(slug domain.Slug, owner domain.Owner) error {
 	err := c.SiteDeployer.Delete(slug, owner)
 	purgeUnlessUntouched(c.purger, slug, err)
 	return err

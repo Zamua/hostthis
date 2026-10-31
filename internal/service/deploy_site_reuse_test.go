@@ -58,7 +58,7 @@ func TestDeployToSlug_ReusesUnchangedStandaloneFiles(t *testing.T) {
 	owner := "key:reuse"
 	audio := incompressible(t, 2<<20)
 	v1 := map[string]string{"index.html": "<h1>one</h1>", "a.m4a": audio}
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestDeployToSlug_ReusesUnchangedStandaloneFiles(t *testing.T) {
 	charge1 := ownerCharge(t, owner)
 
 	v2 := map[string]string{"index.html": "<h1>two</h1>", "a.m4a": audio}
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, v2)), owner); err != nil {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, v2)), ownerOf(owner)); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	ver, head2 := headOf(t, d, slug, owner)
@@ -90,7 +90,7 @@ func TestDeployToSlug_KeepListCarriesUnsentFiles(t *testing.T) {
 	owner := "key:keep"
 	audio := incompressible(t, 2<<20)
 	v1 := map[string]string{"index.html": "<h1>one</h1>", "a.m4a": audio, "app.js": "console.log(1)"}
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestDeployToSlug_KeepListCarriesUnsentFiles(t *testing.T) {
 
 	keep := fmt.Sprintf("base 1\n%s  a.m4a\n%s  ./app.js\n", sha(audio), sha("console.log(1)"))
 	arc := gzipTar(t, map[string]string{"dist/index.html": "<h1>two</h1>", "dist/.hostthis-keep": keep})
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); err != nil {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), ownerOf(owner)); err != nil {
 		t.Fatalf("keep deploy: %v", err)
 	}
 	_, head2 := headOf(t, d, slug, owner)
@@ -121,7 +121,7 @@ func TestDeployToSlug_KeepListRefusals(t *testing.T) {
 	d, _, _ := reuseStack(t)
 	owner := "key:refuse"
 	v1 := map[string]string{"index.html": "<h1>one</h1>", "a.js": "a"}
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestDeployToSlug_KeepListRefusals(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			files := map[string]string{"index.html": "<h1>x</h1>", ".hostthis-keep": c.keep}
 			maps.Copy(files, c.sent)
-			_, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, files)), owner)
+			_, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, files)), ownerOf(owner))
 			if !errors.Is(err, c.want) {
 				t.Fatalf("got %v, want %v", err, c.want)
 			}
@@ -160,17 +160,17 @@ func TestDeleteVersion_FreesOnlyUnsharedObjects(t *testing.T) {
 	d, m, blobs := reuseStack(t)
 	owner := "key:free"
 	audio := incompressible(t, 2<<20)
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "1", "a.m4a": audio})), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "1", "a.m4a": audio})), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	slug := r1.Site.Slug
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "2", "a.m4a": audio})), owner); err != nil {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "2", "a.m4a": audio})), ownerOf(owner)); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	_, head := headOf(t, d, slug, owner)
 
-	res, err := m.DeleteVersion(slug, owner, 1)
+	res, err := m.DeleteVersion(slug, ownerOf(owner), 1)
 	if err != nil {
 		t.Fatalf("delete v1: %v", err)
 	}
@@ -179,10 +179,10 @@ func TestDeleteVersion_FreesOnlyUnsharedObjects(t *testing.T) {
 	}
 	servesBytes(t, blobs, head, map[string]string{"a.m4a": audio})
 
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "3"})), owner); err != nil {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "3"})), ownerOf(owner)); err != nil {
 		t.Fatalf("redeploy without audio: %v", err)
 	}
-	res, err = m.DeleteVersion(slug, owner, 2)
+	res, err = m.DeleteVersion(slug, ownerOf(owner), 2)
 	if err != nil {
 		t.Fatalf("delete v2: %v", err)
 	}
@@ -198,11 +198,11 @@ func TestDeleteVersion_FreesOnlyUnsharedObjects(t *testing.T) {
 func TestHave(t *testing.T) {
 	d, _, _ := reuseStack(t)
 	owner := "key:have"
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "i", "b/c.js": "c"})), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "i", "b/c.js": "c"})), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	held, err := d.Have(r1.Site.Slug, owner)
+	held, err := d.Have(r1.Site.Slug, ownerOf(owner))
 	if err != nil {
 		t.Fatalf("have: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestHave(t *testing.T) {
 	if held.Base != 1 || strings.Join(lines, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("have = %d %v, want 1 %v", held.Base, lines, want)
 	}
-	if _, err := d.Have(r1.Site.Slug, "key:someone-else"); !errors.Is(err, ErrNotFound) {
+	if _, err := d.Have(r1.Site.Slug, ownerOf("key:someone-else")); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign have: %v, want not found", err)
 	}
 }
@@ -247,7 +247,7 @@ func TestDeployToSlug_KeepListReadsEachPackOnce(t *testing.T) {
 		files[p] = body
 		keep += sha(body) + "  " + p + "\n"
 	}
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestDeployToSlug_KeepListReadsEachPackOnce(t *testing.T) {
 	counting := &readCountingUnit{BlobUnit: d.Blob}
 	d.Blob = counting
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>two</h1>", ".hostthis-keep": keep})
-	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(arc), owner); err != nil {
+	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(arc), ownerOf(owner)); err != nil {
 		t.Fatalf("keep deploy: %v", err)
 	}
 	if counting.stored != len(packs) || counting.decoded != 0 {
@@ -284,7 +284,7 @@ func TestDeployToSlug_KeepListDefinesTheRoot(t *testing.T) {
 	d, _, blobs := reuseStack(t)
 	owner := "key:root"
 	v1 := map[string]string{"index.html": "<h1>one</h1>", "assets/a.js": "a", "assets/b.js": "b"}
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), owner)
+	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, v1)), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestDeployToSlug_KeepListDefinesTheRoot(t *testing.T) {
 
 	// Only assets/ is sent, so the shared-directory guess would strip it.
 	arc := gzipTar(t, map[string]string{".hostthis-keep": keep, "assets/b.js": "b2"})
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); err != nil {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), ownerOf(owner)); err != nil {
 		t.Fatalf("root keep deploy: %v", err)
 	}
 	_, head := headOf(t, d, slug, owner)
@@ -301,14 +301,14 @@ func TestDeployToSlug_KeepListDefinesTheRoot(t *testing.T) {
 
 	keep2 := "base 2\n" + sha("b2") + "  assets/b.js\n"
 	arc = gzipTar(t, map[string]string{"dist/.hostthis-keep": keep2, "dist/index.html": "<h1>three</h1>", "dist/assets/a.js": "a"})
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); err != nil {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), ownerOf(owner)); err != nil {
 		t.Fatalf("wrapped keep deploy: %v", err)
 	}
 	_, head = headOf(t, d, slug, owner)
 	servesBytes(t, blobs, head, map[string]string{"index.html": "<h1>three</h1>", "assets/a.js": "a", "assets/b.js": "b2"})
 
 	arc = gzipTar(t, map[string]string{"dist/.hostthis-keep": "base 3\n", "stray.txt": "x", "dist/index.html": "y"})
-	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), owner); !errors.Is(err, domain.ErrBadKeepList) {
+	if _, err := d.DeployToSlug(slug, bytes.NewReader(arc), ownerOf(owner)); !errors.Is(err, domain.ErrBadKeepList) {
 		t.Fatalf("file outside the keep root: %v, want ErrBadKeepList", err)
 	}
 }

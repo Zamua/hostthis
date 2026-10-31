@@ -4249,7 +4249,7 @@ edge's own TTL ends. Since purging a slug that did not change is harmless
 its error proves nothing was touched.
 
 "Nothing was touched" means the rejections raised before any write is
-attempted: `ErrNotFound` and `ErrEmptyOwner` from the ownership pre-check,
+attempted: `ErrNotFound` from the ownership pre-check,
 and the refusals of an update's body while it is staged
 (`ErrRawTooLarge`, `ErrCompressedTooLarge`, an empty upload, a local
 staging failure). Excluding them is not an optimisation - it is what stops

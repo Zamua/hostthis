@@ -134,7 +134,7 @@ func TestUpload_Create_ReturnsPending(t *testing.T) {
 	blobs := newFakeBlobs()
 	blobs.holdPut = make(chan struct{})
 	u, repo, done := newStackWithBlobs(t, blobs)
-	res, err := u.Create(bytes.NewReader([]byte("<p>hi</p>")), "owner", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("<p>hi</p>")), ownerOf("key:owner"), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestUpload_Finalize_FencesReplacementIncarnation(t *testing.T) {
 			blobs.failPut = failPut
 			u, repo, done := newStackWithBlobs(t, blobs)
 
-			res, err := u.Create(bytes.NewReader([]byte("<p>old</p>")), "owner", "", "")
+			res, err := u.Create(bytes.NewReader([]byte("<p>old</p>")), ownerOf("key:owner"), "", "")
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
@@ -203,7 +203,7 @@ func TestUpload_Finalize_FencesReplacementIncarnation(t *testing.T) {
 func TestUpload_Finalize_PendingToReady(t *testing.T) {
 	blobs := newFakeBlobs()
 	u, repo, done := newStackWithBlobs(t, blobs)
-	res, err := u.Create(bytes.NewReader([]byte("<p>ready</p>")), "owner", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("<p>ready</p>")), ownerOf("key:owner"), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestUpload_Finalize_BlobFailureToFailed(t *testing.T) {
 	blobs := newFakeBlobs()
 	blobs.failPut = true
 	u, repo, done := newStackWithBlobs(t, blobs)
-	res, err := u.Create(bytes.NewReader([]byte("<p>doomed</p>")), "owner", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("<p>doomed</p>")), ownerOf("key:owner"), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -251,9 +251,9 @@ func TestUpload_Finalize_FailureReleasesQuota(t *testing.T) {
 	blobs := newFakeBlobs()
 	blobs.failPut = true
 	u, repo, done := newStackWithBlobs(t, blobs)
-	owner := "quota-owner"
+	owner := "key:quota-owner"
 
-	res, err := u.Create(bytes.NewReader([]byte("<p>first</p>")), owner, "", "")
+	res, err := u.Create(bytes.NewReader([]byte("<p>first</p>")), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -281,9 +281,9 @@ func TestUpload_Finalize_FailureReleasesQuota(t *testing.T) {
 func TestUpload_Create_QuotaEnforcedSynchronously(t *testing.T) {
 	blobs := newFakeBlobs()
 	u, repo, done := newStackWithBlobs(t, blobs)
-	owner := "cap-owner"
+	owner := "key:cap-owner"
 
-	res, err := u.Create(bytes.NewReader([]byte("<p>counts</p>")), owner, "", "")
+	res, err := u.Create(bytes.NewReader([]byte("<p>counts</p>")), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

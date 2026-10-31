@@ -18,15 +18,15 @@ import (
 func TestUpload_Create_HTML(t *testing.T) {
 	u, _, _ := newStack(t)
 	body := []byte("<!doctype html><p>hi</p>")
-	res, err := u.Create(bytes.NewReader(body), "owner-key-hash", "demo", "")
+	res, err := u.Create(bytes.NewReader(body), ownerOf("key:owner-key-hash"), "demo", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if res.Paste.Kind != domain.KindHTML {
 		t.Fatalf("kind: got %q, want html", res.Paste.Kind)
 	}
-	if string(res.Paste.Identity) != "owner-key-hash" {
-		t.Fatalf("identity: got %q, want %q", res.Paste.Identity, "owner-key-hash")
+	if string(res.Paste.Identity) != "key:owner-key-hash" {
+		t.Fatalf("identity: got %q, want %q", res.Paste.Identity, "key:owner-key-hash")
 	}
 	if res.Paste.Name != "demo" {
 		t.Fatalf("name: got %q, want %q", res.Paste.Name, "demo")
@@ -49,7 +49,7 @@ func TestUpload_Create_HTML(t *testing.T) {
 
 func TestUpload_Create_Markdown(t *testing.T) {
 	u, _, _ := newStack(t)
-	res, err := u.Create(bytes.NewReader([]byte("# Title\n\nbody")), "key:markdown", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("# Title\n\nbody")), ownerOf("key:markdown"), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestUpload_Create_Markdown(t *testing.T) {
 
 func TestUpload_Create_RejectsUnsupportedKind(t *testing.T) {
 	u, _, _ := newStack(t)
-	_, err := u.Create(bytes.NewReader([]byte("\x89PNG\r\n\x1a\n...binary bytes...")), "", "", "")
+	_, err := u.Create(bytes.NewReader([]byte("\x89PNG\r\n\x1a\n...binary bytes...")), ownerOf("key:owner"), "", "")
 	if !errors.Is(err, domain.ErrUnsupportedKind) {
 		t.Fatalf("err: got %v, want ErrUnsupportedKind", err)
 	}
@@ -71,7 +71,7 @@ func TestUpload_Create_RejectsUnsupportedKind(t *testing.T) {
 
 func TestUpload_Create_RejectsEmpty(t *testing.T) {
 	u, _, _ := newStack(t)
-	_, err := u.Create(bytes.NewReader([]byte{}), "", "", "")
+	_, err := u.Create(bytes.NewReader([]byte{}), ownerOf("key:owner"), "", "")
 	if err == nil {
 		t.Fatalf("empty upload should error")
 	}
@@ -81,7 +81,7 @@ func TestUpload_Create_HonorsHint(t *testing.T) {
 	u, _, _ := newStack(t)
 	// "anything goes" looks like neither html nor markdown; the hint forces
 	// html acceptance.
-	res, err := u.Create(bytes.NewReader([]byte("anything goes")), "key:hint", "", "html")
+	res, err := u.Create(bytes.NewReader([]byte("anything goes")), ownerOf("key:hint"), "", "html")
 	if err != nil {
 		t.Fatalf("create with html hint: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestUpload_Create_LogsSlugRemint(t *testing.T) {
 	var buf bytes.Buffer
 	u.Logger = log.New(&buf, "", 0)
 
-	res, err := u.Create(bytes.NewReader([]byte("# remint me")), "key:owner", "", "")
+	res, err := u.Create(bytes.NewReader([]byte("# remint me")), ownerOf("key:owner"), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

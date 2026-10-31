@@ -51,7 +51,7 @@ const testOwner = "key:test-id"
 // newPaste uploads a fresh HTML paste.
 func newPaste(t *testing.T, upload *Upload) domain.Slug {
 	t.Helper()
-	res, err := upload.Create(bytes.NewReader(htmlBody(200)), testOwner, "", "")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), ownerOf(testOwner), "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	t.Run("update", func(t *testing.T) {
 		purger.reset()
 		slug := newPaste(t, upload)
-		if _, err := mgr.Update(slug, testOwner, bytes.NewReader(htmlBody(300)), ""); err != nil {
+		if _, err := mgr.Update(slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		if got := purger.calls(); len(got) != 1 || got[0] != slug {
@@ -77,18 +77,18 @@ func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	})
 	t.Run("pin then unpin", func(t *testing.T) {
 		slug := newPaste(t, upload)
-		if _, err := mgr.Update(slug, testOwner, bytes.NewReader(htmlBody(300)), ""); err != nil {
+		if _, err := mgr.Update(slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		purger.reset()
-		if _, err := mgr.Pin(slug, testOwner, 1); err != nil {
+		if _, err := mgr.Pin(slug, ownerOf(testOwner), 1); err != nil {
 			t.Fatalf("pin: %v", err)
 		}
 		if got := purger.calls(); len(got) != 1 || got[0] != slug {
 			t.Fatalf("pin purge: got %v, want [%s]", got, slug)
 		}
 		purger.reset()
-		if err := mgr.Unpin(slug, testOwner); err != nil {
+		if err := mgr.Unpin(slug, ownerOf(testOwner)); err != nil {
 			t.Fatalf("unpin: %v", err)
 		}
 		if got := purger.calls(); len(got) != 1 || got[0] != slug {
@@ -105,7 +105,7 @@ func TestCacheInvalidating_RenameDoesNotPurge(t *testing.T) {
 	mgr := NewCacheInvalidating(manage, purger)
 
 	slug := newPaste(t, upload)
-	if err := mgr.Rename(slug, testOwner, "a-label"); err != nil {
+	if err := mgr.Rename(slug, ownerOf(testOwner), "a-label"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	if got := purger.calls(); len(got) != 0 {
@@ -121,7 +121,7 @@ func TestCacheInvalidating_PurgeErrorDoesNotFailOp(t *testing.T) {
 	mgr := NewCacheInvalidating(manage, purger)
 
 	slug := newPaste(t, upload)
-	if err := mgr.Delete(slug, testOwner); err != nil {
+	if err := mgr.Delete(slug, ownerOf(testOwner)); err != nil {
 		t.Fatalf("delete returned %v despite purge failure - purge errors must be swallowed", err)
 	}
 	if _, err := repo.Get(slug); err == nil {
@@ -146,31 +146,31 @@ type stubManager struct {
 	err error
 }
 
-func (s stubManager) Delete(domain.Slug, string) error { return s.err }
+func (s stubManager) Delete(domain.Slug, domain.Owner) error { return s.err }
 
-func (s stubManager) Update(domain.Slug, string, io.Reader, string) (UpdateResult, error) {
+func (s stubManager) Update(domain.Slug, domain.Owner, io.Reader, string) (UpdateResult, error) {
 	return UpdateResult{}, s.err
 }
 
-func (s stubManager) Pin(domain.Slug, string, int) (domain.Version, error) {
+func (s stubManager) Pin(domain.Slug, domain.Owner, int) (domain.Version, error) {
 	return domain.Version{}, s.err
 }
 
-func (s stubManager) Unpin(domain.Slug, string) error { return s.err }
+func (s stubManager) Unpin(domain.Slug, domain.Owner) error { return s.err }
 
 // Every mutating verb purges unless its error proves nothing was written: a
 // transport error after the cell committed leaves the new state served.
 func TestMutationsPurgeUnlessNothingWasTouched(t *testing.T) {
 	verbs := map[string]func(PasteManager, domain.Slug) error{
 		"update": func(m PasteManager, s domain.Slug) error {
-			_, err := m.Update(s, testOwner, strings.NewReader("x"), "")
+			_, err := m.Update(s, ownerOf(testOwner), strings.NewReader("x"), "")
 			return err
 		},
 		"pin": func(m PasteManager, s domain.Slug) error {
-			_, err := m.Pin(s, testOwner, 1)
+			_, err := m.Pin(s, ownerOf(testOwner), 1)
 			return err
 		},
-		"unpin": func(m PasteManager, s domain.Slug) error { return m.Unpin(s, testOwner) },
+		"unpin": func(m PasteManager, s domain.Slug) error { return m.Unpin(s, ownerOf(testOwner)) },
 	}
 	for name, call := range verbs {
 		for _, tc := range []struct {
@@ -182,7 +182,6 @@ func TestMutationsPurgeUnlessNothingWasTouched(t *testing.T) {
 			{"transient storage error", assertErr("commit response lost"), true},
 			{"wrapped transient error", fmt.Errorf("append: %w", assertErr("timeout")), true},
 			{"not found", ErrNotFound, false},
-			{"anonymous", ErrEmptyOwner, false},
 			// Raised while staging the body, before ownership is checked.
 			{"too large", ErrRawTooLarge, false},
 			{"compressed too large", ErrCompressedTooLarge, false},
@@ -218,7 +217,7 @@ func TestUpdateOfAnotherOwnersPasteDoesNotPurge(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			purger.reset()
-			if _, err := mgr.Update(slug, "key:someone-else", body, ""); err == nil {
+			if _, err := mgr.Update(slug, ownerOf("key:someone-else"), body, ""); err == nil {
 				t.Fatal("want an error updating another owner's paste")
 			}
 			if got := purger.calls(); len(got) != 0 {
@@ -253,14 +252,13 @@ func TestDeletePurgesUnlessNothingWasTouched(t *testing.T) {
 		// would let any caller spend the CDN purge budget on slugs they do
 		// not own.
 		{"not found", ErrNotFound, false},
-		{"anonymous", ErrEmptyOwner, false},
 		{"wrapped not found", fmt.Errorf("check: %w", ErrNotFound), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			purger := &recordingPurger{}
 			mgr := NewCacheInvalidating(stubManager{err: tc.err}, purger)
 
-			if got := mgr.Delete(domain.Slug("abc12345"), testOwner); got != tc.err {
+			if got := mgr.Delete(domain.Slug("abc12345"), ownerOf(testOwner)); got != tc.err {
 				t.Fatalf("error passthrough: got %v, want %v", got, tc.err)
 			}
 			if gotPurge := len(purger.calls()) == 1; gotPurge != tc.wantPurge {
@@ -282,7 +280,7 @@ func TestDeletePurgeExclusionsMatchRealServiceErrors(t *testing.T) {
 	t.Run("own paste purges", func(t *testing.T) {
 		purger.reset()
 		slug := newPaste(t, upload)
-		if err := mgr.Delete(slug, testOwner); err != nil {
+		if err := mgr.Delete(slug, ownerOf(testOwner)); err != nil {
 			t.Fatalf("delete: %v", err)
 		}
 		if got := purger.calls(); len(got) != 1 || got[0] != slug {
@@ -294,7 +292,7 @@ func TestDeletePurgeExclusionsMatchRealServiceErrors(t *testing.T) {
 	// spend the CDN purge budget on slug you have no rights to.
 	t.Run("absent slug does not purge", func(t *testing.T) {
 		purger.reset()
-		if err := mgr.Delete(domain.Slug("nosuchpp"), testOwner); err == nil {
+		if err := mgr.Delete(domain.Slug("nosuchpp"), ownerOf(testOwner)); err == nil {
 			t.Fatal("want an error deleting an absent slug")
 		}
 		if got := purger.calls(); len(got) != 0 {
@@ -305,7 +303,7 @@ func TestDeletePurgeExclusionsMatchRealServiceErrors(t *testing.T) {
 	t.Run("another owner's paste does not purge", func(t *testing.T) {
 		slug := newPaste(t, upload)
 		purger.reset()
-		if err := mgr.Delete(slug, "key:someone-else"); err == nil {
+		if err := mgr.Delete(slug, ownerOf("key:someone-else")); err == nil {
 			t.Fatal("want an error deleting another owner's paste")
 		}
 		if got := purger.calls(); len(got) != 0 {
@@ -313,14 +311,4 @@ func TestDeletePurgeExclusionsMatchRealServiceErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("anonymous does not purge", func(t *testing.T) {
-		slug := newPaste(t, upload)
-		purger.reset()
-		if err := mgr.Delete(slug, ""); err == nil {
-			t.Fatal("want an error deleting anonymously")
-		}
-		if got := purger.calls(); len(got) != 0 {
-			t.Fatalf("anonymous delete purged %v", got)
-		}
-	})
 }

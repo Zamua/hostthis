@@ -28,10 +28,7 @@ type PodLinkStart struct {
 	Expires time.Time
 }
 
-func (p *Pods) Link(owner, webid string) (PodLinkStart, error) {
-	if owner == "" {
-		return PodLinkStart{}, ErrEmptyOwner
-	}
+func (p *Pods) Link(owner domain.Owner, webid string) (PodLinkStart, error) {
 	parsed, err := domain.ParseWebID(webid)
 	if err != nil {
 		return PodLinkStart{}, err
@@ -41,30 +38,24 @@ func (p *Pods) Link(owner, webid string) (PodLinkStart, error) {
 		Secret:  domain.NewPodLinkSecret(),
 		Expires: p.Now().Add(domain.PodLinkTTL),
 	}
-	if err := p.Repo.StartPodLink(owner, parsed, start.ID, domain.PodLinkSecretHash(start.Secret), start.Expires); err != nil {
+	if err := p.Repo.StartPodLink(owner.String(), parsed, start.ID, domain.PodLinkSecretHash(start.Secret), start.Expires); err != nil {
 		return PodLinkStart{}, err
 	}
 	return start, nil
 }
 
-func (p *Pods) Status(owner string) (*domain.PodLink, error) {
-	if owner == "" {
-		return nil, ErrEmptyOwner
-	}
-	return p.Repo.ActivePodLink(owner)
+func (p *Pods) Status(owner domain.Owner) (*domain.PodLink, error) {
+	return p.Repo.ActivePodLink(owner.String())
 }
 
-func (p *Pods) Unlink(owner string) (bool, error) {
-	if owner == "" {
-		return false, ErrEmptyOwner
-	}
-	return p.Repo.ClearPodLink(owner)
+func (p *Pods) Unlink(owner domain.Owner) (bool, error) {
+	return p.Repo.ClearPodLink(owner.String())
 }
 
 // UploadID mints the id of an owner's next upload: one naming their pod when
 // they have linked one.
-func (p *Pods) UploadID(owner string) (string, error) {
-	link, err := p.Repo.ActivePodLink(owner)
+func (p *Pods) UploadID(owner domain.Owner) (string, error) {
+	link, err := p.Repo.ActivePodLink(owner.String())
 	if err != nil {
 		return "", err
 	}
@@ -75,9 +66,9 @@ func (p *Pods) UploadID(owner string) (string, error) {
 }
 
 // UploadIDSource mints an upload id for an owner; nil mints bucket ids.
-type UploadIDSource func(owner string) (string, error)
+type UploadIDSource func(owner domain.Owner) (string, error)
 
-func (f UploadIDSource) next(owner string) (string, error) {
+func (f UploadIDSource) next(owner domain.Owner) (string, error) {
 	if f == nil {
 		return domain.NewUploadID(), nil
 	}

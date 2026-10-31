@@ -163,7 +163,11 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	files := readDist(t, fixtureDist(t, demo))
 	arc := tarDist(t, files)
 
-	res, err := deploy.Deploy(bytes.NewReader(arc), "key:fixture")
+	owner, err := domain.ParseOwner("key:fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := deploy.Deploy(bytes.NewReader(arc), owner)
 	if err != nil {
 		t.Fatalf("deploy %s fixture: %v", demo, err)
 	}

@@ -114,9 +114,6 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	if o.proxyProto {
-		t.Setenv("HOSTTHIS_SSH_PROXY_PROTOCOL", "true")
-	}
 	endpoint := workertest.Endpoint(t)
 	rawBlobs, err := storage.NewWorkerBlobStore(endpoint, nil)
 	if err != nil {
@@ -147,6 +144,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
 	}
+	sshSrv.ProxyProtocol = o.proxyProto
 	if o.logOut != nil {
 		sshSrv.Logger = log.New(o.logOut, "", 0)
 	}

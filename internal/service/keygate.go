@@ -86,11 +86,11 @@ func (e *SybilRefusal) NextSlotFreesAt() time.Time {
 	return e.OldestEntryFirstSeen.Add(e.Window)
 }
 
-// Admit gates one session. Both identity and ipSubnet must be non-empty.
+// Admit gates one session. ipSubnet must be non-empty.
 // On refusal returns *SybilRefusal (which is also errors.Is(ErrSybilRateLimit)).
-func (g *KeyGate) Admit(identity, ipSubnet string) error {
+func (g *KeyGate) Admit(owner domain.Owner, ipSubnet string) error {
 	now := g.Now().UTC()
-	if _, err := g.Repo.AdmitNewKey(identity, ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window); err != nil {
+	if _, err := g.Repo.AdmitNewKey(owner.String(), ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window); err != nil {
 		// The sentinel is matched by identity through any wrapping, never by
 		// message text.
 		if errors.Is(err, domain.ErrTooManyNewKeys) {
@@ -122,7 +122,7 @@ type SessionInfo struct {
 
 // Inspect returns the rollup KeyGate state for an admitted session. It runs
 // after Admit and never gates admission.
-func (g *KeyGate) Inspect(identity, ipSubnet string) (SessionInfo, error) {
+func (g *KeyGate) Inspect(owner domain.Owner, ipSubnet string) (SessionInfo, error) {
 	if g == nil {
 		return SessionInfo{}, nil
 	}
@@ -131,7 +131,7 @@ func (g *KeyGate) Inspect(identity, ipSubnet string) (SessionInfo, error) {
 	if err != nil {
 		return SessionInfo{}, err
 	}
-	idSubnets, err := g.Repo.SubnetsForIdentity(identity, now, g.Window)
+	idSubnets, err := g.Repo.SubnetsForIdentity(owner.String(), now, g.Window)
 	if err != nil {
 		return SessionInfo{}, err
 	}

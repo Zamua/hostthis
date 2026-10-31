@@ -16,21 +16,21 @@ type stubSites struct {
 	err error
 }
 
-func (s stubSites) DeployToSlug(domain.Slug, io.Reader, string) (SiteResult, error) {
+func (s stubSites) DeployToSlug(domain.Slug, io.Reader, domain.Owner) (SiteResult, error) {
 	return SiteResult{}, s.err
 }
 
-func (s stubSites) Delete(domain.Slug, string) error { return s.err }
+func (s stubSites) Delete(domain.Slug, domain.Owner) error { return s.err }
 
 // A redeploy or delete of a site or knowledge base purges unless its error
 // proves nothing was written, the same rule as the paste verbs.
 func TestSiteWritesPurgeUnlessNothingWasTouched(t *testing.T) {
 	verbs := map[string]func(SiteDeployer, domain.Slug) error{
 		"redeploy": func(d SiteDeployer, s domain.Slug) error {
-			_, err := d.DeployToSlug(s, bytes.NewReader(nil), testOwner)
+			_, err := d.DeployToSlug(s, bytes.NewReader(nil), ownerOf(testOwner))
 			return err
 		},
-		"delete": func(d SiteDeployer, s domain.Slug) error { return d.Delete(s, testOwner) },
+		"delete": func(d SiteDeployer, s domain.Slug) error { return d.Delete(s, ownerOf(testOwner)) },
 	}
 	for name, call := range verbs {
 		for _, tc := range []struct {
@@ -42,7 +42,6 @@ func TestSiteWritesPurgeUnlessNothingWasTouched(t *testing.T) {
 			{"transient storage error", assertErr("commit response lost"), true},
 			{"wrapped transient error", fmt.Errorf("replace: %w", assertErr("timeout")), true},
 			{"not found", ErrNotFound, false},
-			{"anonymous", ErrEmptyOwner, false},
 		} {
 			t.Run(name+"/"+tc.name, func(t *testing.T) {
 				purger := &recordingPurger{}
@@ -67,31 +66,31 @@ func TestSiteCacheInvalidating_RealService(t *testing.T) {
 	arc := func(body string) io.Reader {
 		return bytes.NewReader(gzipTar(t, map[string]string{"index.html": body}))
 	}
-	res, err := d.Deploy(arc("<h1>v1</h1>"), testOwner)
+	res, err := d.Deploy(arc("<h1>v1</h1>"), ownerOf(testOwner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	slug := res.Site.Slug
 	purger.reset()
 
-	if _, err := d.DeployToSlug(slug, arc("<h1>hijack</h1>"), "key:someone-else"); err == nil {
+	if _, err := d.DeployToSlug(slug, arc("<h1>hijack</h1>"), ownerOf("key:someone-else")); err == nil {
 		t.Fatal("want an error redeploying another owner's site")
 	}
-	if err := d.Delete(slug, "key:someone-else"); err == nil {
+	if err := d.Delete(slug, ownerOf("key:someone-else")); err == nil {
 		t.Fatal("want an error deleting another owner's site")
 	}
 	if got := purger.calls(); len(got) != 0 {
 		t.Fatalf("foreign writes purged %v", got)
 	}
 
-	if _, err := d.DeployToSlug(slug, arc("<h1>v2</h1>"), testOwner); err != nil {
+	if _, err := d.DeployToSlug(slug, arc("<h1>v2</h1>"), ownerOf(testOwner)); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	if got := purger.calls(); len(got) != 1 || got[0] != slug {
 		t.Fatalf("redeploy purge: got %v, want [%s]", got, slug)
 	}
 	purger.reset()
-	if err := d.Delete(slug, testOwner); err != nil {
+	if err := d.Delete(slug, ownerOf(testOwner)); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	if got := purger.calls(); len(got) != 1 || got[0] != slug {

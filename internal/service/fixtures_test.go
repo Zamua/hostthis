@@ -20,6 +20,15 @@ import (
 	"github.com/Zamua/hostthis/internal/workertest"
 )
 
+// ownerOf parses a stored `key:...` identity, panicking on a malformed one.
+func ownerOf(s string) domain.Owner {
+	o, err := domain.ParseOwner(s)
+	if err != nil {
+		panic("ownerOf(" + s + "): " + err.Error())
+	}
+	return o
+}
+
 // fixedNow is the clock every real-stack fixture injects.
 var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 

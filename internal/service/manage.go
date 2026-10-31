@@ -66,10 +66,6 @@ type PasteAdmin interface {
 // to outsiders.
 var ErrNotFound = errors.New("service: not found")
 
-// ErrEmptyOwner is returned when an operation requires an identified owner and
-// the caller is anonymous.
-var ErrEmptyOwner = errors.New("service: anonymous - add an ssh key for this command")
-
 // ErrInvalidName is returned by Rename when the name violates the length /
 // unicode rules.
 var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode chars, no newlines")
@@ -86,7 +82,9 @@ type Manage struct {
 	// UploadIDs mints each upload's id, which decides where its bytes are
 	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
 	UploadIDs UploadIDSource
-	Now       func() time.Time
+	// StagingDir holds upload spill files; "" is the OS temp dir.
+	StagingDir string
+	Now        func() time.Time
 	// Logger records object deletions that fail after the outcome is decided.
 	// nil discards.
 	Logger *log.Logger
@@ -96,18 +94,13 @@ func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
 	return &Manage{Repo: repo, Blob: blob, Now: time.Now, Sniff: mime.Detect}
 }
 
-// requireOwner returns the paste if owner matches, else the appropriate
-// sentinel. Only keyed identities (which carry the "key:" prefix) can manage
-// pastes; anonymous and empty owners are rejected.
-func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, error) {
-	if !domain.Identity(owner).IsKeyed() {
-		return domain.Paste{}, ErrEmptyOwner
-	}
+// requireOwner returns the paste if owner owns it, else ErrNotFound.
+func (m *Manage) requireOwner(slug domain.Slug, owner domain.Owner) (domain.Paste, error) {
 	p, err := m.Repo.Get(slug)
 	if err != nil {
 		return domain.Paste{}, ErrNotFound
 	}
-	if p.Identity.String() != owner {
+	if p.Identity != owner.Identity() {
 		// Don't leak existence; surface as ErrNotFound at the boundary.
 		return domain.Paste{}, ErrNotFound
 	}
@@ -115,11 +108,8 @@ func (m *Manage) requireOwner(slug domain.Slug, owner string) (domain.Paste, err
 }
 
 // List returns the owner's pastes.
-func (m *Manage) List(owner string) ([]domain.Paste, error) {
-	if !domain.Identity(owner).IsKeyed() {
-		return nil, ErrEmptyOwner
-	}
-	return m.Repo.ListByOwner(owner)
+func (m *Manage) List(owner domain.Owner) ([]domain.Paste, error) {
+	return m.Repo.ListByOwner(owner.String())
 }
 
 // Show streams the bytes + paste metadata for owner-controlled read. The
@@ -128,7 +118,7 @@ func (m *Manage) List(owner string) ([]domain.Paste, error) {
 // Streamed: the DECOMPRESSED document can be an order of magnitude larger than
 // the compressed per-paste cap that bounds everything else (docs/SPEC.md
 // "Reads are constant-memory too").
-func (m *Manage) Show(slug domain.Slug, owner string) (domain.Paste, io.ReadCloser, error) {
+func (m *Manage) Show(slug domain.Slug, owner domain.Owner) (domain.Paste, io.ReadCloser, error) {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return domain.Paste{}, nil, err
@@ -156,12 +146,12 @@ type UpdateResult struct {
 // Update appends a new version to an existing slug. On an UNPINNED paste the
 // new version also becomes the served one; on a PINNED paste the pin holds and
 // the new version is recorded but not served.
-func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint string) (UpdateResult, error) {
+func (m *Manage) Update(slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error) {
 	uploadID, err := m.UploadIDs.next(owner)
 	if err != nil {
 		return UpdateResult{}, fmt.Errorf("upload id: %w", err)
 	}
-	staged, err := streamUpload(body)
+	staged, err := streamUpload(body, m.StagingDir)
 	defer staged.discard()
 	switch {
 	case errors.Is(err, errRawCapExceeded):
@@ -220,7 +210,7 @@ func (m *Manage) Update(slug domain.Slug, owner string, body io.Reader, typeHint
 }
 
 // Rename sets the human label. Empty string clears it.
-func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
+func (m *Manage) Rename(slug domain.Slug, owner domain.Owner, name string) error {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return err
@@ -237,7 +227,7 @@ func (m *Manage) Rename(slug domain.Slug, owner, name string) error {
 // bytes. A delete whose paste row is already gone but whose slug lingers in the
 // caller's own index heals that residue and succeeds (docs/SPEC.md "Delete
 // heals its own lost tail").
-func (m *Manage) Delete(slug domain.Slug, owner string) error {
+func (m *Manage) Delete(slug domain.Slug, owner domain.Owner) error {
 	p, err := m.requireOwner(slug, owner)
 	if err != nil {
 		if !errors.Is(err, ErrNotFound) {
@@ -248,7 +238,7 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 		// this verb's job. The repo drops nothing unless the row is absent AND
 		// the slug sits in the CALLER's index, so a live slug, whoever owns it,
 		// still answers not-found.
-		healed, herr := m.Repo.DropStaleOwnerEntry(slug, owner)
+		healed, herr := m.Repo.DropStaleOwnerEntry(slug, owner.String())
 		if herr != nil {
 			return fmt.Errorf("heal stale owner entry: %w", herr)
 		}
@@ -271,7 +261,7 @@ func (m *Manage) Delete(slug domain.Slug, owner string) error {
 
 // Versions returns the slug's full history (newest first), including
 // tombstoned rows, which the `versions` verb renders with a `deleted` marker.
-func (m *Manage) Versions(slug domain.Slug, owner string) ([]domain.Version, error) {
+func (m *Manage) Versions(slug domain.Slug, owner domain.Owner) ([]domain.Version, error) {
 	if _, err := m.requireOwner(slug, owner); err != nil {
 		return nil, err
 	}
@@ -302,7 +292,7 @@ var ErrVersionCurrentlyServed = errors.New("service: version is currently served
 //
 // The freed byte count is the charge the delete released, which is less than
 // the version's size when its neighbours share its objects.
-func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (DeleteVersionResult, error) {
+func (m *Manage) DeleteVersion(slug domain.Slug, owner domain.Owner, verNum int) (DeleteVersionResult, error) {
 	paste, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return DeleteVersionResult{}, err
@@ -346,7 +336,7 @@ func (m *Manage) DeleteVersion(slug domain.Slug, owner string, verNum int) (Dele
 }
 
 // Pin makes the public URL serve verNum and stick there across later updates.
-func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version, error) {
+func (m *Manage) Pin(slug domain.Slug, owner domain.Owner, verNum int) (domain.Version, error) {
 	paste, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return domain.Version{}, err
@@ -366,7 +356,7 @@ func (m *Manage) Pin(slug domain.Slug, owner string, verNum int) (domain.Version
 
 // Unpin clears a sticky pin, reverting the URL to "always serve the latest
 // version".
-func (m *Manage) Unpin(slug domain.Slug, owner string) error {
+func (m *Manage) Unpin(slug domain.Slug, owner domain.Owner) error {
 	paste, err := m.requireOwner(slug, owner)
 	if err != nil {
 		return err
@@ -376,7 +366,7 @@ func (m *Manage) Unpin(slug domain.Slug, owner string) error {
 
 // WhoamiInfo is the per-owner summary the `whoami` verb renders.
 type WhoamiInfo struct {
-	Identity   string
+	Owner      domain.Owner
 	Active     int
 	FirstSeen  time.Time
 	UsedBytes  int         // compressed bytes summed across active non-deleted versions
@@ -384,18 +374,15 @@ type WhoamiInfo struct {
 	Session    SessionInfo // per-session keygate state; zero value if KeyGate isn't wired
 }
 
-// Whoami populates WhoamiInfo for an owner (key fingerprint). An empty subnet,
+// Whoami populates WhoamiInfo for an owner. An empty subnet,
 // or a nil KeyGate, leaves the session fields zero.
-func (m *Manage) Whoami(owner, subnet string) (WhoamiInfo, error) {
-	if !domain.Identity(owner).IsKeyed() {
-		return WhoamiInfo{}, ErrEmptyOwner
-	}
-	sum, err := m.Repo.OwnerSummary(owner, m.Now().UTC())
+func (m *Manage) Whoami(owner domain.Owner, subnet string) (WhoamiInfo, error) {
+	sum, err := m.Repo.OwnerSummary(owner.String(), m.Now().UTC())
 	if err != nil {
 		return WhoamiInfo{}, err
 	}
 	info := WhoamiInfo{
-		Identity:  owner,
+		Owner:     owner,
 		Active:    sum.Active,
 		FirstSeen: sum.FirstSeen,
 		// Paste + site bytes: the same combined total the quota check

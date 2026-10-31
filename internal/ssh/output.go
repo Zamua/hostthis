@@ -291,7 +291,7 @@ type sessionView struct {
 // the human render shows. The digest is hex, not `ssh-keygen -lf`'s base64.
 func newWhoamiView(info service.WhoamiInfo) whoamiView {
 	v := whoamiView{
-		Key:          strings.TrimPrefix(info.Identity, domain.IdentityKeyPrefix),
+		Key:          info.Owner.Fingerprint(),
 		ActivePastes: info.Active,
 		UsedBytes:    info.UsedBytes,
 	}

@@ -39,9 +39,10 @@ var errCompressedCapExceeded = errors.New("compressed cap exceeded")
 // materialized; peak memory is a chunk buffer plus the compressor window.
 //
 // Returns errRawCapExceeded, errCompressedCapExceeded, or any other error
-// verbatim. On error the spill file is already removed.
-func streamUpload(r io.Reader) (stagedUpload, error) {
-	f, ferr := os.CreateTemp(os.Getenv("HOSTTHIS_STAGING_DIR"), "hostthis-paste-*")
+// verbatim. On error the spill file is already removed. An empty dir is the OS
+// temp dir.
+func streamUpload(r io.Reader, dir string) (stagedUpload, error) {
+	f, ferr := os.CreateTemp(dir, "hostthis-paste-*")
 	if ferr != nil {
 		return stagedUpload{}, fmt.Errorf("staging temp: %w", ferr)
 	}
