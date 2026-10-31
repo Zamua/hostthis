@@ -70,6 +70,14 @@ test("growth past the owner's quota is refused and leaves the app as it was", as
   assert.equal((await ownerBytes(w)).roomBytes, 400);
 });
 
+test("a shrink sent without a ceiling, as a delete is, still releases the charge", async () => {
+  const w = world();
+  assert.equal((await decide(w, 1, 1000)).status, 200);
+  const res = await w.paste().roomDecide({ app: "appslug1", room: ROOM, version: 2, targetBytes: 0, appCap: 0 });
+  assert.equal(res.status, 200);
+  assert.deepStrictEqual(await ownerBytes(w), { bytes: 0, roomBytes: 0 });
+});
+
 test("an upload counts the owner's room bytes against the quota", async () => {
   const w = world();
   assert.equal((await decide(w, 1, 1000)).status, 200);

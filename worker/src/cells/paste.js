@@ -222,9 +222,13 @@ export class Paste {
       if (!decision.record) {
         return Response.json(decision.body, { status: decision.status });
       }
-      // Only a decision that moves the app's total touches the owner charge,
-      // and only while room ceilings are enforced at all (appCap 0 is none).
-      const moves = decision.body.granted && decision.nextTotal !== total && body.appCap > 0;
+      // Growth is charged only while room ceilings are enforced (appCap 0 is
+      // none); a shrink, which rooms send without a ceiling, releases whatever
+      // charge the owner holds.
+      const changed = decision.body.granted && decision.nextTotal !== total;
+      const moves = changed && (decision.nextTotal > total
+        ? body.appCap > 0
+        : (await storage.get("roomOwnerCharge")) !== undefined);
       const owner = moves ? await this.settleRoomOwner(body.app) : { identity: null };
       if (owner.unavailable) {
         return Response.json({ error: "owner-charge-unavailable" }, { status: 502 });
