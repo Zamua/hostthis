@@ -1,7 +1,10 @@
 package ssh
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,80 +59,109 @@ func TestParseOutputFormat(t *testing.T) {
 	}
 }
 
-// TestListItem pins the list-row mapper for pastes and sites: naming, the
-// served/latest/pinned triple, and SIZE as what the QUOTA CHARGED (every live
-// version for a paste, StoredBytes for a site), so a list sums to the figure
-// whoami shows. served_size_bytes carries the served version's own size so a
-// JSON consumer never has to infer which number it holds.
-func TestListItem(t *testing.T) {
-	ip := func(n int) *int { return &n }
+// listOutput renders the list verb for the given rows.
+func listOutput(t *testing.T, format outputFormat, pastes []domain.Paste, sites []domain.Site) (string, string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if err := writeList(&stdout, &stderr, format, newListView(pastes, sites)); err != nil {
+		t.Fatalf("writeList: %v", err)
+	}
+	return stdout.String(), stderr.String()
+}
+
+// listJSON is the list verb's -o json array, one object per row.
+func listJSON(t *testing.T, pastes []domain.Paste, sites []domain.Site) []map[string]any {
+	t.Helper()
+	out, _ := listOutput(t, formatJSON, pastes, sites)
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("list json %q: %v", out, err)
+	}
+	return rows
+}
+
+// The list -o json row: naming, the served/latest/pinned triple, and
+// size_bytes as what the QUOTA CHARGED (every live version for a paste,
+// StoredBytes for a site), so a list sums to the figure whoami shows.
+// served_size_bytes carries the served version's own size so a consumer never
+// has to infer which number it holds.
+func TestListJSONRow(t *testing.T) {
 	man := domain.NewManifest()
 	man.Add("index.html", domain.ManifestEntry{Key: "a", Size: 4000})
 	cases := []struct {
-		name       string
-		item       listItemView
-		kind       string
-		size       int
-		servedSize *int
-		multi      bool
-		served     *int
-		latest     *int
-		pinned     *int
+		name  string
+		paste *domain.Paste
+		site  *domain.Site
+		want  map[string]any
 	}{
 		{"unnamed paste keeps empty name, not the table dash",
-			newPasteListItem(domain.Paste{Slug: "abc12345", Kind: "html"}),
-			"html", 0, ip(0), false, ip(0), ip(0), ip(0)},
+			&domain.Paste{Slug: "abc12345", Kind: "html"}, nil,
+			map[string]any{"name": "", "kind": "html", "size_bytes": 0.0, "served_size_bytes": 0.0, "served_version": 0.0, "latest_version": 0.0, "pinned_version": 0.0}},
 		{"unpinned serves latest",
-			newPasteListItem(domain.Paste{Slug: "s", Kind: "html", LatestVersion: 5, Size: 7}),
-			"html", 7, ip(7), false, ip(5), ip(5), ip(0)},
+			&domain.Paste{Slug: "s", Kind: "html", LatestVersion: 5, Size: 7}, nil,
+			map[string]any{"kind": "html", "size_bytes": 7.0, "served_size_bytes": 7.0, "served_version": 5.0, "latest_version": 5.0, "pinned_version": 0.0}},
 		{"pinned serves the pin",
-			newPasteListItem(domain.Paste{Slug: "s", Kind: "html", PinnedVersion: 3, LatestVersion: 5, Size: 7}),
-			"html", 7, ip(7), false, ip(3), ip(5), ip(3)},
-		{"multi-version paste is charged every live version and flagged",
-			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 14266, StoredBytes: 40890, LatestVersion: 3}),
-			"html", 40890, ip(14266), true, ip(3), ip(3), ip(0)},
-		{"single-version paste is unflagged",
-			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 500, StoredBytes: 500, LatestVersion: 1}),
-			"html", 500, ip(500), false, ip(1), ip(1), ip(0)},
+			&domain.Paste{Slug: "s", Kind: "html", PinnedVersion: 3, LatestVersion: 5, Size: 7}, nil,
+			map[string]any{"size_bytes": 7.0, "served_version": 3.0, "latest_version": 5.0, "pinned_version": 3.0}},
+		{"multi-version paste is charged every live version",
+			&domain.Paste{Slug: "p", Kind: "html", Size: 14266, StoredBytes: 40890, LatestVersion: 3}, nil,
+			map[string]any{"size_bytes": 40890.0, "served_size_bytes": 14266.0, "served_version": 3.0}},
 		{"absent stored total falls back to the served size, never zero",
-			newPasteListItem(domain.Paste{Slug: "p", Kind: "html", Size: 777, LatestVersion: 1}),
-			"html", 777, ip(777), false, ip(1), ip(1), ip(0)},
+			&domain.Paste{Slug: "p", Kind: "html", Size: 777, LatestVersion: 1}, nil,
+			map[string]any{"size_bytes": 777.0, "served_size_bytes": 777.0}},
 		{"site is charged StoredBytes, not the manifest total, with null versions",
-			newSiteListItem(domain.Site{Slug: "sitezzz1", Kind: domain.KindSite, Manifest: man, StoredBytes: 1500}),
-			"site", 1500, nil, false, nil, nil, nil},
+			nil, &domain.Site{Slug: "sitezzz1", Kind: domain.KindSite, Manifest: man, StoredBytes: 1500},
+			map[string]any{"kind": "site", "size_bytes": 1500.0, "served_size_bytes": nil, "served_version": nil, "latest_version": nil, "pinned_version": nil}},
 		{"a knowledge base lists under its own kind, not as a site",
-			newSiteListItem(domain.Site{Slug: "kbasezz1", Kind: domain.KindKnowledgeBase, Manifest: man, StoredBytes: 900}),
-			"knowledgebase", 900, nil, false, nil, nil, nil},
+			nil, &domain.Site{Slug: "kbasezz1", Kind: domain.KindKnowledgeBase, Manifest: man, StoredBytes: 900},
+			map[string]any{"kind": "knowledgebase", "size_bytes": 900.0}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tc.item
-			if got.Name != "" || got.Kind != tc.kind || got.SizeBytes != tc.size || got.multiVersion != tc.multi {
-				t.Fatalf("name %q kind %q size %d multi %v, want \"\" %q %d %v",
-					got.Name, got.Kind, got.SizeBytes, got.multiVersion, tc.kind, tc.size, tc.multi)
+			var pastes []domain.Paste
+			var sites []domain.Site
+			if tc.paste != nil {
+				pastes = append(pastes, *tc.paste)
 			}
-			for _, f := range []struct {
-				name      string
-				got, want *int
-			}{
-				{"served_size_bytes", got.ServedSizeBytes, tc.servedSize},
-				{"served_version", got.ServedVersion, tc.served},
-				{"latest_version", got.LatestVersion, tc.latest},
-				{"pinned_version", got.PinnedVersion, tc.pinned},
-			} {
-				if (f.got == nil) != (f.want == nil) || (f.got != nil && *f.got != *f.want) {
-					t.Fatalf("%s: got %v want %v", f.name, deref(f.got), deref(f.want))
+			if tc.site != nil {
+				sites = append(sites, *tc.site)
+			}
+			rows := listJSON(t, pastes, sites)
+			if len(rows) != 1 {
+				t.Fatalf("rows = %v, want one", rows)
+			}
+			for k, want := range tc.want {
+				got, ok := rows[0][k]
+				if !ok || !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s = %v (present %v), want %v; row %v", k, got, ok, want, rows[0])
 				}
 			}
 		})
 	}
 }
 
-func deref(p *int) any {
-	if p == nil {
-		return nil
+// An empty list is [] in json mode and one stderr line in table mode.
+func TestListEmpty(t *testing.T) {
+	if out, errOut := listOutput(t, formatJSON, nil, nil); strings.TrimSpace(out) != "[]" || errOut != "" {
+		t.Fatalf("json = (%q, %q), want [] and no stderr", out, errOut)
 	}
-	return *p
+	if out, errOut := listOutput(t, formatTable, nil, nil); out != "" || errOut != "no active pastes\n" {
+		t.Fatalf("table = (%q, %q)", out, errOut)
+	}
+}
+
+// The table explains a SIZE above the served version only when some row is
+// charged for more than one version.
+func TestListTableMultiVersionNote(t *testing.T) {
+	const note = "SIZE counts every live version"
+	single := domain.Paste{Slug: "single12", Kind: "html", Size: 500, StoredBytes: 500, LatestVersion: 1}
+	multi := domain.Paste{Slug: "multi123", Kind: "html", Size: 500, StoredBytes: 1500, LatestVersion: 3}
+	if _, errOut := listOutput(t, formatTable, []domain.Paste{single}, nil); strings.Contains(errOut, note) {
+		t.Fatalf("single-version list carries the note: %q", errOut)
+	}
+	if _, errOut := listOutput(t, formatTable, []domain.Paste{single, multi}, nil); !strings.Contains(errOut, note) {
+		t.Fatalf("multi-version list lacks the note: %q", errOut)
+	}
 }
 
 func TestNewVersionsView(t *testing.T) {

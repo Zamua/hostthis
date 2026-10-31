@@ -622,27 +622,26 @@ func (s *Server) verbList(sess gossh.Session, owner domain.Owner, argv []string)
 			return
 		}
 	}
-	items := newListView(pastes, sites)
-
-	if format == formatJSON {
-		// json mode: stdout carries only the array (empty [] when nothing is
-		// active), with no "no active pastes" stderr line.
-		if err := writeJSON(sess, items); err != nil {
-			emitServiceErr(sess, err)
-			return
-		}
-		_ = sess.Exit(ExitOK)
+	if err := writeList(sess, sess.Stderr(), format, newListView(pastes, sites)); err != nil {
+		emitServiceErr(sess, err)
 		return
 	}
+	_ = sess.Exit(ExitOK)
+}
 
+// writeList renders the list verb's output. json mode writes only the array
+// (empty [] when nothing is active), with no "no active pastes" line.
+func writeList(stdout, stderr io.Writer, format outputFormat, items []listItemView) error {
+	if format == formatJSON {
+		return writeJSON(stdout, items)
+	}
 	if len(items) == 0 {
-		fmt.Fprintln(sess.Stderr(), "no active pastes")
-		_ = sess.Exit(ExitOK)
-		return
+		_, _ = fmt.Fprintln(stderr, "no active pastes")
+		return nil
 	}
 	// The header goes on stdout, not stderr: stdout/stderr interleaving is
 	// non-deterministic over ssh, so a stderr header can arrive after the rows.
-	tw := tabwriter.NewWriter(sess, 0, 0, 2, ' ', 0)
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	// SIZE is what the item COSTS the owner (every live version for a paste),
 	// so the column sums to whoami.
 	_, _ = fmt.Fprintln(tw, "SLUG\tNAME\tSIZE\tKIND\tVERS")
@@ -659,10 +658,10 @@ func (s *Server) verbList(sess gossh.Session, owner domain.Owner, argv []string)
 	// cannot explain the gap on its own: a paste at v3 with v1 deleted is
 	// charged for two.
 	if MultiVersionNote(items) {
-		_, _ = fmt.Fprintln(sess.Stderr(),
+		_, _ = fmt.Fprintln(stderr,
 			"\nSIZE counts every live version. Run `versions <slug>` for the per-version breakdown.")
 	}
-	_ = sess.Exit(ExitOK)
+	return nil
 }
 
 // -- show -------------------------------------------------------------------
