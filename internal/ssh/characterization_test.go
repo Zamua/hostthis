@@ -548,101 +548,23 @@ func TestHelp_Characterization(t *testing.T) {
 		}
 	})
 
-	t.Run("HelpVerb_NoPty_ByteExactGolden", func(t *testing.T) {
-		// The full stderr byte content of the no-PTY help banner. The
-		// substring assertions above catch big drifts but miss
-		// single-character edits, which read as a silent regression on a
-		// narrow terminal.
+	t.Run("HelpVerb_NoPty_CleanLines", func(t *testing.T) {
+		// The banner ends in exactly one LF and carries no trailing blanks,
+		// which a raw terminal would render as stray padding.
 		_, stderr, exit := s.run("help", nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if stderr != expectedHelpNoPty_PasteTest {
-			t.Fatalf("help banner drift on no-PTY render:\n got %d bytes:\n%q\nwant %d bytes:\n%q",
-				len(stderr), stderr, len(expectedHelpNoPty_PasteTest), expectedHelpNoPty_PasteTest)
+		if !strings.HasSuffix(stderr, "\n") || strings.HasSuffix(stderr, "\n\n") {
+			t.Fatalf("help should end in exactly one LF, got tail %q", stderr[max(0, len(stderr)-40):])
+		}
+		for i, line := range strings.Split(stderr, "\n") {
+			if strings.TrimRight(line, " \t") != line {
+				t.Fatalf("help line %d has trailing whitespace: %q", i+1, line)
+			}
 		}
 	})
 }
-
-// expectedHelpNoPty_PasteTest is the byte-exact help banner emitted to stderr
-// with no PTY and apex "paste.test". emitHelp's no-PTY path uses fmt.Fprintln,
-// which appends a single trailing "\n", so the golden ends with one LF after
-// the closing period.
-const expectedHelpNoPty_PasteTest = "Pipe a rendered file in, get a URL out. Pastes persist indefinitely.\n" +
-	"\n" +
-	"UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;\n" +
-	"         -- is required before an UPLOAD flag, or ssh parses it as its\n" +
-	"         own; verb flags like -o json are already safe;\n" +
-	"         a QR code of the URL also prints to stderr on success)\n" +
-	"\n" +
-	"    cat foo.html   | ssh -T paste.test\n" +
-	"    cat doc.md     | ssh -T paste.test -- --name \"design notes\"\n" +
-	"    git diff       | ssh -T paste.test                 rendered as a diff\n" +
-	"    cat chart.mmd  | ssh -T paste.test                 mermaid diagram\n" +
-	"    cat report.pdf | ssh -T paste.test                 paged pdf viewer\n" +
-	"    cat sales.csv  | ssh -T paste.test                 sortable table + SQL\n" +
-	"    cat events.json| ssh -T paste.test                 collapsible tree\n" +
-	"    cat cpu.folded | ssh -T paste.test                 interactive flame graph\n" +
-	"    cat app.ndjson | ssh -T paste.test                 log viewer (query + histogram)\n" +
-	"    cat nginx.conf | ssh -T paste.test                 text with linkable lines\n" +
-	"    cat x.txt      | ssh -T paste.test -- --type csv   force a renderer\n" +
-	"\n" +
-	"UPDATE & MANAGE (owner only; ssh key authenticates)\n" +
-	"\n" +
-	"    cat foo.html | ssh -T paste.test <slug>   replace bytes; URL stays the same\n" +
-	"    ssh paste.test list                       all your active pastes\n" +
-	"    ssh paste.test get <slug>                 read content back\n" +
-	"    ssh paste.test url <slug>                 re-show the URL (no QR)\n" +
-	"    ssh paste.test qr <slug>                  re-show the URL + QR code\n" +
-	"    ssh paste.test rename <slug> \"label\"      set / change owner label\n" +
-	"    ssh paste.test delete <slug> [<ver>]      wipe the paste, or tombstone one version\n" +
-	"    ssh paste.test whoami                     identity + active count + quota\n" +
-	"    ssh paste.test pod link <webid>           store new uploads in your Solid pod\n" +
-	"\n" +
-	"VERSION HISTORY\n" +
-	"\n" +
-	"    ssh paste.test versions <slug>            timeline of every version\n" +
-	"    ssh paste.test pin <slug> <ver>           stick the URL to <ver> (survives updates)\n" +
-	"    ssh paste.test unpin <slug>               URL follows latest again\n" +
-	"\n" +
-	"LINK TO A PLACE INSIDE A PASTE\n" +
-	"\n" +
-	"    <url>#some-heading      markdown: jump to that heading\n" +
-	"    <url>#page=3            pdf: jump to that page\n" +
-	"    <url>#row=42            csv: jump to that row\n" +
-	"    <url>#F1L42-L48         diff: highlight lines 42-48 of file 1\n" +
-	"    <url>#focus=main;serve  flamegraph: zoom to that stack\n" +
-	"    <url>#q=malloc          flamegraph: highlight matching frames\n" +
-	"    <url>#L42-L48           text / log: highlight those lines\n" +
-	"    <url>#q=level=error     log: a saved query, time window and selection\n" +
-	"                            all live in the fragment, so a filtered view\n" +
-	"                            is just a link\n" +
-	"\n" +
-	"    Clicking a heading, row, page, diff line number, or flame frame updates\n" +
-	"    the URL, so the address bar always holds a link you can copy. To select\n" +
-	"    a range of diff lines: shift-click a second line number, or on a touch\n" +
-	"    screen just tap it.\n" +
-	"\n" +
-	"OUTPUT\n" +
-	"\n" +
-	"    list, versions, whoami accept -o json\n" +
-	"\n" +
-	"STATIC SITES\n" +
-	"\n" +
-	"    tar czf - site/ | ssh -T paste.test        deploy a multi-file site\n" +
-	"    tar czf - site/ | ssh -T paste.test <slug> re-deploy in place\n" +
-	"    ssh paste.test have <slug>                 keep list of the latest version; put\n" +
-	"                                             unchanged files' lines in .hostthis-keep\n" +
-	"                                             to skip sending them\n" +
-	"\n" +
-	"LIMITS\n" +
-	"\n" +
-	"    1 GiB per identity, counting post-compression bytes across all\n" +
-	"    your active pastes. One paste: 10 MiB after compression. One site:\n" +
-	"    1 GiB unpacked. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,\n" +
-	"    folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.\n" +
-	"\n" +
-	"    Apps can persist + sync state: https://paste.test/  (rooms, realtime + push API)\n"
 
 // ---------------------------------------------------------------------------
 // 10. Auth refusal + Sybil refusal

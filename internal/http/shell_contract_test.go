@@ -48,16 +48,18 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 	src := []byte("# title\n\nsome **body**\n")
 	for kind, sh := range shells {
 		t.Run(string(kind), func(t *testing.T) {
+			// The shell's exact bytes and CSP are pinned by shells-golden.json.
+			first := serveReady(t, kind, "abc23456", keyA, src, "/p/abc23456", "text/html")
 			for _, accept := range []string{"text/html,application/xhtml+xml", "*/*"} {
 				w := serveReady(t, kind, "abc23456", keyA, src, "/p/abc23456", accept)
 				if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
 					t.Errorf("Accept %q: Content-Type %q, want the shell", accept, ct)
 				}
-				if got := w.Body.Bytes(); string(got) != string(sh.html(kind)) {
-					t.Errorf("Accept %q: body is not the shell page", accept)
+				if w.Body.String() != first.Body.String() || strings.Contains(w.Body.String(), "some **body**") {
+					t.Errorf("Accept %q: body is not the content-free shell page", accept)
 				}
-				if csp := w.Header().Get("Content-Security-Policy"); csp != sh.policy() {
-					t.Errorf("Accept %q: CSP %q, want %q", accept, csp, sh.policy())
+				if csp := w.Header().Get("Content-Security-Policy"); csp == "" || csp != first.Header().Get("Content-Security-Policy") {
+					t.Errorf("Accept %q: CSP %q, want the shell's", accept, csp)
 				}
 				if cc := w.Header().Get("Cache-Control"); cc != "public, no-cache" {
 					t.Errorf("Accept %q: Cache-Control %q, want public, no-cache", accept, cc)
