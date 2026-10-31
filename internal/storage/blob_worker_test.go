@@ -1,10 +1,12 @@
 package storage_test
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"strconv"
 	"sync/atomic"
@@ -161,4 +163,52 @@ func TestWorkerBlob_RetriesADroppedRead(t *testing.T) {
 		t.Fatalf("range after one dropped connection: %v", err)
 	}
 	_ = rc.Close()
+}
+
+// A seekable put whose connection drops mid-body is resent whole, once; a
+// streamed body is not, since it cannot be replayed.
+func TestWorkerBlob_RetriesADroppedSeekablePut(t *testing.T) {
+	var calls atomic.Int32
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = io.CopyN(io.Discard, r.Body, 100)
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+			return
+		}
+		got, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	s, err := storage.NewWorkerBlobStore(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := bytes.Repeat([]byte("hostthis"), 64<<10)
+	spill, err := os.CreateTemp(t.TempDir(), "spill-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spill.Close() //nolint:errcheck
+	if _, err := spill.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spill.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put("uploads/u/0", spill, int64(len(body))); err != nil {
+		t.Fatalf("put after one dropped connection: %v", err)
+	}
+	if calls.Load() != 2 || !bytes.Equal(got, body) {
+		t.Fatalf("calls %d, resent %d of %d bytes intact: %v", calls.Load(), len(got), len(body), bytes.Equal(got, body))
+	}
+
+	calls.Store(0)
+	if err := s.Put("uploads/u/1", &patternReader{left: int64(len(body))}, int64(len(body))); err == nil {
+		t.Fatal("streamed put after a dropped connection = nil, want the error")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("streamed put sent %d times, want 1", calls.Load())
+	}
 }
