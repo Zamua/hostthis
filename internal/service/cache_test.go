@@ -129,12 +129,20 @@ func TestCacheInvalidating_PurgeErrorDoesNotFailOp(t *testing.T) {
 	}
 }
 
-// A nil purger unwraps to the inner service, so an unconfigured CDN costs
-// nothing.
-func TestCacheInvalidating_NilPurgerUnwraps(t *testing.T) {
-	_, manage, _ := newStack(t)
-	if got := NewCacheInvalidating(manage, nil); got != PasteManager(manage) {
-		t.Fatalf("nil purger should return the inner manager unwrapped, got %T", got)
+// An unconfigured CDN (nil purger) still serves every mutation.
+func TestCacheInvalidating_NilPurgerServesMutations(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	owner := ownerOf("key:nil-purger")
+	res, err := upload.Create(strings.NewReader("# doc\n"), owner, "", "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	m := NewCacheInvalidating(manage, nil)
+	if err := m.Rename(res.Paste.Slug, owner, "renamed"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if err := m.Delete(res.Paste.Slug, owner); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
 }
 

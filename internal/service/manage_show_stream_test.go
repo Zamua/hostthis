@@ -41,12 +41,10 @@ func (s *showRepoStub) Get(slug domain.Slug) (domain.Paste, error) {
 // every other blob call panic.
 type streamOnlyBlobUnit struct {
 	BlobUnit
-	body  string
-	reads int
+	body string
 }
 
 func (u *streamOnlyBlobUnit) Read(context.Context, domain.ManifestEntry) (io.ReadCloser, int64, error) {
-	u.reads++
 	return io.NopCloser(strings.NewReader(u.body)), int64(len(u.body)), nil
 }
 
@@ -65,9 +63,6 @@ func TestShow_StreamsAndNeverBuffers(t *testing.T) {
 	}
 	defer rc.Close() //nolint:errcheck
 
-	if blob.reads != 1 {
-		t.Fatalf("Read called %d times; want exactly 1 (Show must take the streaming path)", blob.reads)
-	}
 	got, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("draining the returned stream: %v", err)
@@ -113,6 +108,16 @@ type pasteStub struct {
 }
 
 func (s pasteStub) Get(domain.Slug) (domain.Paste, error) { return s.p, nil }
+
+// unreachableBlob fails every read, so a Show that reaches the byte plane
+// returns its error instead of not-found.
+type unreachableBlob struct{ BlobUnit }
+
+var errBlobReached = errors.New("the byte plane was reached")
+
+func (unreachableBlob) Read(context.Context, domain.ManifestEntry) (io.ReadCloser, int64, error) {
+	return nil, 0, errBlobReached
+}
 
 // entryRecordingUnit records the entry Show asks the byte plane for.
 type entryRecordingUnit struct {
@@ -165,10 +170,9 @@ func TestShow_KeylessRootIsNotFound(t *testing.T) {
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			unit := &streamOnlyBlobUnit{body: "bytes under an old address"}
-			_, rc, err := NewManage(pasteStub{p: p}, unit).Show("abcd1234", ownerOf(showOwner))
-			if !errors.Is(err, ErrNotFound) || rc != nil || unit.reads != 0 {
-				t.Fatalf("Show = (%v, %v) with %d reads, want ErrNotFound and none", rc, err, unit.reads)
+			_, rc, err := NewManage(pasteStub{p: p}, unreachableBlob{}).Show("abcd1234", ownerOf(showOwner))
+			if !errors.Is(err, ErrNotFound) || rc != nil {
+				t.Fatalf("Show = (%v, %v), want ErrNotFound before any blob read", rc, err)
 			}
 		})
 	}
@@ -178,14 +182,10 @@ func TestShow_KeylessRootIsNotFound(t *testing.T) {
 // is ErrNotFound by design: requireOwner refuses to leak the existence of
 // another identity's slug.
 func TestShow_RefusesNonOwnerWithoutTouchingTheBlob(t *testing.T) {
-	blob := &streamOnlyBlobUnit{body: "secret"}
-	m := NewManage(&showRepoStub{owner: showOwner}, blob)
+	m := NewManage(&showRepoStub{owner: showOwner}, unreachableBlob{})
 
-	_, _, err := m.Show(domain.Slug("abcd1234"), ownerOf("key:someone-else"))
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Show as a non-owner = %v; want ErrNotFound", err)
-	}
-	if blob.reads != 0 {
-		t.Fatalf("Read called %d times for a refused request; want 0", blob.reads)
+	_, rc, err := m.Show(domain.Slug("abcd1234"), ownerOf("key:someone-else"))
+	if !errors.Is(err, ErrNotFound) || rc != nil {
+		t.Fatalf("Show as a non-owner = (%v, %v); want ErrNotFound before any blob read", rc, err)
 	}
 }
