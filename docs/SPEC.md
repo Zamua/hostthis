@@ -3740,7 +3740,7 @@ specified under "Room storage."
 ### Moving cells between runtimes
 
 A deployment moves between runtimes (celld and Cloudflare Workers) by copying
-each cell whole. Every cell class answers three internal paths on its own
+each cell whole. Every cell class answers four internal paths on its own
 `fetch`, which the Worker's router never forwards, so only code holding the
 class binding reaches them:
 
@@ -3763,6 +3763,10 @@ class binding reaches them:
   image answers 400 `invalid-image` before any write. The entries and the alarm
   commit in one transaction, at most 128 entries per put, so a write the
   storage refuses answers 500 `restore-failed` and leaves the cell blank.
+- `POST /__cell/disarm` deletes the cell's alarm and answers `{ alarm: <epoch
+  ms> | null }`, the time it was set for. A mover disarms the original before
+  restoring its copy with that alarm, so a scheduled push never fires from
+  both. Entries are untouched.
 
 A cell too large for one image (a site with hundreds of versions holds tens of
 megabytes of manifests, past what one isolate can hold as JSON) moves in parts:

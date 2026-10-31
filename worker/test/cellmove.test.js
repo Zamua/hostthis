@@ -259,6 +259,15 @@ test("restore sets a past alarm to fire at once and keeps a future one", async (
   assert.equal(target.alarm, 50_000);
 });
 
+test("disarm stops the alarm, answers its time, and leaves the entries", async () => {
+  const storage = new FakeStorage(new Map([["state", { meta: { id: "r" } }]]), false, 7_000);
+  const room = new Room(cellState(storage, "r"), {});
+  assert.deepStrictEqual(await ok(room, "/__cell/disarm", {}), { alarm: 7_000 });
+  assert.equal(storage.alarm ?? null, null);
+  assert.deepStrictEqual([...storage.data.keys()], ["state"]);
+  assert.deepStrictEqual(await ok(room, "/__cell/disarm", {}), { alarm: null });
+});
+
 test("a cell holding anything refuses a restore and is left as it was", async () => {
   const image = await call(new Paste(cellState(new FakeStorage(new Map([["row", 1]]), false, 9), "s"), {}), "/__cell/image");
   for (const held of [new FakeStorage(new Map([["other", 2]])), new FakeStorage(new Map(), false, 123)]) {
@@ -324,6 +333,7 @@ test("cell routes answer only their own method", async () => {
   assert.equal((await call(paste, "/__cell/image", {})).status, 405);
   assert.equal((await call(paste, "/__cell/name", {})).status, 405);
   assert.equal((await call(paste, "/__cell/restore")).status, 405);
+  assert.equal((await call(paste, "/__cell/disarm")).status, 405);
   assert.equal((await call(paste, "/__cell/get")).status, 404);
 });
 

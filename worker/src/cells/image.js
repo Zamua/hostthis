@@ -4,7 +4,8 @@ import { putInBatches, setOwn } from "./records.js";
 
 // --- moving cells between runtimes -------------------------------------------
 //
-// Every cell class answers /__cell/name, /__cell/image and /__cell/restore on
+// Every cell class answers /__cell/name, /__cell/image, /__cell/restore and
+// /__cell/disarm on
 // its own fetch, ahead of its op table. The Worker's router forwards only
 // /identity/, /paste/, /room/ and /subnet/ paths, so only code holding a class
 // binding reaches these.
@@ -317,6 +318,16 @@ const CELL_ROUTES = {
     run: (state, request) => state.blockConcurrencyWhile(() => cellImage(state.storage, new URL(request.url))),
   },
   restore: { method: "POST", run: restoreCell },
+  // Stops a cell's alarm and answers the time it was set for, so a mover can
+  // hand the alarm to the copy and the original never fires again.
+  disarm: {
+    method: "POST",
+    run: (state) => state.blockConcurrencyWhile(async () => {
+      const alarm = (await state.storage.getAlarm()) ?? null;
+      await state.storage.deleteAlarm();
+      return Response.json({ alarm });
+    }),
+  },
 };
 
 // Null for a path outside /__cell/, which the class then routes itself.
