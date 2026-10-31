@@ -45,14 +45,14 @@ func TestUpdate_FailedAppendObjects(t *testing.T) {
 			blobs, root := realBlobsAt(t)
 			up := NewUpload(repo, blobs)
 			t.Cleanup(up.WaitFinalize)
-			res, err := up.Create(bytes.NewReader([]byte("<!doctype html><p>v1</p>")), "key:owner", "", "")
+			res, err := up.Create(bytes.NewReader([]byte("<!doctype html><p>v1</p>")), ownerOf("key:owner"), "", "")
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
 			up.WaitFinalize()
 
 			m := NewManage(scriptedAppendRepo{PasteRepo: repo, appendErr: tc.appendErr}, blobs)
-			_, err = m.Update(res.Paste.Slug, "key:owner", bytes.NewReader([]byte("<!doctype html><p>v2</p>")), "")
+			_, err = m.Update(res.Paste.Slug, ownerOf("key:owner"), bytes.NewReader([]byte("<!doctype html><p>v2</p>")), "")
 			if err == nil || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
 				t.Fatalf("update = %v, want %v", err, tc.wantErr)
 			}
@@ -104,7 +104,7 @@ func TestUpdate_WorkerAppendAnswerDecidesTheObjects(t *testing.T) {
 			blobs, root := realBlobsAt(t)
 			repo := worker.NewPasteRepo("https://cell", &http.Client{Transport: appendAnswerCell{tc.status, tc.body}})
 			m := NewManage(repo, blobs)
-			if _, err := m.Update("slugone1", "key:owner", strings.NewReader("<!doctype html><p>v2</p>"), ""); err == nil {
+			if _, err := m.Update("slugone1", ownerOf("key:owner"), strings.NewReader("<!doctype html><p>v2</p>"), ""); err == nil {
 				t.Fatal("update = nil, want the append's failure")
 			}
 			want := 0

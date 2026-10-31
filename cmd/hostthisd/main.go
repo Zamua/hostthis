@@ -114,6 +114,12 @@ func main() {
 	manageSvc.UploadIDs = pods.UploadID
 	deploySvc.UploadIDs = pods.UploadID
 
+	// Upload spill files; "" is the OS temp dir.
+	stagingDir := os.Getenv("HOSTTHIS_STAGING_DIR")
+	uploadSvc.StagingDir = stagingDir
+	manageSvc.StagingDir = stagingDir
+	deploySvc.StagingDir = stagingDir
+
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
 	keyGate.Window = *freshKeysWindow
@@ -168,8 +174,9 @@ func main() {
 		PodLinkURL: func(id, secret string) string {
 			return *scheme + "://" + *apexDomain + "/_solid/link/" + id + "?k=" + secret
 		},
-		Logger:  logger,
-		Metrics: appMetrics,
+		Logger:        logger,
+		Metrics:       appMetrics,
+		ProxyProtocol: envTrue("HOSTTHIS_SSH_PROXY_PROTOCOL"),
 	}
 
 	httpServer := &httpapi.Server{
@@ -185,6 +192,7 @@ func main() {
 		Rooms:    service.NewRooms(roomRepo),
 		RoomPush: service.NewRoomPush(roomRepo),
 		Solid:    metadata.Solid,
+		TrustXFF: envTrue("HOSTTHIS_HTTP_TRUST_XFF"),
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
@@ -361,6 +369,11 @@ func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder 
 		logger.Fatalf("unknown --mode %q (want subdomain|path)", mode)
 		return nil
 	}
+}
+
+// envTrue reports whether key is set to "true", case-insensitively.
+func envTrue(key string) bool {
+	return strings.EqualFold(os.Getenv(key), "true")
 }
 
 func envOr(key, fallback string) string {

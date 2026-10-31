@@ -60,7 +60,7 @@ func TestUndecodableManifest_GetNotFoundVersionsAndDeleteWork(t *testing.T) {
 	s := startStack(t, withManageRepo(func(m *worker.PasteRepo) service.PasteAdmin {
 		return cellRowRepo{PasteRepo: m, cell: repo}
 	}))
-	owner.Store(domain.IdentityFromKeyFingerprint(s.keyedOwner).String())
+	owner.Store(domain.IdentityKeyPrefix + s.keyedOwner)
 
 	// Pins behaviour only: requireOwner already maps any Get error to not-found.
 	if _, stderr, exit := s.run("get "+slug.String(), nil); exit != hostssh.ExitNotFound {

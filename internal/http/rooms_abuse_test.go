@@ -19,13 +19,11 @@ func create(t *testing.T, srv *Server, slug, remoteAddr, forwarded string) *http
 	return req(t, srv, http.MethodPost, slug, "/api/rooms", nil, from(remoteAddr), xff(forwarded))
 }
 
-// TestRoomsHTTP_XFFNotTrustedByDefault pins that with HOSTTHIS_HTTP_TRUST_XFF
-// unset the per-IP room-creation bucket derives from the TCP RemoteAddr alone,
-// so rotating a forged X-Forwarded-For does not mint a fresh bucket per request
-// and escape the cap.
+// TestRoomsHTTP_XFFNotTrustedByDefault pins that with TrustXFF unset the per-IP
+// room-creation bucket derives from the TCP RemoteAddr alone, so rotating a
+// forged X-Forwarded-For does not mint a fresh bucket per request and escape
+// the cap.
 func TestRoomsHTTP_XFFNotTrustedByDefault(t *testing.T) {
-	// Keep an ambient opt-in from leaking in.
-	t.Setenv("HOSTTHIS_HTTP_TRUST_XFF", "")
 	srv := buildRoomServer(t)
 	srv.Rooms.(*service.Rooms).MaxRoomsPerIP = 1
 	const slug = "appz2345"
@@ -40,14 +38,13 @@ func TestRoomsHTTP_XFFNotTrustedByDefault(t *testing.T) {
 	}
 }
 
-// TestRoomsHTTP_XFFTrustedWhenOptedIn pins that under
-// HOSTTHIS_HTTP_TRUST_XFF=true the per-IP bucket comes from the RIGHT-MOST
-// X-Forwarded-For hop (the trusted proxy's own view of the client), so two
-// clients behind one proxy land in different buckets despite sharing a
-// RemoteAddr.
+// TestRoomsHTTP_XFFTrustedWhenOptedIn pins that under TrustXFF the per-IP
+// bucket comes from the RIGHT-MOST X-Forwarded-For hop (the trusted proxy's own
+// view of the client), so two clients behind one proxy land in different
+// buckets despite sharing a RemoteAddr.
 func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
-	t.Setenv("HOSTTHIS_HTTP_TRUST_XFF", "true")
 	srv := buildRoomServer(t)
+	srv.TrustXFF = true
 	srv.Rooms.(*service.Rooms).MaxRoomsPerIP = 1
 	const slug = "appz2345"
 	const proxyAddr = "10.0.0.1:40000"
@@ -96,7 +93,6 @@ func loadClientIPVectors(t *testing.T) clientIPVectors {
 // With X-Forwarded-For trusted, the creation limit counts the right-most value
 // across every header line; without one, the TCP peer.
 func TestXFFVectors(t *testing.T) {
-	t.Setenv("HOSTTHIS_HTTP_TRUST_XFF", "true")
 	const peer = "192.0.2.1:40000"
 	for _, v := range loadClientIPVectors(t).XFF {
 		t.Run(v.Name, func(t *testing.T) {
@@ -107,9 +103,9 @@ func TestXFFVectors(t *testing.T) {
 			}
 			want := "192.0.2.0/24"
 			if v.Address != "" {
-				want = ipSubnet(net.ParseIP(v.Address))
+				want = domain.SubnetOf(net.ParseIP(v.Address))
 			}
-			if got := clientSubnet(r); got != want {
+			if got := clientSubnet(r, true); got != want {
 				t.Fatalf("lines %q: subnet %q, want %q (address %q)", v.Lines, got, want, v.Address)
 			}
 		})
@@ -118,7 +114,7 @@ func TestXFFVectors(t *testing.T) {
 
 func TestSubnetVectors(t *testing.T) {
 	for _, v := range loadClientIPVectors(t).Subnets {
-		if got := ipSubnet(net.ParseIP(v[0])); got != v[1] {
+		if got := domain.SubnetOf(net.ParseIP(v[0])); got != v[1] {
 			t.Errorf("%q: subnet %q, want %q", v[0], got, v[1])
 		}
 	}

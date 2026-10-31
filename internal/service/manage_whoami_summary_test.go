@@ -29,7 +29,7 @@ func TestWhoami_IsOneOwnerSummaryCall(t *testing.T) {
 	}}
 	m := &Manage{Repo: stub, Now: time.Now}
 
-	got, err := m.Whoami("key:abc", "")
+	got, err := m.Whoami(ownerOf("key:abc"), "")
 	if err != nil {
 		t.Fatalf("whoami: %v", err)
 	}

@@ -164,10 +164,20 @@ func TestNewVersionsView(t *testing.T) {
 	}
 }
 
+// fingerprintOwner is the owner of a key fingerprint.
+func fingerprintOwner(t *testing.T, fp string) domain.Owner {
+	t.Helper()
+	o, err := domain.OwnerFromKeyFingerprint(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o
+}
+
 func TestNewWhoamiView(t *testing.T) {
 	t.Run("full info", func(t *testing.T) {
 		info := service.WhoamiInfo{
-			Identity:   domain.IdentityKeyPrefix + "SHA256:abcd",
+			Owner:      fingerprintOwner(t, "SHA256:abcd"),
 			Active:     2,
 			FirstSeen:  time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC),
 			UsedBytes:  1234,
@@ -195,7 +205,7 @@ func TestNewWhoamiView(t *testing.T) {
 	})
 
 	t.Run("no quota + no session null out", func(t *testing.T) {
-		info := service.WhoamiInfo{Identity: domain.IdentityKeyPrefix + "SHA256:x", Active: 0, QuotaBytes: 0}
+		info := service.WhoamiInfo{Owner: fingerprintOwner(t, "SHA256:x"), Active: 0, QuotaBytes: 0}
 		v := newWhoamiView(info)
 		if v.QuotaBytes != nil {
 			t.Fatalf("quota_bytes should be null when uncapped, got %v", *v.QuotaBytes)

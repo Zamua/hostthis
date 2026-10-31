@@ -110,11 +110,11 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 		mutate func(m *Manage, old domain.Paste) error
 	}{
 		{"update", nil, func(m *Manage, old domain.Paste) error {
-			_, err := m.Update(old.Slug, old.Identity.String(), bytes.NewBufferString("# update"), "")
+			_, err := m.Update(old.Slug, ownerOf(old.Identity.String()), bytes.NewBufferString("# update"), "")
 			return err
 		}},
 		{"pin", nil, func(m *Manage, old domain.Paste) error {
-			_, err := m.Pin(old.Slug, old.Identity.String(), 1)
+			_, err := m.Pin(old.Slug, ownerOf(old.Identity.String()), 1)
 			return err
 		}},
 		{"unpin", func(t *testing.T, inner *worker.PasteRepo, old domain.Paste) {
@@ -126,7 +126,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 				t.Fatalf("seed pin: %v", err)
 			}
 		}, func(m *Manage, old domain.Paste) error {
-			return m.Unpin(old.Slug, old.Identity.String())
+			return m.Unpin(old.Slug, ownerOf(old.Identity.String()))
 		}},
 		{"delete version", func(t *testing.T, inner *worker.PasteRepo, old domain.Paste) {
 			if _, err := inner.AppendVersionWithQuotaCheck(context.Background(), old.Slug, old.Generation,
@@ -134,7 +134,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 				t.Fatalf("append v2: %v", err)
 			}
 		}, func(m *Manage, old domain.Paste) error {
-			_, err := m.DeleteVersion(old.Slug, old.Identity.String(), 1)
+			_, err := m.DeleteVersion(old.Slug, ownerOf(old.Identity.String()), 1)
 			return err
 		}},
 	} {

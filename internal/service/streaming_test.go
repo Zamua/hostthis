@@ -31,7 +31,7 @@ func TestUpload_StreamsInChunks(t *testing.T) {
 	body := htmlBody(4 << 20)
 	drip := &dripReader{src: bytesReaderFor(body)}
 
-	res, err := upload.Create(drip, "key:streamtest", "", "")
+	res, err := upload.Create(drip, ownerOf("key:streamtest"), "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestUpload_PeakHeapUnderCap(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	if _, err := upload.Create(bytesReaderFor(body), "key:heaptest", "", ""); err != nil {
+	if _, err := upload.Create(bytesReaderFor(body), ownerOf("key:heaptest"), "", ""); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 
@@ -89,7 +89,7 @@ func TestUpload_RawCapTrips(t *testing.T) {
 	for i := 1; i < len(body); i++ {
 		body[i] = 'a'
 	}
-	_, err := upload.Create(bytesReaderFor(body), "key:rawcap", "", "")
+	_, err := upload.Create(bytesReaderFor(body), ownerOf("key:rawcap"), "", "")
 	if !errors.Is(err, ErrRawTooLarge) {
 		t.Fatalf("expected ErrRawTooLarge for >100 MiB raw input, got %v", err)
 	}
@@ -101,7 +101,7 @@ func TestUpload_RawCapTrips(t *testing.T) {
 func TestUpload_CompressedCapTrips(t *testing.T) {
 	upload, _, _ := newStack(t)
 	body := htmlBody(11 << 20)
-	_, err := upload.Create(bytesReaderFor(body), "key:csizecap", "", "")
+	_, err := upload.Create(bytesReaderFor(body), ownerOf("key:csizecap"), "", "")
 	if !errors.Is(err, ErrCompressedTooLarge) {
 		t.Fatalf("expected ErrCompressedTooLarge for ~11 MiB high-entropy, got %v", err)
 	}
