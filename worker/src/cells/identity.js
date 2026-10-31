@@ -1,7 +1,7 @@
 import { solidEnabled } from "../solid/identity.js";
 import { cellRoute } from "./image.js";
 import { cellCall, dispatch, mutation, read, requireShape } from "./ops.js";
-import { CREATE_INTENT_GRACE_MS, INTENT_PREFIX, artifactAccountKey, chargedSize, fence, intentKey, toRow } from "./records.js";
+import { CREATE_INTENT_GRACE_MS, INTENT_PREFIX, ROOM_CHARGE_PREFIX, artifactAccountKey, chargedSize, fence, intentKey, roomChargeKey, toRow } from "./records.js";
 
 // Sign-in attempts one pending pod link keeps (docs/SPEC.md "Pod storage").
 const LINK_LOGIN_ATTEMPTS = 8;
@@ -17,6 +17,7 @@ const IDENTITY_OPS = {
   artifactdecide: mutation((self, body) => self.artifactDecide(body)),
   artifactproject: mutation((self, body) => self.artifactProject(body)),
   artifactdrop: mutation((self, body) => self.artifactDrop(body)),
+  roomcharge: mutation((self, body) => self.roomCharge(body)),
   notesubnet: mutation((self, body) => self.noteSubnet(body)),
   // The owner's pod link, and the link cells (`podlink:<id>`) that record each
   // link (docs/SPEC.md "Pod storage").
@@ -29,6 +30,20 @@ const IDENTITY_OPS = {
   linkcomplete: mutation((self, body) => self.linkComplete(body)),
   subnets: mutation((self, _body, url) => self.subnets(url), { body: false }),
 };
+
+// Bytes every app this owner owns holds in rooms (docs/SPEC.md "Room storage").
+async function roomBytes(storage) {
+  let total = 0;
+  for (const record of (await storage.list({ prefix: ROOM_CHARGE_PREFIX })).values()) {
+    total += record.allocated ?? 0;
+  }
+  return total;
+}
+
+// What the quota counts: every entry's charge plus every app's room bytes.
+async function ownerTotal(storage, entries) {
+  return Object.values(entries).reduce((n, e) => n + chargedSize(e), 0) + await roomBytes(storage);
+}
 
 // The Identity cell owns the state that must agree for one owner: outstanding
 // intents, quota reservations, and the paste index.
@@ -64,7 +79,7 @@ export class Identity {
     }
     return this.state.storage.transaction(async (tx) => {
       const entries = (await tx.get("entries")) ?? {};
-      const active = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0);
+      const active = await ownerTotal(tx, entries);
       const existing = entries[body.slug];
       if (existing) {
         if (existing.generation !== generation) {
@@ -262,7 +277,8 @@ export class Identity {
   // already holds every entry it charges for.
   async bytes() {
     const entries = (await this.state.storage.get("entries")) ?? {};
-    const total = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0);
+    const rooms = await roomBytes(this.state.storage);
+    const total = Object.values(entries).reduce((n, e) => n + chargedSize(e), 0) + rooms;
     // A negative charge cannot arise from any legal sequence of reserves and
     // releases: membership makes it unreachable, and every size is checked
     // non-negative on the way in. Refusing it here means a regression to
@@ -274,7 +290,7 @@ export class Identity {
         { status: 500 },
       );
     }
-    return Response.json({ bytes: total });
+    return Response.json({ bytes: total, roomBytes: rooms });
   }
 
   // The owner's listing, from the maintained summary rather than a scan.
@@ -330,7 +346,7 @@ export class Identity {
       if (!current) {
         return Response.json({ error: "artifact-unseeded" }, { status: 409 });
       }
-      const total = Object.values(entries).reduce((sum, item) => sum + chargedSize(item), 0);
+      const total = await ownerTotal(tx, entries);
       const decision = fence(current, total, body.version, body.target, body.userCap);
       if (!decision.record) {
         return Response.json(decision.body, { status: decision.status });
@@ -344,6 +360,32 @@ export class Identity {
         entry.chargedSize = body.target;
       }
       await tx.put(Object.fromEntries([[key, decision.record], ["entries", entries]]));
+      return Response.json(decision.body, { status: decision.status });
+    });
+  }
+
+  // An app's room bytes against this owner's quota: the artifact fence over
+  // `roomCharge:<slug>`, whose versions the app's Paste cell assigns. A seed
+  // sets the charge with no cap at the next version and answers it: the first
+  // charge of an app, bytes that predate the rule, and a re-minted app's move.
+  async roomCharge(body) {
+    if (!requireShape(body, { slug: "string", target: "uint" }) ||
+        (!body.seed && !requireShape(body, { version: "posint" }))) {
+      return Response.json({ error: "invalid-room-charge" }, { status: 400 });
+    }
+    return this.state.storage.transaction(async (tx) => {
+      const key = roomChargeKey(body.slug);
+      const current = (await tx.get(key)) ?? { version: 0, allocated: 0, target: 0 };
+      const total = await ownerTotal(tx, (await tx.get("entries")) ?? {});
+      if (body.seed) {
+        const record = { version: current.version + 1, allocated: body.target, target: body.target };
+        await tx.put(key, record);
+        return Response.json({ granted: true, version: record.version, allocated: record.allocated, total: total - current.allocated + body.target });
+      }
+      const decision = fence(current, total, body.version, body.target, body.userCap ?? 0);
+      if (decision.record) {
+        await tx.put(key, decision.record);
+      }
       return Response.json(decision.body, { status: decision.status });
     });
   }

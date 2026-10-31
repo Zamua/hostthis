@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import worker, { Paste, Room } from "../src/index.js";
+import worker, { Identity, Paste, Room } from "../src/index.js";
 import { FakeStorage, state } from "./harness.js";
 
 const APEX = "example.com";
@@ -14,7 +14,7 @@ const TOKEN = "t0ken";
 const FORWARDED = "X-Hostthis-Forwarded-Host";
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MISSING_ROOM = "22222222-2222-4222-8222-222222222222";
-const CLASSES = { PASTES: Paste, ROOMS: Room };
+const CLASSES = { IDENTITY: Identity, PASTES: Paste, ROOMS: Room };
 
 // The public Worker over real Paste and Room cells in memory. Every cell
 // request is recorded with who made it, the router or a cell; a join is
@@ -67,7 +67,7 @@ function world(vars = {}) {
   }
   w.env = env;
   w.fetch = (url, init = {}) => worker.fetch(new Request(url, init), env);
-  w.app = (slug = APP) => storageOf("PASTES", slug).data.set("row", { slug, status: "ready", kind: "markdown" });
+  w.app = (slug = APP) => storageOf("PASTES", slug).data.set("row", { slug, status: "ready", kind: "markdown", identity: "key:app-owner" });
   w.room = async (slug = APP) => {
     const res = await w.fetch(`http://${slug}.${APEX}/api/rooms`, { method: "POST" });
     assert.equal(res.status, 201, await res.clone().text());

@@ -370,7 +370,7 @@ test("Identity create alarm releases a definitely absent paste", async (t) => {
   passGrace(t);
   await h.identity.alarm();
   assert.deepStrictEqual(await listing(h.identityStorage), []);
-  assert.deepStrictEqual((await responseJSON(await h.identity.bytes())).body, { bytes: 0 });
+  assert.deepStrictEqual((await responseJSON(await h.identity.bytes())).body, { bytes: 0, roomBytes: 0 });
   assert.equal(h.identityStorage.alarm, null);
 });
 
@@ -1351,8 +1351,22 @@ test("Paste version delete names the tombstoned upload, and a replay the same", 
   })), { status: 200, body: { deleted: true, totalSize: 1, upload: "", prefixes: [], keys: [], freed: 2 } });
 });
 
+// The app's owner, whose Identity cell the room coordinator charges.
+const APP_OWNER = "key:app-owner";
+
+function ownerEnv(identityStorage = new FakeStorage()) {
+  return {
+    identityStorage,
+    IDENTITY: {
+      idFromName(name) { return name; },
+      get() { return { fetch: (request) => new Identity(state(identityStorage), {}).fetch(request) }; },
+    },
+  };
+}
+
 function budgetSeed(a = 4, b = 4) {
   return new Map([
+    ["row", { slug: "appslug1", status: "ready", kind: "markdown", identity: APP_OWNER }],
     ["roomAllocated", a + b],
     ["roomAllocation:11111111-1111-4111-8111-111111111111", { version: 0, allocated: a, target: a }],
     ["roomAllocation:r2", { version: 0, allocated: b, target: b }],
@@ -1367,7 +1381,7 @@ async function decide(paste, body) {
 function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
   const roomStorage = new FakeStorage(room ? new Map([["state", room]]) : new Map());
   const pasteStorage = new FakeStorage(pasteSeed);
-  const paste = new Paste(state(pasteStorage));
+  const paste = new Paste(state(pasteStorage), ownerEnv());
   const transport = { failBefore: 0, failAfter: 0 };
   const endpoint = {
     async fetch(request) {
@@ -1437,7 +1451,7 @@ test("Subnet serializes concurrent admissions at the limit", async () => {
 
 test("Paste room coordinator persists grants and exact replays", async () => {
   const storage = new FakeStorage(budgetSeed());
-  const paste = new Paste(state(storage));
+  const paste = new Paste(state(storage), ownerEnv());
 
   assert.deepStrictEqual(await decide(paste, { version: 1, targetBytes: 6 }), {
     status: 200,
@@ -1457,7 +1471,7 @@ test("Paste room coordinator persists grants and exact replays", async () => {
 
 test("Paste room coordinator fences refused, stale, and reordered calls", async () => {
   const storage = new FakeStorage(budgetSeed());
-  const paste = new Paste(state(storage));
+  const paste = new Paste(state(storage), ownerEnv());
 
   let result = await decide(paste, { version: 1, targetBytes: 7 });
   assert.equal(result.status, 507);

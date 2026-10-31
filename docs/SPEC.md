@@ -1482,6 +1482,25 @@ informs them):
   charge MORE than the committed room bytes while recovering an interrupted
   mutation, but it must never charge less. This is the room-tier analogue of
   the per-identity paste quota: one app cannot consume the whole service.
+- **Room bytes count against the app owner's quota.** An app's room bytes
+  (the per-app total above) are charged to the identity that owns the app's
+  paste or site, inside the same 1 GiB `UserQuotaBytes` as its pastes and
+  sites. A room mutation that grows the app's total is granted only when the
+  owner's pastes, sites and every app's room bytes stay at or below the
+  quota; otherwise it is refused **507** with its prior room state intact,
+  the same answer as a full app. An upload that would push the owner past
+  the quota is refused as today, room bytes included. Shrinking and deleting
+  values are always granted. The per-app 64 MiB ceiling stays as a backstop
+  under the owner quota. A deleted app's rooms stay charged to the app's last
+  owner; a slug that never had an owner (rooms are only created under a live
+  app, so only an operator reaches one) is bounded by the app ceiling alone.
+  A deployment that sends no app ceiling (`appCap` 0)
+  enforces neither. `whoami` reports room bytes inside `used_bytes` and on
+  their own as `room_bytes`.
+  Bytes that rooms held before this rule are charged to the owner as they
+  stand, even past the quota (grandfathered): nothing is deleted or made
+  read-only, but such an owner can neither grow a room nor upload until it
+  is back under the quota.
 - **No service-wide cap.** Rooms hold no blobs (a room value lives entirely
   in the metadata backend, not the `BlobStore`), so room data is bounded only
   by the per-room and per-app caps above. hostthis carries no service-wide
@@ -3523,6 +3542,24 @@ Rooms persist small mutable app state through the `service.RoomRepo` port:
 - `DeleteValue(..., now)` is idempotent and also consumes one room sequence.
 - `CountRoomCreates(..., window)` counts and prunes the soft creation-rate
   ledger.
+
+An app's room bytes are charged to its owner's Identity cell under
+`roomCharge:<app slug>`, a `{ version, allocated, target }` decision record
+with the same fence as an artifact's. The owner's total, which reserve,
+artifact decisions and `bytes` all use, is every entry's charged size plus
+every room charge's `allocated`. The app's Paste cell keeps the owner side in
+`roomOwnerCharge`: `{ owner, version, target, settled }`. A room decision that
+raises the app total records the next owner version and target unsettled
+first, then asks the owner's Identity cell (`roomcharge`), then commits the
+app decision only on a grant; a refusal persists as the room's refused
+decision. A decision that lowers the total commits first and settles the
+owner charge after. Every room decision first replays an unsettled owner
+charge, so response loss and a crash between the steps leave the owner
+charged for at least what the app holds, never less. A Paste row whose
+identity differs from `owner` (the slug was re-minted) moves the charge:
+the old owner's record is set to zero and the new owner's is seeded with the
+app's total. `roomchargesync` seeds or refreshes the owner charge with no cap,
+which is how bytes that predate the rule are charged.
 
 There is no room-retention or full-room-delete interface. Rooms persist
 indefinitely. Creation-ledger entries are the only room records removed by

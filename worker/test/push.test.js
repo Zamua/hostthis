@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Paste, Room } from "../src/index.js";
+import { Identity, Paste, Room } from "../src/index.js";
 import { encryptPush, localDate, nextDue, signVapid, zonedToUTC } from "../src/push.js";
 import { FakeStorage, ROOM_ID, putBody, roomDoc, state } from "./harness.js";
 
@@ -133,8 +133,17 @@ function harness({ room = roomDoc({ kv: {} }), push, service = {}, env: extra = 
     seed.set("push", push);
   }
   const roomStorage = new FakeStorage(seed);
-  const pasteStorage = new FakeStorage(new Map([["roomAllocated", 0]]));
-  const paste = new Paste(state(pasteStorage));
+  const pasteStorage = new FakeStorage(new Map([
+    ["roomAllocated", 0],
+    ["row", { slug: "appslug1", status: "ready", kind: "markdown", identity: "key:app-owner" }],
+  ]));
+  const identityStorage = new FakeStorage();
+  const paste = new Paste(state(pasteStorage), {
+    IDENTITY: {
+      idFromName(name) { return name; },
+      get() { return { fetch: (request) => new Identity(state(identityStorage), {}).fetch(request) }; },
+    },
+  });
   const transport = { failBefore: 0, calls: [] };
   const sends = [];
   const env = {
