@@ -1440,6 +1440,16 @@ informs them):
   collapses to a single global bucket); an operator with hostthis directly
   on the public internet MUST leave it unset.
 
+  `HOSTTHIS_HTTP_CLIENT_IP_SOURCE` names the source explicitly and wins over
+  the flag: `peer` (the default), `xff-rightmost` (what the flag means), or
+  `cloudflare`. `cloudflare` is `xff-rightmost` for a deployment whose proxy
+  sits behind Cloudflare for some hosts and faces clients directly for
+  others: when the right-most hop is inside Cloudflare's published address
+  ranges, the address is the `CF-Connecting-IP` header (Cloudflare's edge
+  sets it and overwrites a client's own); any other hop is the client
+  itself, and its `CF-Connecting-IP` is ignored, since a client reaching the
+  proxy directly can send one. An unknown value stops startup.
+
   The Worker has no TCP peer address to read, so `HOSTTHIS_CLIENT_IP_SOURCE`
   on the Worker names where the address comes from: `cf-connecting-ip` reads
   the `CF-Connecting-IP` header Cloudflare's edge sets (a client cannot forge

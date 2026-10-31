@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"maps"
-	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -144,7 +143,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 		http.NotFound(w, r)
 		return
 	}
-	subnet := clientSubnet(r, s.TrustXFF)
+	subnet := clientSubnet(r, s.ClientIP)
 	room, err := s.Rooms.Create(appSlug, subnet)
 	if err != nil {
 		s.writeRoomError(w, r, err)
@@ -280,39 +279,4 @@ func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err erro
 func roomMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 	w.Header().Set("Allow", strings.Join(allowed, ", "))
 	http.Error(w, "method not allowed\n", http.StatusMethodNotAllowed)
-}
-
-// clientSubnet derives the canonical /24 (IPv4) or /48 (IPv6) subnet of the
-// requester for the per-IP room-creation rate limit.
-//
-// By DEFAULT the address is the TCP RemoteAddr only: trusting X-Forwarded-For
-// would be a rate-limit bypass, a fresh value per POST landing in a new bucket.
-// With trustXFF set the RIGHT-MOST X-Forwarded-For value is used, the hop the
-// trusted proxy itself recorded; the left-most is fully attacker-controlled. An unparseable address becomes the "unknown" bucket.
-func clientSubnet(r *http.Request, trustXFF bool) string {
-	host := ""
-	if trustXFF {
-		host = rightmostForwardedFor(r.Header.Values("X-Forwarded-For"))
-	}
-	if host == "" {
-		h, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			host = r.RemoteAddr
-		} else {
-			host = h
-		}
-	}
-	return domain.SubnetOf(net.ParseIP(host))
-}
-
-// rightmostForwardedFor is the last value of the X-Forwarded-For list that the
-// header lines form together, "" for none. A client can send a line of its
-// own ahead of the one the trusted proxy appends, so only the last line can
-// hold the proxy's hop.
-func rightmostForwardedFor(lines []string) string {
-	if len(lines) == 0 {
-		return ""
-	}
-	last := lines[len(lines)-1]
-	return strings.TrimSpace(last[strings.LastIndexByte(last, ',')+1:])
 }

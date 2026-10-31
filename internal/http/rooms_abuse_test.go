@@ -19,7 +19,7 @@ func create(t *testing.T, srv *Server, slug, remoteAddr, forwarded string) *http
 	return req(t, srv, http.MethodPost, slug, "/api/rooms", nil, from(remoteAddr), xff(forwarded))
 }
 
-// TestRoomsHTTP_XFFNotTrustedByDefault pins that with TrustXFF unset the per-IP
+// TestRoomsHTTP_XFFNotTrustedByDefault pins that with the peer as the source the per-IP
 // room-creation bucket derives from the TCP RemoteAddr alone, so rotating a
 // forged X-Forwarded-For does not mint a fresh bucket per request and escape
 // the cap.
@@ -38,13 +38,13 @@ func TestRoomsHTTP_XFFNotTrustedByDefault(t *testing.T) {
 	}
 }
 
-// TestRoomsHTTP_XFFTrustedWhenOptedIn pins that under TrustXFF the per-IP
+// TestRoomsHTTP_XFFTrustedWhenOptedIn pins that under xff-rightmost the per-IP
 // bucket comes from the RIGHT-MOST X-Forwarded-For hop (the trusted proxy's own
 // view of the client), so two clients behind one proxy land in different
 // buckets despite sharing a RemoteAddr.
 func TestRoomsHTTP_XFFTrustedWhenOptedIn(t *testing.T) {
 	srv := buildRoomServer(t)
-	srv.TrustXFF = true
+	srv.ClientIP = ClientIPForwardedFor
 	srv.Rooms.(*service.Rooms).MaxRoomsPerIP = 1
 	const slug = "appz2345"
 	const proxyAddr = "10.0.0.1:40000"
@@ -105,7 +105,7 @@ func TestXFFVectors(t *testing.T) {
 			if v.Address != "" {
 				want = domain.SubnetOf(net.ParseIP(v.Address))
 			}
-			if got := clientSubnet(r, true); got != want {
+			if got := clientSubnet(r, ClientIPForwardedFor); got != want {
 				t.Fatalf("lines %q: subnet %q, want %q (address %q)", v.Lines, got, want, v.Address)
 			}
 		})
@@ -150,5 +150,45 @@ func TestRoomsHTTP_CreateLivePasteAppSucceeds(t *testing.T) {
 	}
 	if w := req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil); w.Code != http.StatusCreated {
 		t.Fatalf("create under live paste app: code %d, want 201", w.Code)
+	}
+}
+
+// Behind Cloudflare the creation limit counts CF-Connecting-IP, and only when
+// the trusted proxy's hop is a Cloudflare edge: a direct client's own
+// CF-Connecting-IP counts for nothing.
+func TestClientSubnet_Cloudflare(t *testing.T) {
+	for _, tc := range []struct {
+		name, xff, cf, want string
+	}{
+		{"edge hop hands over to CF-Connecting-IP", "spoofed, 162.158.1.2", "203.0.113.9", "203.0.113.0/24"},
+		{"IPv6 edge hop", "2606:4700::1", "2001:db8:1:2::5", "2001:db8:1::/48"},
+		{"direct client cannot claim an address", "198.51.100.7", "203.0.113.9", "198.51.100.0/24"},
+		{"edge hop without the header counts the edge", "162.158.1.2", "", "162.158.1.0/24"},
+		{"no hop falls back to the peer", "", "203.0.113.9", "192.0.2.0/24"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "http://appz2345.hostthis.test/api/rooms", nil)
+			r.RemoteAddr = "192.0.2.1:40000"
+			if tc.xff != "" {
+				r.Header.Set("X-Forwarded-For", tc.xff)
+			}
+			if tc.cf != "" {
+				r.Header.Set("CF-Connecting-IP", tc.cf)
+			}
+			if got := clientSubnet(r, ClientIPCloudflare); got != tc.want {
+				t.Fatalf("subnet %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseClientIPSource(t *testing.T) {
+	for in, want := range map[string]ClientIPSource{"": ClientIPPeer, "peer": ClientIPPeer, "xff-rightmost": ClientIPForwardedFor, "Cloudflare": ClientIPCloudflare} {
+		if got, err := ParseClientIPSource(in); err != nil || got != want {
+			t.Fatalf("%q = %v, %v", in, got, err)
+		}
+	}
+	if _, err := ParseClientIPSource("xff-leftmost"); err == nil {
+		t.Fatal("unknown source accepted")
 	}
 }
