@@ -25,6 +25,20 @@ const ROOM_OPS = {
   pushtest: mutation((self, body, _url, doc) => self.pushTest(doc, body), { room: true }),
 };
 
+// The kind of a budget operation: a growth carries the mutation it waits to
+// apply; a release was applied before it was recorded.
+export function budgetKind(pending) {
+  if (!pending) return "idle";
+  return pending.mutation !== undefined ? "growing" : "releasing";
+}
+
+// The alarm instant a room needs: the earlier of its budget retry and its next
+// push, or null for none.
+export function alarmDeadline(pending, push) {
+  const times = [pending?.retryAt, push?.nextFireAt].filter((t) => typeof t === "number");
+  return times.length ? Math.min(...times) : null;
+}
+
 export class Room {
   constructor(state, env) {
     this.state = state;
@@ -343,10 +357,14 @@ export class Room {
     doc.meta.updatedAt = now;
   }
 
-  async persistPending(doc) {
+  // The room's budget operation, as one of: none, a growth holding the
+  // mutation it waits to apply, or a release already applied (docs/SPEC.md
+  // "Room storage"). Every change of it persists with the alarm it implies.
+  async persistPending(doc, retryAt = Date.now()) {
+    doc.pending.retryAt = retryAt;
     await this.state.storage.transaction(async (tx) => {
       await tx.put("state", doc);
-      await this.rearm(Date.now(), tx);
+      await this.rearm(doc, tx);
     });
   }
 
@@ -354,12 +372,12 @@ export class Room {
     delete doc.pending;
     await this.state.storage.transaction(async (tx) => {
       await tx.put("state", doc);
-      await this.rearm(null, tx);
+      await this.rearm(doc, tx);
     });
   }
 
-  async retryPendingLater() {
-    await this.rearm(Date.now() + 1000);
+  async retryPendingLater(doc) {
+    await this.persistPending(doc, Date.now() + 1000);
     return "unavailable";
   }
 
@@ -370,9 +388,9 @@ export class Room {
     }
     const pending = doc.pending;
     const version = doc.budgetVersion;
-    const growing = pending.mutation !== undefined;
+    const growing = budgetKind(pending) === "growing";
     if (rearm) {
-      await this.rearm(Date.now());
+      await this.persistPending(doc);
     }
 
     let response;
@@ -387,7 +405,7 @@ export class Room {
       });
       decision = await response.json();
     } catch {
-      await this.retryPendingLater();
+      await this.retryPendingLater(doc);
       return { outcome: "unavailable", doc };
     }
     if (response.status === 507 && growing &&
@@ -398,7 +416,7 @@ export class Room {
     if (!response.ok || decision.granted !== true ||
         decision.version !== version ||
         decision.allocated !== pending.targetBytes) {
-      await this.retryPendingLater();
+      await this.retryPendingLater(doc);
       return { outcome: "unavailable", doc };
     }
 
@@ -424,11 +442,9 @@ export class Room {
     });
   }
 
-  // One alarm serves both the budget retry and the push timer: a re-arm takes
-  // the earlier deadline, and neither side can disarm the other's.
-  async rearm(budgetAt, tx = this.state.storage) {
-    const pushAt = (await tx.get(PUSH_KEY))?.nextFireAt ?? null;
-    const at = budgetAt === null ? pushAt : pushAt === null ? budgetAt : Math.min(budgetAt, pushAt);
+  // One alarm serves both the budget retry and the push timer.
+  async rearm(doc, tx = this.state.storage) {
+    const at = alarmDeadline(doc?.pending, await tx.get(PUSH_KEY));
     if (at === null) {
       await tx.deleteAlarm();
     } else {
@@ -449,8 +465,12 @@ export class Room {
     await this.state.storage.transaction(async (tx) => {
       await tx.put(PUSH_KEY, push);
       const doc = await tx.get("state");
-      const budgetAt = doc?.pending ? (await tx.getAlarm()) ?? Date.now() : null;
-      await this.rearm(budgetAt, tx);
+      // A budget operation recorded without its retry instant keeps the one
+      // the runtime holds.
+      if (doc?.pending && doc.pending.retryAt === undefined) {
+        doc.pending.retryAt = (await tx.getAlarm()) ?? Date.now();
+      }
+      await this.rearm(doc, tx);
     });
   }
 
