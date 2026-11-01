@@ -2530,7 +2530,9 @@ budget recovery protocol, so both concerns share it: the alarm handler resumes
 any pending budget operation and then fires any due push items, and every
 re-arm sets the alarm to the earlier of the two deadlines rather than clearing
 it. A budget concern that no longer needs the alarm must not disarm a pending
-push fire.
+push fire. The pending budget operation stores its own retry instant
+(`retryAt`), so either side computes the deadline from stored state; a pending
+operation recorded before `retryAt` existed keeps the instant the alarm holds.
 
 When the alarm fires, every item whose due instant has passed fires once. A due
 instant more than 15 minutes in the past is skipped rather than replayed: a
