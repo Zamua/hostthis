@@ -11,15 +11,31 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/drain"
 	"github.com/Zamua/hostthis/internal/roomwire"
 )
 
+// relayPhase is a reservation's progress through Serve.
+type relayPhase int
+
+const (
+	// relayReserved: admitted, not yet picked up by Serve.
+	relayReserved relayPhase = iota
+	// relayDialing: Serve owns the client and is dialing the cell. StopAdmission
+	// cancels the dial.
+	relayDialing
+	// relayDialed: the dial has returned. StopAdmission signals stop instead of
+	// cancelling, so the client gets a close frame.
+	relayDialed
+)
+
 type relayReservation struct {
-	key     roomwire.RoomKey
-	cancel  context.CancelFunc
-	client  *websocket.Conn
-	stop    chan struct{}
-	dialing bool
+	key   roomwire.RoomKey
+	phase relayPhase
+	stop  chan struct{}
+	// cancel and client are set on entering relayDialing.
+	cancel context.CancelFunc
+	client *websocket.Conn
 }
 
 // RoomProxy is the Worker backend's real-time layer: a 1:1 WebSocket proxy from
@@ -37,27 +53,26 @@ type RoomProxy struct {
 	base   string
 	client *http.Client
 
+	// inflight counts reservations; it changes only under mu, alongside
+	// reservations.
+	inflight drain.Gate
+
 	mu           sync.Mutex
 	nextID       uint64
-	stopping     bool
 	perRoom      map[roomwire.RoomKey]int
 	perApp       map[domain.Slug]int
 	reservations map[uint64]*relayReservation
-	zero         chan struct{}
 }
 
 // NewRoomProxy relays to the Worker at base, dialing through client; nil
 // means http.DefaultClient.
 func NewRoomProxy(base string, client *http.Client) *RoomProxy {
-	zero := make(chan struct{})
-	close(zero)
 	return &RoomProxy{
 		base:         base,
 		client:       client,
 		perRoom:      make(map[roomwire.RoomKey]int),
 		perApp:       make(map[domain.Slug]int),
 		reservations: make(map[uint64]*relayReservation),
-		zero:         zero,
 	}
 }
 
@@ -66,17 +81,16 @@ func NewRoomProxy(base string, client *http.Client) *RoomProxy {
 func (p *RoomProxy) Admit(key roomwire.RoomKey) (uint64, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.stopping {
+	if !p.inflight.Admit() {
 		return 0, roomwire.ErrRelayDraining
 	}
 	if p.perRoom[key] >= roomwire.DefaultMaxConnsPerRoom {
+		p.inflight.Release()
 		return 0, roomwire.ErrRoomFull
 	}
 	if p.perApp[key.App] >= roomwire.DefaultMaxConnsPerApp {
+		p.inflight.Release()
 		return 0, roomwire.ErrAppFull
-	}
-	if len(p.reservations) == 0 {
-		p.zero = make(chan struct{})
 	}
 	p.perRoom[key]++
 	p.perApp[key.App]++
@@ -106,9 +120,7 @@ func (p *RoomProxy) Release(_ roomwire.RoomKey, id uint64) {
 			delete(p.perApp, key.App)
 		}
 	}
-	if len(p.reservations) == 0 {
-		close(p.zero)
-	}
+	p.inflight.Release()
 	p.mu.Unlock()
 	if reservation.cancel != nil {
 		reservation.cancel()
@@ -117,15 +129,14 @@ func (p *RoomProxy) Release(_ roomwire.RoomKey, id uint64) {
 
 func (p *RoomProxy) StopAdmission() {
 	p.mu.Lock()
-	if p.stopping {
+	if !p.inflight.Stop() {
 		p.mu.Unlock()
 		return
 	}
-	p.stopping = true
 	cancels := make([]context.CancelFunc, 0, len(p.reservations))
 	for _, reservation := range p.reservations {
 		close(reservation.stop)
-		if reservation.dialing && reservation.cancel != nil {
+		if reservation.phase == relayDialing {
 			cancels = append(cancels, reservation.cancel)
 		}
 	}
@@ -137,39 +148,27 @@ func (p *RoomProxy) StopAdmission() {
 
 func (p *RoomProxy) Shutdown(ctx context.Context) error {
 	p.StopAdmission()
-	p.mu.Lock()
-	zero := p.zero
-	p.mu.Unlock()
-	select {
-	case <-zero:
+	err := p.inflight.Wait(ctx)
+	if err == nil {
 		return nil
-	case <-ctx.Done():
-		p.mu.Lock()
-		clients := make([]*websocket.Conn, 0, len(p.reservations))
-		cancels := make([]context.CancelFunc, 0, len(p.reservations))
-		for _, reservation := range p.reservations {
-			if reservation.client != nil {
-				clients = append(clients, reservation.client)
-			}
-			if reservation.cancel != nil {
-				cancels = append(cancels, reservation.cancel)
-			}
-		}
-		p.mu.Unlock()
-		for _, client := range clients {
-			go client.CloseNow() //nolint:errcheck
-		}
-		for _, cancel := range cancels {
-			cancel()
-		}
-		return ctx.Err()
 	}
-}
-
-func (p *RoomProxy) isStopping() bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.stopping
+	clients := make([]*websocket.Conn, 0, len(p.reservations))
+	cancels := make([]context.CancelFunc, 0, len(p.reservations))
+	for _, reservation := range p.reservations {
+		if reservation.phase != relayReserved {
+			clients = append(clients, reservation.client)
+			cancels = append(cancels, reservation.cancel)
+		}
+	}
+	p.mu.Unlock()
+	for _, client := range clients {
+		go client.CloseNow() //nolint:errcheck
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return err
 }
 
 // Serve dials the room's cell and pipes frames until either side ends.
@@ -180,11 +179,11 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 	p.mu.Lock()
 	reservation, admitted := p.reservations[id]
 	if admitted {
+		reservation.phase = relayDialing
 		reservation.cancel = relayCancel
 		reservation.client = client
-		reservation.dialing = true
 	}
-	stopping := p.stopping
+	stopping := p.inflight.Stopped()
 	p.mu.Unlock()
 	if !admitted || stopping {
 		client.Close(websocket.StatusServiceRestart, "service restart") //nolint:errcheck
@@ -199,11 +198,11 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 	dialCancel()
 	p.mu.Lock()
 	if current := p.reservations[id]; current == reservation {
-		current.dialing = false
+		current.phase = relayDialed
 	}
 	p.mu.Unlock()
 	if err != nil {
-		if p.isStopping() {
+		if p.inflight.Stopped() {
 			client.Close(websocket.StatusServiceRestart, "service restart") //nolint:errcheck
 		} else {
 			client.Close(websocket.StatusInternalError, "upstream unavailable") //nolint:errcheck
@@ -277,7 +276,7 @@ func (p *RoomProxy) Serve(ctx context.Context, key roomwire.RoomKey, id uint64, 
 	var end relayEnd
 	select {
 	case end = <-done:
-		if p.isStopping() {
+		if p.inflight.Stopped() {
 			client.Close(websocket.StatusServiceRestart, "service restart") //nolint:errcheck
 			relayCancel()
 			return

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/drain"
 )
 
 // RepurgeDelay is how long after a slug's last purge it is purged again. The
@@ -29,10 +30,9 @@ type Repurging struct {
 
 	mu     sync.Mutex
 	timers map[domain.Slug]*repurge
-	closed bool
-	// wg counts armed timers and running callbacks, so Shutdown can wait out
-	// a callback that already fired.
-	wg sync.WaitGroup
+	// armed counts armed timers and running callbacks, so Shutdown can wait
+	// out a callback that already fired. Admit and Stop happen under mu.
+	armed drain.Gate
 }
 
 type repurge struct{ t *time.Timer }
@@ -47,29 +47,29 @@ func (r *Repurging) PurgePaste(slug domain.Slug) error {
 	err := r.inner.PurgePaste(slug)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.closed {
-		return err
-	}
+	// Shutdown empties timers, so only a live Repurging can reset one.
 	if p, ok := r.timers[slug]; ok && p.t.Stop() {
 		p.t.Reset(r.delay)
 		return err
 	}
 	// None armed, or its callback already fired; that callback leaves this
 	// entry in place.
+	if !r.armed.Admit() {
+		return err
+	}
 	p := &repurge{}
-	r.wg.Add(1)
 	p.t = time.AfterFunc(r.delay, func() { r.fire(slug, p) })
 	r.timers[slug] = p
 	return err
 }
 
 func (r *Repurging) fire(slug domain.Slug, p *repurge) {
-	defer r.wg.Done()
+	defer r.armed.Release()
 	r.mu.Lock()
 	if r.timers[slug] == p {
 		delete(r.timers, slug)
 	}
-	closed := r.closed
+	closed := r.armed.Stopped()
 	r.mu.Unlock()
 	if !closed {
 		_ = r.inner.PurgePaste(slug)
@@ -80,26 +80,16 @@ func (r *Repurging) fire(slug domain.Slug, p *repurge) {
 // within ctx, then shuts the inner purger down when it has a shutdown.
 func (r *Repurging) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
-	r.closed = true
+	r.armed.Stop()
 	for slug, p := range r.timers {
 		if p.t.Stop() {
-			r.wg.Done()
+			r.armed.Release()
 		}
 		delete(r.timers, slug)
 	}
 	r.mu.Unlock()
 
-	fired := make(chan struct{})
-	go func() {
-		r.wg.Wait()
-		close(fired)
-	}()
-	var err error
-	select {
-	case <-fired:
-	case <-ctx.Done():
-		err = ctx.Err()
-	}
+	err := r.armed.Wait(ctx)
 	if s, ok := r.inner.(interface{ Shutdown(context.Context) error }); ok {
 		if serr := s.Shutdown(ctx); err == nil {
 			err = serr
