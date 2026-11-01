@@ -265,6 +265,8 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 // with Retry-After, a per-room cap is 413, a per-app aggregate is 507.
 func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, domain.ErrRoomValueNotText):
+		http.Error(w, domain.ErrRoomValueNotText.Error()+"\n", http.StatusUnsupportedMediaType)
 	case errors.As(err, new(*service.RoomValueRefused)):
 		http.Error(w, err.Error()+"\n", http.StatusForbidden)
 	case errors.Is(err, service.ErrRoomNotFound):

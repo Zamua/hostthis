@@ -151,6 +151,7 @@ func (r *RoomRepo) PutValue(app domain.Slug, id domain.RoomID, key string, val [
 			http.StatusNotFound:              domain.ErrNotFound,
 			http.StatusRequestEntityTooLarge: domain.ErrRoomDataFull,
 			http.StatusInsufficientStorage:   domain.ErrAppRoomsFull,
+			http.StatusUnsupportedMediaType:  domain.ErrRoomValueNotText,
 		}); err != nil {
 		return 0, err
 	}

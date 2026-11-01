@@ -782,3 +782,49 @@ test("an unparseable rule list refuses nothing", async () => {
   const id = await w.room();
   assert.equal((await put(w, id, "k", "MZ")).status, 204);
 });
+
+const NOT_TEXT = "room values must be small text/JSON; host files as a site (tar czf - dir | ssh hostthis.dev)\n\n";
+// Spaced text never forms a long base64 run.
+const spacedText = (n) => "ab ".repeat(Math.ceil(n / 3)).slice(0, n);
+
+test("with default room rules on, a stranger app's rooms hold only small text", async () => {
+  const w = world({ HOSTTHIS_DEFAULT_ROOM_RULES: "on", HOSTTHIS_PROTECTED_OWNERS: "SHA256:someone-else" });
+  w.app();
+  const id = await w.room();
+  await goError(await put(w, id, "pdf", "%PDF-1.4 plain ascii"), 415, NOT_TEXT);
+  await goError(await put(w, id, "bin", new Uint8Array([0xff, 0xfe, 0x00, 0x01])), 415, NOT_TEXT);
+  await goError(await put(w, id, "big", spacedText(64 * 1024 + 1)), 415, NOT_TEXT);
+  await goError(await put(w, id, "b64", `{"img":"${"A".repeat(8 * 1024 + 1)}"}`), 415, NOT_TEXT);
+  assert.equal((await put(w, id, "ok", `{"img":"${"A".repeat(8 * 1024)}"}`)).status, 204);
+  assert.equal((await put(w, id, "json", '{"score":3}')).status, 204);
+});
+
+test("a stranger app stops growing at 1 MiB but may replace in place", async () => {
+  const w = world({ HOSTTHIS_DEFAULT_ROOM_RULES: "on" });
+  w.app();
+  const value = spacedText(60 * 1024);
+  let refused = null;
+  for (let i = 0; i < 20 && !refused; i++) {
+    const id = await w.room();
+    for (let k = 0; k < 4; k++) {
+      const res = await put(w, id, `k${k}`, value);
+      if (res.status !== 204) {
+        refused = { res, id, k };
+        break;
+      }
+    }
+  }
+  assert.ok(refused, "the app never reached its ceiling");
+  await goError(refused.res, 507, "app room storage is at capacity\n\n");
+  // The room's last stored key can be replaced at the same size.
+  assert.equal((await put(w, refused.id, `k${refused.k - 1}`, spacedText(60 * 1024))).status, 204);
+});
+
+test("a protected owner's apps skip the default room rules", async () => {
+  const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("key:app-owner")))]
+    .slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const w = world({ HOSTTHIS_DEFAULT_ROOM_RULES: "on", HOSTTHIS_PROTECTED_OWNERS: hash });
+  w.app();
+  const id = await w.room();
+  assert.equal((await put(w, id, "bin", new Uint8Array([0xff, 0xfe, 0x00, 0x01]))).status, 204);
+});

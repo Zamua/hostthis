@@ -3,6 +3,7 @@ package http
 import (
 	stdhttp "net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -51,3 +52,20 @@ func TestRoomsAccess_RefusesThePrivateAPIWith403(t *testing.T) {
 
 // stubRoomsForAccess panics on any call: nothing may get past the gate.
 type stubRoomsForAccess struct{ RoomService }
+
+type notTextRooms struct{ RoomService }
+
+func (notTextRooms) Put(domain.Slug, domain.RoomID, string, []byte) (uint64, error) {
+	return 0, domain.ErrRoomValueNotText
+}
+
+func TestRooms_ANotTextRefusalIs415WithTheActionableMessage(t *testing.T) {
+	srv := &Server{Rooms: notTextRooms{}}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(stdhttp.MethodPut, "/api/rooms/11111111-1111-4111-8111-111111111111/k", strings.NewReader("x"))
+	srv.handleRoomsAPI(w, r, "app12345", "/11111111-1111-4111-8111-111111111111/k")
+	want := "room values must be small text/JSON; host files as a site (tar czf - dir | ssh hostthis.dev)\n\n"
+	if w.Code != stdhttp.StatusUnsupportedMediaType || w.Body.String() != want {
+		t.Fatalf("got %d %q", w.Code, w.Body.String())
+	}
+}

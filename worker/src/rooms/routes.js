@@ -12,6 +12,7 @@ import {
   ROOM_MAX_BYTES,
   ROOM_MAX_KEYS,
   ROOM_PUT_READ_LIMIT,
+  ROOM_VALUE_NOT_TEXT,
   roomDenyMatch,
   ROOMS_PER_APP,
   ROOMS_PER_SUBNET,
@@ -283,6 +284,9 @@ async function roomValue(request, env, room, key) {
     });
     if (res.status === 413) {
       return goError(413, "room is at its data cap\n");
+    }
+    if (res.status === 415) {
+      return goError(415, `${ROOM_VALUE_NOT_TEXT}\n`);
     }
     if (res.status === 507) {
       return goError(507, "app room storage is at capacity\n");
