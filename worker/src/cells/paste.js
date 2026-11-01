@@ -142,9 +142,26 @@ export class Paste {
     const ledger = (await this.state.storage.get("roomLedger")) ?? [];
     if (!ledger.some((entry) => entry.id === body.id)) {
       ledger.push({ id: body.id, subnet: body.subnet, at: body.at });
-      await this.state.storage.put("roomLedger", ledger);
+      const writes = { roomLedger: ledger };
+      // Only a room being created for the first time adds to the lifetime
+      // count; a create replayed onto an existing room does not.
+      if (body.fresh) {
+        writes.roomTotal = (await this.roomTotal()) + 1;
+      }
+      await this.state.storage.put(writes);
     }
     return new Response(null, { status: 204 });
+  }
+
+  // Rooms this app has ever created; rooms are never deleted. An app older
+  // than the counter starts from its rooms that hold bytes, which leaves out
+  // only rooms that never stored a value.
+  async roomTotal() {
+    const total = await this.state.storage.get("roomTotal");
+    if (total !== undefined) {
+      return total;
+    }
+    return (await this.state.storage.list({ prefix: "roomAllocation:" })).size;
   }
 
   // Counts and PRUNES in one pass: rows past the window are dropped as they are
@@ -205,6 +222,9 @@ export class Paste {
   async roomPreflight(body) {
     const total = (await this.state.storage.get("roomAllocated")) ?? 0;
     if (body.appCap > 0 && total >= body.appCap) {
+      return Response.json({ error: "app-full", total }, { status: 507 });
+    }
+    if (body.roomLimit > 0 && (await this.roomTotal()) >= body.roomLimit) {
       return Response.json({ error: "app-full", total }, { status: 507 });
     }
     return Response.json({ total });

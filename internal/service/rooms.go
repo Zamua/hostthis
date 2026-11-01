@@ -2,6 +2,7 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -51,12 +52,14 @@ type Rooms struct {
 	MaxRoomsPerApp int           // per app creation cap per CreateWindow
 	CreateWindow   time.Duration // rolling window for the creation limits
 	PerAppByteCap  int64         // per-app aggregate byte cap (0 = unlimited)
+	// Deny refuses room values matching a configured content rule.
+	Deny domain.RoomDenyList
 
 	Now func() time.Time
 }
 
 // NewRooms wires the SPEC defaults: 60 rooms/IP-subnet/hour,
-// 300 rooms/app/hour, 64 MiB per-app aggregate.
+// 300 rooms/app/hour, 48 MiB per-app aggregate.
 func NewRooms(repo RoomRepo) *Rooms {
 	return &Rooms{
 		Repo:           repo,
@@ -179,6 +182,9 @@ func (s *Rooms) Scan(appSlug domain.Slug, id domain.RoomID) (domain.RoomKV, erro
 // per-room cap, ErrAppRoomsCap (507) on the per-app aggregate. key must
 // already be validated by the caller.
 func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byte) (uint64, error) {
+	if rule, refused := s.Deny.Match(val); refused {
+		return 0, &RoomValueRefused{Rule: rule.Rule, Message: rule.Message}
+	}
 	now := s.now()
 	seq, err := s.Repo.PutValue(appSlug, id, key, val, s.PerAppByteCap, now)
 	switch {
@@ -221,4 +227,15 @@ func (s *Rooms) mapNotFound(err error) error {
 		return ErrRoomNotFound
 	}
 	return err
+}
+
+// RoomValueRefused is a room write a configured content rule refused.
+type RoomValueRefused struct{ Rule, Message string }
+
+func (e *RoomValueRefused) Error() string {
+	msg := e.Message
+	if msg == "" {
+		msg = "it matched a content rule"
+	}
+	return fmt.Sprintf("room value refused: %s (%s)", msg, e.Rule)
 }

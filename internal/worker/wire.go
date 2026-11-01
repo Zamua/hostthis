@@ -237,6 +237,7 @@ type roomCreateRequest struct {
 	At        int64  `json:"at"`
 	CreatedAt int64  `json:"createdAt"`
 	ID        string `json:"id"`
+	RoomLimit int    `json:"roomLimit"`
 	Subnet    string `json:"subnet"`
 	UpdatedAt int64  `json:"updatedAt"`
 }

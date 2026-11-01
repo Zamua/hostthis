@@ -44,7 +44,12 @@ const MaxRoomValueBytes = MaxRoomBytes
 // MaxAppRoomBytes bounds one app's rooms in aggregate so a single app cannot
 // consume the whole service. Past it, new room creation and new writes for
 // that app are refused until the app deletes rooms or values. Tunable default.
-const MaxAppRoomBytes = 64 << 20 // 64 MiB
+const MaxAppRoomBytes = 48 << 20 // 48 MiB
+
+// MaxAppRooms bounds how many rooms one app may ever create. Rooms are never
+// deleted, so it is a lifetime count; past it new rooms are refused like a
+// full app.
+const MaxAppRooms = 500
 
 // Room-creation rate-limit defaults (SPEC.md "Quota and abuse"). Creation is
 // gated per source IP AND per app so a script cannot spam rooms into

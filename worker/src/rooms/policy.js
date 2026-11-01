@@ -10,7 +10,9 @@ import { byteStringBytes, goText, validUTF8 } from "./wire.js";
 export const ROOM_MAX_BYTES = 256 * 1024;
 export const ROOM_MAX_KEYS = 256;
 export const ROOM_MAX_KEY_BYTES = 256;
-export const APP_MAX_ROOM_BYTES = 64 * 1024 * 1024;
+export const APP_MAX_ROOM_BYTES = 48 * 1024 * 1024;
+// domain.MaxAppRooms: rooms one app may ever create.
+export const APP_MAX_ROOMS = 500;
 // domain.UserQuotaBytes: an owner's pastes, sites and app rooms together.
 export const USER_QUOTA_BYTES = 1024 * 1024 * 1024;
 export const ROOMS_PER_SUBNET = 60;
@@ -724,4 +726,45 @@ export function byteString(text) {
 // A byte string as the text a Go string becomes in JSON.
 export function byteStringText(bytes) {
   return goText(byteStringBytes(bytes));
+}
+
+// HOSTTHIS_ROOM_DENY, the deployment's room value rules (docs/SPEC.md "Room
+// value rules"), parsed once per distinct value. Same semantics as
+// domain.ParseRoomDenyList: a pattern over the value read as UTF-8, or a byte
+// prefix. A list that does not parse refuses nothing and is logged, since a
+// Worker cannot refuse to start.
+let denyCache = { raw: undefined, rules: [] };
+
+function parseRoomDeny(raw) {
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw).map((s) => {
+      if (!s.rule || Boolean(s.pattern) === Boolean(s.prefixHex)) throw new Error(`bad rule ${s.rule}`);
+      if (s.prefixHex) {
+        const prefix = Uint8Array.from(s.prefixHex.match(/../g) ?? [], (h) => parseInt(h, 16));
+        return { rule: s.rule, message: s.message ?? "", prefix };
+      }
+      if (s.flags && s.flags !== "i") throw new Error(`bad flags ${s.rule}`);
+      return { rule: s.rule, message: s.message ?? "", pattern: new RegExp(s.pattern, s.flags === "i" ? "i" : "") };
+    });
+  } catch (error) {
+    console.warn(`warn: HOSTTHIS_ROOM_DENY ignored: ${error.message}`);
+    return [];
+  }
+}
+
+export function roomDenyMatch(raw, bytes) {
+  if (denyCache.raw !== raw) {
+    denyCache = { raw, rules: parseRoomDeny(raw) };
+  }
+  let text;
+  for (const r of denyCache.rules) {
+    if (r.prefix) {
+      if (bytes.length >= r.prefix.length && r.prefix.every((b, i) => bytes[i] === b)) return r;
+      continue;
+    }
+    text ??= new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    if (r.pattern.test(text)) return r;
+  }
+  return null;
 }

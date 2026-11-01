@@ -6,11 +6,13 @@
 
 import {
   APP_MAX_ROOM_BYTES,
+  APP_MAX_ROOMS,
   PUSH_BODY_LIMIT,
   ROOM_CREATE_WINDOW_MS,
   ROOM_MAX_BYTES,
   ROOM_MAX_KEYS,
   ROOM_PUT_READ_LIMIT,
+  roomDenyMatch,
   ROOMS_PER_APP,
   ROOMS_PER_SUBNET,
   byteStringText,
@@ -172,7 +174,7 @@ async function serveRoute(request, env, app, route, client) {
     case "push":
       return roomPush(request, env, app, route);
     default:
-      return roomValue(request, app.room(route.id), route.key);
+      return roomValue(request, env, app.room(route.id), route.key);
   }
 }
 
@@ -201,6 +203,7 @@ async function createRoom(request, env, app, client) {
       method: "POST",
       body: {
         appSlug: app.slug, id, createdAt: now, updatedAt: now, subnet, at: now, appCap: APP_MAX_ROOM_BYTES,
+        roomLimit: APP_MAX_ROOMS,
       },
     });
     if (created.status === 507) {
@@ -233,7 +236,7 @@ async function scanRoom(room) {
   return goJSON(200, `{${members.join(",")}}`);
 }
 
-async function roomValue(request, room, key) {
+async function roomValue(request, env, room, key) {
   const { method } = request;
   if (method !== "GET" && method !== "PUT" && method !== "DELETE") {
     return methodNotAllowed("GET", "PUT", "DELETE");
@@ -265,6 +268,11 @@ async function roomValue(request, room, key) {
       bytes = await readCapped(request, ROOM_PUT_READ_LIMIT);
     } catch {
       return goError(400, "read body\n");
+    }
+    const refused = roomDenyMatch(env.HOSTTHIS_ROOM_DENY, bytes);
+    if (refused) {
+      const why = refused.message || "it matched a content rule";
+      return goError(403, `room value refused: ${why} (${refused.rule})\n`);
     }
     res = await ask(room, "/room/put", {
       method: "POST",
