@@ -762,13 +762,13 @@ test("an unknown room is 404 and a cell fault is 500, never a 101", async () => 
 test("configured room value rules refuse a write before the room is touched", async () => {
   const w = world({
     HOSTTHIS_ROOM_DENY: JSON.stringify([
-      { rule: "pay", pattern: "ko-fi\\.com/", flags: "i", message: "personal use only" },
+      { rule: "pay", pattern: "tips\\.example/", flags: "i", message: "personal use only" },
       { rule: "exe", prefixHex: "4d5a" },
     ]),
   });
   w.app();
   const id = await w.room();
-  await goError(await put(w, id, "k", '{"tip":"https://KO-FI.com/me"}'), 403,
+  await goError(await put(w, id, "k", '{"tip":"https://TIPS.example/me"}'), 403,
     "room value refused: personal use only (pay)\n\n");
   await goError(await put(w, id, "k", new Uint8Array([0x4d, 0x5a, 0x90, 0])), 403,
     "room value refused: it matched a content rule (exe)\n\n");

@@ -3,7 +3,7 @@ package domain
 import "testing"
 
 const testRoomDeny = `[
- {"rule":"pay","pattern":"ko-fi\\.com/","flags":"i","message":"personal use only"},
+ {"rule":"pay","pattern":"tips\\.example/","flags":"i","message":"personal use only"},
  {"rule":"exe","prefixHex":"4d5a"}
 ]`
 
@@ -13,10 +13,10 @@ func TestRoomDenyList_MatchesPatternsAndPrefixes(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := map[string]string{
-		`{"tip":"https://KO-FI.com/me"}`: "pay",
-		"MZ\x90\x00binary":               "exe",
-		`{"score":3}`:                    "",
-		"xMZ":                            "",
+		`{"tip":"https://TIPS.example/me"}`: "pay",
+		"MZ\x90\x00binary":                  "exe",
+		`{"score":3}`:                       "",
+		"xMZ":                               "",
 	}
 	for val, want := range cases {
 		r, ok := l.Match([]byte(val))
@@ -24,7 +24,7 @@ func TestRoomDenyList_MatchesPatternsAndPrefixes(t *testing.T) {
 			t.Errorf("Match(%q) = %q, want %q", val, got, want)
 		}
 	}
-	if r, _ := l.Match([]byte("ko-fi.com/x")); r.Message != "personal use only" {
+	if r, _ := l.Match([]byte("tips.example/x")); r.Message != "personal use only" {
 		t.Errorf("message %q", r.Message)
 	}
 }
