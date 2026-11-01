@@ -55,12 +55,12 @@ func TestServePaste_KeyedDocumentReadsAndValidatesOnItsKey(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != "<h1>keyed</h1>" {
 		t.Fatalf("GET = %d %q, want the keyed object", w.Code, w.Body.String())
 	}
-	if got := w.Header().Get("ETag"); got != `"`+key+`"` {
-		t.Fatalf("ETag = %q, want the object key", got)
+	if got := w.Header().Get("ETag"); got != storedETag(key) {
+		t.Fatalf("ETag = %q, want the tagged object key", got)
 	}
 
 	reads := len(blobs.reads)
-	if w := serveOne(srv, "/p/abc23456", `"`+key+`"`); w.Code != 304 {
+	if w := serveOne(srv, "/p/abc23456", storedETag(key)); w.Code != 304 {
 		t.Fatalf("conditional GET on the key = %d, want 304", w.Code)
 	}
 	if len(blobs.reads) != reads {
@@ -78,7 +78,7 @@ func TestServePaste_RawMarkdownReadsItsKey(t *testing.T) {
 		Blobs: &recordingBlobs{bodies: map[string]string{key: "# keyed"}},
 	}
 	w := serveOne(srv, "/p/abc23456?raw=1", "")
-	if w.Code != 200 || w.Body.String() != "# keyed" || w.Header().Get("ETag") != `"`+key+`"` {
+	if w.Code != 200 || w.Body.String() != "# keyed" || w.Header().Get("ETag") != storedETag(key) {
 		t.Fatalf("raw GET = %d %q etag %q, want the keyed object validated on its key", w.Code, w.Body.String(), w.Header().Get("ETag"))
 	}
 }
@@ -122,7 +122,7 @@ func TestServeSite_KeylessEntryIsNotFound(t *testing.T) {
 		t.Fatalf("GET keyless file = %d with %d reads, want 404 and none", w.Code, len(blobs.reads))
 	}
 	w := serveOne(srv, "/p/abc23456/", "")
-	if w.Code != 200 || w.Body.String() != "<h1>site</h1>" || w.Header().Get("ETag") != `"uploads/u3/0"` {
+	if w.Code != 200 || w.Body.String() != "<h1>site</h1>" || w.Header().Get("ETag") != storedETag("uploads/u3/0") {
 		t.Fatalf("GET keyed index = %d %q etag %q, want the keyed object validated on its key",
 			w.Code, w.Body.String(), w.Header().Get("ETag"))
 	}
