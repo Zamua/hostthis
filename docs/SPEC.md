@@ -4657,9 +4657,10 @@ operator routes skip:
   may never act on: each item a full fingerprint or the first 16 hex digits
   of `sha256("key:<fingerprint>")`. A slug they own, or their key, answers
   403 `protected-owner`.
-- **Rate cap.** At most 5 watcher quarantines and 5 watcher bans in any
-  rolling hour. Past the cap the route answers 429 `rate-capped` and does
-  nothing, so the watcher escalates to a person instead.
+- **Rate cap on bans.** At most 5 watcher bans in any rolling hour. Past the
+  cap the route answers 429 `rate-capped` and does nothing, so the watcher
+  escalates to a person instead. Quarantines are not capped: they are
+  reversible and keep everything.
 
 Every action, accepted or refused, is appended to the audit log. The purge
 uses `HOSTTHIS_CF_PURGE_TOKEN` and `HOSTTHIS_CF_ZONE_ID`; without them the
