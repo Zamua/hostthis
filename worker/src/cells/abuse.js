@@ -135,10 +135,27 @@ export class Abuse {
     return Response.json({ slug: body.slug, released });
   }
 
+  // The key is named directly, or as the owner of a slug, which keeps full
+  // fingerprints out of callers that only see owner hashes.
   async banKey(input) {
     const body = { ...input, op: "bankey" };
-    const fp = typeof body.identity === "string" ? body.identity.replace(/^key:/, "") : "";
-    if (!KEY.test(fp) || !this.validReason(body.reason)) {
+    if (!this.validReason(body.reason)) {
+      return fail(400, "invalid-request");
+    }
+    let fp = typeof body.identity === "string" ? body.identity.replace(/^key:/, "") : "";
+    if (!fp && SLUG.test(body.slug ?? "")) {
+      const res = await this.paste(body.slug).fetch(new Request(
+        `https://cell/paste/operatorrow?slug=${encodeURIComponent(body.slug)}`));
+      if (res.status === 404) {
+        await this.record(body, body.slug, "no-such-paste");
+        return fail(404, "no-such-paste");
+      }
+      if (!res.ok) {
+        throw new Error(`operatorrow answered ${res.status}`);
+      }
+      fp = String((await res.json()).row.identity ?? "").replace(/^key:/, "");
+    }
+    if (!KEY.test(fp)) {
       return fail(400, "invalid-request");
     }
     if (body.actor === "watcher" && await this.watcherCount(ACTIONS.bankey, body.now) >= WATCHER_CAP_PER_HOUR) {
