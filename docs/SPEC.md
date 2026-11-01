@@ -1486,8 +1486,9 @@ informs them):
   the per-identity paste quota: one app cannot consume the whole service.
 - **Rooms per app.** An app may create at most **500 rooms** over its
   lifetime: rooms never expire and have no delete, so the count only grows.
-  The app cell counts each room it records for the first time; an app older
-  than the count starts from its rooms that hold bytes. A create past the
+  The app cell counts each room it records for the first time, less rooms
+  the operator removed ("Room removal"); an app older than the count starts
+  from its rooms that hold bytes. A create past the
   limit is refused with the full-app **507**.
 - **Room value rules.** `HOSTTHIS_ROOM_DENY` (on `hostthisd` and the Worker)
   is a JSON list of content rules a room write is checked against before it
@@ -4647,6 +4648,15 @@ quarantine for that purpose.
 watcher ban, and keeps the quarantine index (slug, owner, reason, actor, time)
 and an audit log of the last 1000 actions, refused ones included.
 
+**Room removal.** Rooms have no delete in the public API; the operator route
+`/abuse/room-delete` removes one. The Room cell releases the room's bytes
+through the ordinary shrink (freeing the app's ceiling and the owner's quota),
+the app cell records the room as gone so it stops counting toward the app's
+room limit (once, however often the call repeats), and then every key of the
+room is dropped and its sockets closed; reads answer 404. A step that cannot
+finish answers 502 with the room left emptied, and calling again completes it.
+The audit log records the room as a hash of its id.
+
 **Two credentials.** The Worker's internal token reaches everything,
 including the operator routes:
 
@@ -4656,6 +4666,7 @@ including the operator routes:
 | `POST /abuse/release` | `{slug}` | 200 `{slug, released, purged}` |
 | `GET /abuse/list` | | `{quarantined: [{slug, owner, reason, actor, at}]}` |
 | `GET /abuse/audit` | | `{entries: [...]}`, newest last |
+| `POST /abuse/room-delete` | `{app, room}` (the room's UUID) | 200 `{app, removed}` (`false`: no such room), 502 when a step could not finish |
 
 A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly two routes
 and nowhere else, for an automated abuse watcher:
