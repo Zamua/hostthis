@@ -6,7 +6,8 @@ import { dispatch, mutation, read } from "./ops.js";
 // applies the watcher's guards. The router decides the actor from the
 // credential and stamps `now`; neither comes from the caller.
 
-const WATCHER_CAP_PER_HOUR = 5;
+// Bans only: a quarantine is reversible, so the watcher's are not capped.
+const WATCHER_BANS_PER_HOUR = 5;
 const HOUR_MS = 3_600_000;
 const AUDIT_MAX = 1000;
 const REASON_MAX = 200;
@@ -85,10 +86,6 @@ export class Abuse {
     if (!SLUG.test(body.slug ?? "") || !this.validReason(body.reason)) {
       return fail(400, "invalid-request");
     }
-    if (body.actor === "watcher" && await this.watcherCount(ACTIONS.quarantine, body.now) >= WATCHER_CAP_PER_HOUR) {
-      await this.record(body, body.slug, "rate-capped");
-      return fail(429, "rate-capped");
-    }
     const q = `slug=${encodeURIComponent(body.slug)}`;
     const current = await this.paste(body.slug).fetch(new Request(`https://cell/paste/operatorrow?${q}`));
     if (current.status === 404) {
@@ -158,7 +155,7 @@ export class Abuse {
     if (!KEY.test(fp)) {
       return fail(400, "invalid-request");
     }
-    if (body.actor === "watcher" && await this.watcherCount(ACTIONS.bankey, body.now) >= WATCHER_CAP_PER_HOUR) {
+    if (body.actor === "watcher" && await this.watcherCount(ACTIONS.bankey, body.now) >= WATCHER_BANS_PER_HOUR) {
       await this.record(body, fp, "rate-capped");
       return fail(429, "rate-capped");
     }
