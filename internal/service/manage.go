@@ -66,6 +66,9 @@ type PasteAdmin interface {
 // to outsiders.
 var ErrNotFound = errors.New("service: not found")
 
+// ErrQuarantined tells an owner their paste is quarantined by the operator.
+var ErrQuarantined = errors.New("service: this paste is quarantined by the operator")
+
 // ErrInvalidName is returned by Rename when the name violates the length /
 // unicode rules.
 var ErrInvalidName = errors.New("service: name must be 1–60 printable Unicode chars, no newlines")
@@ -98,6 +101,10 @@ func NewManage(repo PasteAdmin, blob BlobUnit) *Manage {
 func (m *Manage) requireOwner(slug domain.Slug, owner domain.Owner) (domain.Paste, error) {
 	p, err := m.Repo.Get(slug)
 	if err != nil {
+		// Only the owner learns that the slug exists and why it is withheld.
+		if q, ok := errors.AsType[*domain.QuarantinedError](err); ok && q.Identity == owner.Identity() {
+			return domain.Paste{}, ErrQuarantined
+		}
 		return domain.Paste{}, ErrNotFound
 	}
 	if p.Identity != owner.Identity() {

@@ -195,8 +195,12 @@ func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
 		pasteRow
 		Manifest json.RawMessage `json:"manifest"`
 	}
-	if err := r.ask(context.Background(), "paste get", opPasteGet, slug.String(),
-		nil, &wire, notFound); err != nil {
+	status, err := r.call(context.Background(), opPasteGet, slug.String(), nil, &wire)
+	// A quarantine answer's body names the owner, which lands in the row.
+	if err == nil && status == http.StatusUnavailableForLegalReasons {
+		return pasteRow{}, &domain.QuarantinedError{Identity: domain.Identity(wire.Identity)}
+	}
+	if err := answer("paste get", status, err, notFound); err != nil {
 		return pasteRow{}, err
 	}
 	row := wire.pasteRow
@@ -372,7 +376,7 @@ func (r *PasteRepo) DropStaleOwnerEntry(slug domain.Slug, owner string) (bool, e
 	if owner == "" {
 		return false, nil
 	}
-	if _, err := r.Get(slug); err == nil {
+	if _, err := r.Get(slug); err == nil || errors.Is(err, domain.ErrQuarantined) {
 		return false, nil // the paste exists; the entry is not stale
 	} else if !errors.Is(err, domain.ErrNotFound) {
 		return false, err
