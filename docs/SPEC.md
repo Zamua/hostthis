@@ -2743,6 +2743,14 @@ is empty: the denylist fails open, because refusing every session while the
 Worker is unreachable would turn a metadata outage into a full SSH outage,
 and an unreachable Worker already fails every verb that needs it.
 
+**Private deployments.** `HOSTTHIS_SSH_ALLOW`, comma-separated entries in the
+same two shapes, makes an instance private: a session is admitted only when its
+key or its peer address matches an entry, and otherwise exits 7 with
+`hostthis: this instance is private; your key or network is not on its
+allow-list`. It is static configuration, read at startup, for a staging
+instance that must not become a public upload host. An entry that parses as
+neither shape stops the process at startup rather than being skipped.
+
 The denylist governs SSH admission only. Content already published stays
 until the operator takes it down ("Abuse reporting").
 

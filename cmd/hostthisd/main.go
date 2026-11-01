@@ -129,6 +129,13 @@ func main() {
 
 	denyGate := service.NewDenyGate(metadata.Denylist)
 	denyGate.Logger = logger
+	sshAllow, err := sshAllowList(os.Getenv("HOSTTHIS_SSH_ALLOW"))
+	if err != nil {
+		logger.Fatalf("HOSTTHIS_SSH_ALLOW: %v", err)
+	}
+	if sshAllow != nil {
+		logger.Printf("config: ssh allow-list with %d entries", sshAllow.Len())
+	}
 
 	landing, err := os.ReadFile(*landingPath)
 	if err != nil {
@@ -172,6 +179,7 @@ func main() {
 		Now:         time.Now,
 		KeyGate:     keyGate,
 		Denylist:    denyGate,
+		Allow:       sshAllow,
 		Uploads:     uploadGate,
 		BuildURL:    build,
 		Pods:        pods,
@@ -422,4 +430,26 @@ func envParse[T any](key string, fallback T, parse func(string) (T, error), want
 		os.Exit(2)
 	}
 	return n
+}
+
+// sshAllowList parses HOSTTHIS_SSH_ALLOW, comma-separated key fingerprints and
+// CIDR prefixes in the denylist's entry format. Empty means no allow-list. An
+// entry that does not parse is an error rather than skipped: a typo must not
+// lock the operator out silently or let everyone in.
+func sshAllowList(raw string) (*domain.Denylist, error) {
+	var entries []domain.DenyEntry
+	for item := range strings.SplitSeq(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			entries = append(entries, domain.DenyEntry{Entry: item})
+		}
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	list := domain.NewDenylist(entries)
+	if list.Len() != len(entries) {
+		return nil, fmt.Errorf("%d of %d entries are neither a SHA256: fingerprint nor a CIDR prefix",
+			len(entries)-list.Len(), len(entries))
+	}
+	return &list, nil
 }

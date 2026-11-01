@@ -67,6 +67,7 @@ type stack struct {
 type stackOpts struct {
 	keyGateCap int
 	denylist   bool
+	allow      *domain.Denylist
 	sites      bool
 	proxyProto bool
 	manageRepo func(*worker.PasteRepo) service.PasteAdmin
@@ -107,6 +108,18 @@ func withKeyGate(cap int) stackOpt { return func(o *stackOpts) { o.keyGateCap = 
 // withDenylist wires a DenyGate over the live denylist cell; the test adds
 // entries at s.endpoint and calls s.denyGate.Refresh.
 func withDenylist() stackOpt { return func(o *stackOpts) { o.denylist = true } }
+
+// withAllow makes the server private to the given entries.
+func withAllow(entries ...string) stackOpt {
+	return func(o *stackOpts) {
+		var list []domain.DenyEntry
+		for _, e := range entries {
+			list = append(list, domain.DenyEntry{Entry: e})
+		}
+		d := domain.NewDenylist(list)
+		o.allow = &d
+	}
+}
 
 // withSites wires the static-site deploy path on both the ssh and http side.
 func withSites() stackOpt { return func(o *stackOpts) { o.sites = true } }
@@ -174,6 +187,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		denyGate = service.NewDenyGate(worker.NewDenylistRepo(endpoint, nil))
 		sshSrv.Denylist = denyGate
 	}
+	sshSrv.Allow = o.allow
 
 	hs := httptest.NewServer(httpSrv.Handler())
 	t.Cleanup(hs.Close)

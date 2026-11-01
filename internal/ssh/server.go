@@ -64,9 +64,12 @@ type Server struct {
 	Sites       SiteReader        // optional; by-slug site read for `url`/`qr` (nil = paste-only)
 	KeyGate     *service.KeyGate  // optional; nil disables the Sybil rate limit
 	Denylist    *service.DenyGate // optional; nil bans nothing
-	Uploads     *UploadAdmission  // optional; nil admits every upload at once
-	Now         func() time.Time  // clock; defaults to time.Now when nil
-	BuildURL    URLBuilder
+	// Allow, when set, admits only sessions matching one of its entries: a
+	// private deployment such as staging.
+	Allow    *domain.Denylist
+	Uploads  *UploadAdmission // optional; nil admits every upload at once
+	Now      func() time.Time // clock; defaults to time.Now when nil
+	BuildURL URLBuilder
 	// Pods and PodLinkURL serve `pod`; nil answers that pods are unavailable.
 	Pods       *service.Pods
 	PodLinkURL func(id, secret string) string
@@ -308,12 +311,13 @@ func sessionOwner(sess gossh.Session) (domain.Owner, bool) {
 	return owner, true
 }
 
-// denylistMiddleware refuses a banned key or network ahead of the Sybil gate,
-// so a banned session records nothing there.
+// denylistMiddleware refuses a session off the allow-list, when there is one,
+// or a banned key or network, ahead of the Sybil gate, so a refused session
+// records nothing there.
 func (s *Server) denylistMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
 		return func(sess gossh.Session) {
-			if s.Denylist == nil {
+			if s.Denylist == nil && s.Allow == nil {
 				next(sess)
 				return
 			}
@@ -322,6 +326,13 @@ func (s *Server) denylistMiddleware() wish.Middleware {
 				return
 			}
 			addr, _ := netip.AddrFromSlice(remoteIP(sess))
+			if s.Allow != nil {
+				if _, ok := s.Allow.Match(owner.Fingerprint(), addr); !ok {
+					_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: this instance is private; your key or network is not on its allow-list")
+					_ = sess.Exit(ExitBanned)
+					return
+				}
+			}
 			if reason, banned := s.Denylist.Check(owner, addr); banned {
 				fmt.Fprintln(sess.Stderr(), "hostthis: this key or network is banned from hostthis") //nolint:errcheck
 				if reason != "" {
