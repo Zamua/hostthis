@@ -4646,7 +4646,7 @@ and nowhere else, for an automated abuse watcher:
 | route | body |
 | --- | --- |
 | `POST /watcher/quarantine` | `{slug, reason}` |
-| `POST /watcher/ban-key` | `{identity, reason}` (a `SHA256:` fingerprint, `key:` prefix optional) |
+| `POST /watcher/ban-key` | `{identity, reason}` (a `SHA256:` fingerprint, `key:` prefix optional), or `{slug, reason}` to ban that slug's owner without the caller ever holding the fingerprint |
 
 It cannot release, delete, or ban a network. Its actions pass two guards the
 operator routes skip:
