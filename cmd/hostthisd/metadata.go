@@ -21,8 +21,10 @@ import (
 type metadataBundle struct {
 	Repo    metadataRepo
 	KeyGate service.KeyGateRepo
-	Sites   siteStore
-	Rooms   roomStore
+	// Denylist is the operator's banned keys and networks.
+	Denylist service.DenylistSource
+	Sites    siteStore
+	Rooms    roomStore
 	// RoomRelay is the cell-backed real-time transport.
 	RoomRelay httpapi.RoomRelay
 	// Solid forwards the apex /_solid/ paths to the Worker.
@@ -78,10 +80,11 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 
 	logger.Printf("metadata: worker at %s", base)
 	return &metadataBundle{
-		Repo:    repo,
-		KeyGate: worker.NewKeyGateRepo(base, client),
-		Sites:   storage.NewSites(repo),
-		Rooms:   rooms,
+		Repo:     repo,
+		KeyGate:  worker.NewKeyGateRepo(base, client),
+		Denylist: worker.NewDenylistRepo(base, client),
+		Sites:    storage.NewSites(repo),
+		Rooms:    rooms,
 		// Every socket terminates at its Room cell, which owns broadcast order.
 		RoomRelay: worker.NewRoomProxy(base, client),
 		Solid:     solid,

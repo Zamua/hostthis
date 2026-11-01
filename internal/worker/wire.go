@@ -20,6 +20,8 @@ const (
 	bySlug   routingKey = "slug"
 	byRoom   routingKey = "room"
 	bySubnet routingKey = "subnet"
+	// singleton addresses the one cell of a namespace, so no param names it.
+	singleton routingKey = ""
 )
 
 type route struct {
@@ -38,6 +40,9 @@ func (rt route) withQuery(q string) route {
 func (rt route) target(val string) string {
 	// Merged rather than appended: a second bare "?" would make the whole
 	// string one unparseable query.
+	if rt.key == singleton {
+		return rt.path
+	}
 	sep := "?"
 	if strings.Contains(rt.path, "?") {
 		sep = "&"
@@ -74,6 +79,8 @@ var (
 
 	opSubnetAdmit    = route{http.MethodPost, "/subnet/admit", bySubnet}
 	opSubnetSnapshot = route{http.MethodGet, "/subnet/snapshot", bySubnet}
+
+	opDenylistList = route{http.MethodGet, "/denylist/list", singleton}
 
 	opRoomCreate          = route{http.MethodPost, "/room/create", byRoom}
 	opRoomMeta            = route{http.MethodGet, "/room/meta", byRoom}
