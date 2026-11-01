@@ -80,8 +80,9 @@ type Manage struct {
 	// (domain.MIMESniffer).
 	Sniff   domain.MIMESniffer
 	Repo    PasteAdmin
-	Blob    BlobUnit // per-upload writes, streaming reads, prefix deletes
-	KeyGate *KeyGate // optional; populates WhoamiInfo.Session when set
+	Blob    BlobUnit    // per-upload writes, streaming reads, prefix deletes
+	KeyGate *KeyGate    // optional; populates WhoamiInfo.Session when set
+	Screen  *ScreenGate // optional; screens each update before it is committed
 	// UploadIDs mints each upload's id, which decides where its bytes are
 	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
 	UploadIDs UploadIDSource
@@ -183,6 +184,9 @@ func (m *Manage) Update(slug domain.Slug, owner domain.Owner, body io.Reader, ty
 	// skip the deploy pipeline's safe-untar guards.
 	if kind == domain.KindSite {
 		return UpdateResult{}, domain.ErrUnsupportedKind
+	}
+	if err := m.Screen.checkStaged(owner, staged, existing.Name); err != nil {
+		return UpdateResult{}, err
 	}
 	now := m.Now().UTC()
 	ctx := context.Background()

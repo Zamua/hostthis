@@ -63,6 +63,8 @@ type DeploySite struct {
 	// Logger records object deletions that fail after the outcome is decided.
 	// nil discards.
 	Logger *log.Logger
+	// Screen, when set, screens each deploy before it is committed.
+	Screen *ScreenGate
 	// MaxArchiveBytes caps the compressed archive read; 0 means
 	// domain.MaxSiteArchiveBytes.
 	MaxArchiveBytes int64
@@ -214,6 +216,15 @@ func (d *DeploySite) extract(body io.Reader, owner domain.Owner, now time.Time, 
 	}
 	sink := &blobSink{blob: d.Blob, uploadID: uploadID, base: base.standalone(), stagingDir: d.StagingDir}
 	defer sink.Close()
+	if d.Screen.applies(owner) {
+		bundle, err := newScreenBundle(d.StagingDir)
+		if err != nil {
+			discardUpload(d.Blob, d.Logger, uploadID)
+			return domain.Manifest{}, "", err
+		}
+		defer bundle.discard()
+		sink.bundle = bundle
+	}
 	limit := d.MaxArchiveBytes
 	if limit <= 0 {
 		limit = domain.MaxSiteArchiveBytes
@@ -239,6 +250,9 @@ func (d *DeploySite) extract(body io.Reader, owner domain.Owner, now time.Time, 
 		_, err = classifyCommitErr(err)
 	case len(man.Files) == 0:
 		err = ErrEmptySite
+	case sink.bundle != nil:
+		// Last: nothing is committed, so a refusal leaves only these bytes.
+		err = d.Screen.checkBundle(owner, sink.bundle)
 	}
 	if err != nil {
 		discardUpload(d.Blob, d.Logger, uploadID)
@@ -380,6 +394,8 @@ type blobSink struct {
 	next       int
 	pack       domain.BlobPack
 	packKey    string
+	// bundle, when set, keeps what screening needs of each stored file.
+	bundle *screenBundle
 }
 
 // siteExtractBudget is the unallocated owner quota available to the next
@@ -395,11 +411,25 @@ func (s *blobSink) nextKey() string {
 }
 
 func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int, error) {
+	if s.bundle == nil {
+		return s.store(p, r, r, size)
+	}
+	read, record := s.bundle.capture(p, r)
+	ref, n, err := s.store(p, r, read, size)
+	if err == nil {
+		record()
+	}
+	return ref, n, err
+}
+
+// store reads the file from read; r is the reader untar handed over, which
+// says whether it carries a digest.
+func (s *blobSink) store(p string, r, read io.Reader, size int64) (domain.BlobRef, int, error) {
 	if domain.Packable(size) {
-		return s.storePacked(p, r)
+		return s.storePacked(p, read)
 	}
 	if d, ok := r.(*domain.DigestReader); ok && len(s.base) > 0 {
-		return s.storeUnlessHeld(p, d)
+		return s.storeUnlessHeld(p, read, d)
 	}
 	key := s.nextKey()
 	// No buffer: the body streams through the compressor into the object store,
@@ -407,7 +437,7 @@ func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int
 	// than its own size. The untar guard admits a single file up to the owner's
 	// whole remaining allowance, so buffering would size peak memory to the
 	// QUOTA.
-	compressedSize, err := s.blob.StageEncoding(context.Background(), key, r)
+	compressedSize, err := s.blob.StageEncoding(context.Background(), key, read)
 	if err != nil {
 		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
@@ -417,17 +447,18 @@ func (s *blobSink) Store(p string, r io.Reader, size int64) (domain.BlobRef, int
 // storeUnlessHeld spills the file to disk while hashing it, then points at the
 // base's object when that holds the same bytes, and stores the spill
 // otherwise. Disk, not memory, is the buffer.
-func (s *blobSink) storeUnlessHeld(p string, r *domain.DigestReader) (domain.BlobRef, int, error) {
+// read yields the file through d, so d's digest covers every byte read.
+func (s *blobSink) storeUnlessHeld(p string, read io.Reader, d *domain.DigestReader) (domain.BlobRef, int, error) {
 	spill, err := os.CreateTemp(s.stagingDir, "hostthis-file-*")
 	if err != nil {
 		return domain.BlobRef{}, 0, fmt.Errorf("create file spill: %w", err)
 	}
 	defer os.Remove(spill.Name()) //nolint:errcheck
 	defer spill.Close()           //nolint:errcheck
-	if _, err := io.Copy(spill, r); err != nil {
+	if _, err := io.Copy(spill, read); err != nil {
 		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
-	if held, ok := s.base[r.Digest()]; ok {
+	if held, ok := s.base[d.Digest()]; ok {
 		return held.Ref(), held.CompressedSize, nil
 	}
 	if _, err := spill.Seek(0, io.SeekStart); err != nil {

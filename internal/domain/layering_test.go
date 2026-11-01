@@ -44,10 +44,12 @@ var layerPolicy = map[string][]string{
 	"roomwire": {"domain"},
 	"archive":  {"domain"},
 	"cache":    {"domain", "drain"},
-	"storage":  {"domain", "zstdenc"},
-	"service":  {"archive", "domain", "mime", "zstdenc"},
-	"http":     {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
-	"ssh":      {"archive", "domain", "drain", "mime", "service", "zstdenc"},
+	// The screening service's HTTP adapter.
+	"screen":  {"domain"},
+	"storage": {"domain", "zstdenc"},
+	"service": {"archive", "domain", "mime", "zstdenc"},
+	"http":    {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
+	"ssh":     {"archive", "domain", "drain", "mime", "service", "zstdenc"},
 
 	// The worker adapters implement domain-shaped ports directly, beside storage
 	// rather than on top of it.

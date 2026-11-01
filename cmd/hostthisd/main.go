@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/pprof"
 	"strconv"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/metrics"
+	"github.com/Zamua/hostthis/internal/screen"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -119,6 +121,14 @@ func main() {
 	uploadSvc.StagingDir = stagingDir
 	manageSvc.StagingDir = stagingDir
 	deploySvc.StagingDir = stagingDir
+
+	screenGate, err := buildScreenGate(logger)
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
+	uploadSvc.Screen = screenGate
+	manageSvc.Screen = screenGate
+	deploySvc.Screen = screenGate
 
 	keyGate := service.NewKeyGate(keyGateRepo)
 	keyGate.MaxFreshKeysPerSubnet = *freshKeysLimit
@@ -452,4 +462,36 @@ func sshAllowList(raw string) (*domain.Denylist, error) {
 			len(entries)-list.Len(), len(entries))
 	}
 	return &list, nil
+}
+
+var keyFingerprint = regexp.MustCompile(`^SHA256:[0-9a-f]{64}$`)
+
+// buildScreenGate wires pre-publish screening when HOSTTHIS_SCREEN_URL names
+// a service (docs/SPEC.md "Pre-publish screening"); nil screens nothing.
+func buildScreenGate(logger *log.Logger) (*service.ScreenGate, error) {
+	base := os.Getenv("HOSTTHIS_SCREEN_URL")
+	if base == "" {
+		return nil, nil
+	}
+	exempt := map[string]bool{}
+	for item := range strings.SplitSeq(os.Getenv("HOSTTHIS_SCREEN_EXEMPT"), ",") {
+		item = strings.TrimPrefix(strings.TrimSpace(item), domain.IdentityKeyPrefix)
+		if item == "" {
+			continue
+		}
+		if !keyFingerprint.MatchString(item) {
+			return nil, fmt.Errorf("HOSTTHIS_SCREEN_EXEMPT: %q is not a SHA256: key fingerprint", item)
+		}
+		exempt[item] = true
+	}
+	logger.Printf("config: pre-publish screening at %s, %d exempt keys", base, len(exempt))
+	return &service.ScreenGate{
+		Screener: &screen.Client{
+			Base:  base,
+			Token: os.Getenv("HOSTTHIS_SCREEN_TOKEN"),
+			HTTP:  &http.Client{Timeout: 25 * time.Second},
+		},
+		Exempt: exempt,
+		Logger: logger,
+	}, nil
 }
