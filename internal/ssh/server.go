@@ -30,6 +30,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/drain"
 	"github.com/Zamua/hostthis/internal/service"
 )
 
@@ -75,12 +76,12 @@ type Server struct {
 	// the client address from it; set only behind a TCP forwarder that sends one.
 	ProxyProtocol bool
 
-	lifecycleMu    sync.Mutex
-	server         *gossh.Server
-	listener       net.Listener
-	stopping       bool
-	activeSessions int
-	sessionsZero   chan struct{}
+	// lifecycleMu orders Shutdown/Close against ListenAndServe installing the
+	// server, so a server installed after stop is closed instead of served.
+	lifecycleMu sync.Mutex
+	server      *gossh.Server
+	listener    net.Listener
+	sessions    drain.Gate
 }
 
 // metrics returns the injected recorder, or a no-op when none was wired. The
@@ -100,12 +101,12 @@ func (noopRecorder) RecordCommand(string, string, time.Duration) {}
 func (s *Server) sessionLifecycleMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
 		return func(sess gossh.Session) {
-			if !s.beginSession() {
+			if !s.sessions.Admit() {
 				_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: service restarting")
 				_ = sess.Exit(ExitErr)
 				return
 			}
-			defer s.endSession()
+			defer s.sessions.Release()
 			next(sess)
 		}
 	}
@@ -119,47 +120,9 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
-func (s *Server) beginSession() bool {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	if s.stopping {
-		return false
-	}
-	if s.activeSessions == 0 {
-		s.sessionsZero = make(chan struct{})
-	}
-	s.activeSessions++
-	return true
-}
-
-func (s *Server) endSession() {
-	s.lifecycleMu.Lock()
-	defer s.lifecycleMu.Unlock()
-	s.activeSessions--
-	if s.activeSessions == 0 {
-		close(s.sessionsZero)
-	}
-}
-
-func (s *Server) waitSessions(ctx context.Context) error {
-	s.lifecycleMu.Lock()
-	if s.activeSessions == 0 {
-		s.lifecycleMu.Unlock()
-		return nil
-	}
-	zero := s.sessionsZero
-	s.lifecycleMu.Unlock()
-	select {
-	case <-zero:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.lifecycleMu.Lock()
-	s.stopping = true
+	s.sessions.Stop()
 	srv := s.server
 	listener := s.listener
 	s.lifecycleMu.Unlock()
@@ -172,12 +135,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			shutdownErr = err
 		}
 	}
-	return errors.Join(shutdownErr, s.waitSessions(ctx))
+	return errors.Join(shutdownErr, s.sessions.Wait(ctx))
 }
 
 func (s *Server) Close() error {
 	s.lifecycleMu.Lock()
-	s.stopping = true
+	s.sessions.Stop()
 	srv := s.server
 	listener := s.listener
 	s.lifecycleMu.Unlock()
@@ -190,7 +153,7 @@ func (s *Server) Close() error {
 			closeErr = err
 		}
 	}
-	return errors.Join(closeErr, s.waitSessions(context.Background()))
+	return errors.Join(closeErr, s.sessions.Wait(context.Background()))
 }
 
 // ListenAndServe blocks, returning whatever the listener returns (nil after a
@@ -256,7 +219,7 @@ func (s *Server) ListenAndServe() error {
 		s.Logger.Printf("ssh: PROXY protocol required (real client IPs from PROXY headers; headerless connections refused)")
 	}
 	s.lifecycleMu.Lock()
-	if s.stopping {
+	if s.sessions.Stopped() {
 		s.lifecycleMu.Unlock()
 		_ = ln.Close()
 		_ = srv.Close()

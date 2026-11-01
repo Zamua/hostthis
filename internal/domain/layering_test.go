@@ -33,6 +33,8 @@ var layerPolicy = map[string][]string{
 	"mime": {},
 	// A leaf like mime: the pooled at-rest encoder both byte paths share.
 	"zstdenc": {},
+	// A leaf like zstdenc: the admit and drain lifecycle shutdown paths share.
+	"drain": {},
 	// Collectors only: the consumer declares a recorder port and this package
 	// satisfies it, so it must never reach the layers it observes.
 	"metrics": {},
@@ -41,15 +43,15 @@ var layerPolicy = map[string][]string{
 	// implementations speak it, and it may never grow machinery.
 	"roomwire": {"domain"},
 	"archive":  {"domain"},
-	"cache":    {"domain"},
+	"cache":    {"domain", "drain"},
 	"storage":  {"domain", "zstdenc"},
 	"service":  {"archive", "domain", "mime", "zstdenc"},
 	"http":     {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
-	"ssh":      {"archive", "domain", "mime", "service", "zstdenc"},
+	"ssh":      {"archive", "domain", "drain", "mime", "service", "zstdenc"},
 
 	// The worker adapters implement domain-shaped ports directly, beside storage
 	// rather than on top of it.
-	"worker": {"domain", "roomwire"},
+	"worker": {"domain", "drain", "roomwire"},
 
 	// Test-only harness: the importable package is empty and must stay so. Its
 	// _test.go files wire whole stacks, which is why the graph is production-only.

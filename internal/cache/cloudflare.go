@@ -56,17 +56,26 @@ type Cloudflare struct {
 	Backoff  time.Duration // wait before the first retry, doubled per retry
 	Attempts int           // calls per batch before it is dropped
 
-	mu      sync.Mutex
-	queue   []scope
-	queued  map[scope]bool
-	started bool
-	closed  bool
-	wake    chan struct{}
-	stop    chan struct{}
-	done    chan struct{}
-	ctx     context.Context
-	cancel  context.CancelFunc
+	mu     sync.Mutex
+	queue  []scope
+	queued map[scope]bool
+	state  loopState
+	wake   chan struct{}
+	stop   chan struct{}
+	done   chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
 }
+
+// loopState is the send loop's lifecycle. The loop starts on the first purge,
+// so a purger that never purges has no goroutine to stop.
+type loopState int
+
+const (
+	loopIdle    loopState = iota // no purge yet; no loop
+	loopRunning                  // loop started; accepting purges
+	loopClosed                   // Shutdown called; refusing purges
+)
 
 // PurgePaste queues everything cached under the slug's scope (slugScope) for
 // the next call. A scope already queued is not queued twice.
@@ -77,17 +86,18 @@ func (c *Cloudflare) PurgePaste(slug domain.Slug) error {
 	sc := slugScope(c.Apex, c.Mode, slug)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	switch c.state {
+	case loopClosed:
 		return ErrClosed
-	}
-	if !c.started {
-		c.started = true
+	case loopIdle:
+		c.state = loopRunning
 		c.queued = map[scope]bool{}
 		c.wake = make(chan struct{}, 1)
 		c.stop = make(chan struct{})
 		c.done = make(chan struct{})
 		c.ctx, c.cancel = context.WithCancel(context.Background())
 		go c.run()
+	case loopRunning:
 	}
 	if !c.queued[sc] {
 		c.queued[sc] = true
@@ -104,10 +114,10 @@ func (c *Cloudflare) PurgePaste(slug domain.Slug) error {
 // deadline the loop is cancelled and the rest dropped.
 func (c *Cloudflare) Shutdown(ctx context.Context) error {
 	c.mu.Lock()
-	started, already := c.started, c.closed
-	c.closed = true
+	prev := c.state
+	c.state = loopClosed
 	c.mu.Unlock()
-	if !started || already {
+	if prev != loopRunning {
 		return nil
 	}
 	close(c.stop)
