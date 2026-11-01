@@ -3,6 +3,7 @@ import { ECDSA_P256, VAPID_KEY, VAPID_TTL_MS, httpsOrigin, rawPoint, signVapid }
 import { manifestObjects, resolveRead } from "../read.js";
 import { cellRoute } from "./image.js";
 import { USER_QUOTA_BYTES } from "../rooms/policy.js";
+import { DECIDE, DROP, PROJECT, advance, decisionEvent, nextPending, samePending, startPending } from "./artifact-saga.js";
 import { cellCall, dispatch, mutation, read, requireShape } from "./ops.js";
 import { ARTIFACT_PENDING, ARTIFACT_RECEIPT_PREFIX, LEGACY_VERSIONS, chargeOf, createAbortKey, deleteInBatches, fence, isTooBig, isUploadId, latestLive, loadManifest, loadVersions, manifestKey, prefixOf, retryDelay, servedOf, splitLegacyVersions, uploadPrefix, versionKey, withUploadId } from "./records.js";
 
@@ -472,6 +473,9 @@ export class Paste {
     });
   }
 
+  // Runs the pending operation to its end or its next retry: asks the cell its
+  // stage calls, turns the answer into an event, and performs the effect
+  // nextPending names (artifact-saga.js).
   async resumeArtifactPending(rearm = false) {
     let pending = await this.state.storage.get(ARTIFACT_PENDING);
     if (!pending) {
@@ -483,156 +487,156 @@ export class Paste {
     if (rearm) {
       await this.state.storage.setAlarm(Date.now() + retryDelay((pending.attempts ?? 0) + 1));
     }
-
-    if (pending.stage === "decide") {
-      let response;
-      let decision;
-      try {
-        response = await this.identityCall(pending.owner, "artifactdecide", {
-          slug: pending.slug,
-          generation: pending.generation,
-          version: pending.version,
-          target: pending.target,
-          userCap: pending.userCap,
-        });
-        decision = await response.json();
-      } catch {
-        return this.retryArtifactPending();
-      }
-
-      if (["fail", "remove"].includes(pending.kind) && response.status === 404 &&
-          decision.error === "artifact-absent") {
-        const settled = await this.state.storage.transaction(async (tx) => {
-          const current = await tx.get(ARTIFACT_PENDING);
-          if (!current || current.opId !== pending.opId ||
-              current.generation !== pending.generation || current.stage !== "decide") {
-            return false;
-          }
-          if (pending.kind === "remove") {
-            const tombstone = await tx.get("artifactTombstone");
-            if (!tombstone || tombstone.generation !== pending.generation) {
-              return false;
+    for (;;) {
+      const event = await this.artifactStageEvent(pending);
+      const step = nextPending(pending, event);
+      switch (step.effect) {
+        case "retry":
+          return this.retryArtifactPending({ outcome: step.outcome });
+        case "settleAbsent":
+          return (await this.settleAbsentArtifact(pending)) ? { outcome: "complete" } : this.retryArtifactPending();
+        case "refuse":
+          return this.refuseArtifact(pending);
+        case "publish":
+          try {
+            await this.publishAppend(pending);
+          } catch (error) {
+            if (!isTooBig(error)) {
+              throw error;
             }
-            await tx.delete("artifactTombstone");
-          } else {
+            await this.abandonAppend(pending);
+            return this.resumeArtifactPending();
+          }
+          break;
+        case "advance":
+          await this.state.storage.transaction(async (tx) => {
             const row = await tx.get("row");
-            if (row?.generation === pending.generation) {
+            if (row) {
               row.accountingVersion = pending.version;
               await tx.put("row", row);
             }
-          }
-          await tx.delete(ARTIFACT_PENDING);
-          await tx.deleteAlarm();
-          return true;
-        });
-        return settled ? { outcome: "complete" } : this.retryArtifactPending();
-      }
-      if (response.status === 507 && decision.granted === false &&
-          decision.version === pending.version) {
-        const receipt = { status: 507, body: { error: "over-quota" } };
-        await this.state.storage.transaction(async (tx) => {
-          const row = await tx.get("row");
-          if (row) {
-            row.accountingVersion = pending.version;
-            await tx.put("row", row);
-          }
-          await tx.put(this.receiptKey(pending.generation, pending.opId), receipt);
-          await tx.delete(ARTIFACT_PENDING);
-          await tx.deleteAlarm();
-        });
-        return { outcome: "refused", receipt };
-      }
-      if (!response.ok || decision.granted !== true ||
-          decision.version !== pending.version || decision.allocated !== pending.target) {
-        return this.retryArtifactPending({ outcome: "conflict" });
-      }
-
-      if (pending.kind === "append") {
-        try {
-          await this.publishAppend(pending);
-        } catch (error) {
-          if (!isTooBig(error)) {
-            throw error;
-          }
-          await this.abandonAppend(pending);
-          return this.resumeArtifactPending();
-        }
-      } else {
-        await this.state.storage.transaction(async (tx) => {
-          const row = await tx.get("row");
-          if (row) {
-            row.accountingVersion = pending.version;
-            await tx.put("row", row);
-          }
-          pending.stage = ["remove", "fail"].includes(pending.kind) ? "drop" : "project";
-          pending.attempts = 0;
-          await tx.put(ARTIFACT_PENDING, pending);
-        });
+            await tx.put(ARTIFACT_PENDING, advance(pending));
+          });
+          break;
+        case "clear":
+          await this.clearArtifactPending();
+          return { outcome: step.outcome };
+        case "finishDrop":
+          await this.finishArtifactDrop(pending);
+          return (await this.state.storage.get(ARTIFACT_PENDING))
+            ? this.retryArtifactPending()
+            : { outcome: step.outcome };
+        default:
+          throw new Error(`unknown artifact effect ${step.effect}`);
       }
       pending = await this.state.storage.get(ARTIFACT_PENDING);
+      if (!pending) {
+        return { outcome: "complete" };
+      }
     }
+  }
 
-    if (pending.stage === "project") {
-      const row = await this.state.storage.get("row");
-      if (!row) {
-        return this.retryArtifactPending();
+  // The event the pending operation's stage call produces.
+  async artifactStageEvent(pending) {
+    try {
+      switch (pending.stage) {
+        case DECIDE: {
+          const response = await this.identityCall(pending.owner, "artifactdecide", {
+            slug: pending.slug,
+            generation: pending.generation,
+            version: pending.version,
+            target: pending.target,
+            userCap: pending.userCap,
+          });
+          return decisionEvent(pending, response.status, await response.json());
+        }
+        case PROJECT: {
+          const row = await this.state.storage.get("row");
+          if (!row) {
+            return "noRow";
+          }
+          const response = await this.identityCall(pending.owner, "artifactproject",
+            this.artifactProjection(row, pending));
+          return response.ok ? "projected" : "conflict";
+        }
+        case DROP: {
+          const response = await this.identityCall(pending.owner, "artifactdrop", {
+            slug: pending.slug,
+            generation: pending.generation,
+            version: pending.version,
+          });
+          return response.ok ? "dropped" : "conflict";
+        }
+        default:
+          return "invalid";
       }
-      let response;
-      try {
-        response = await this.identityCall(pending.owner, "artifactproject",
-          this.artifactProjection(row, pending));
-      } catch {
-        return this.retryArtifactPending();
-      }
-      if (!response.ok) {
-        return this.retryArtifactPending({ outcome: "conflict" });
-      }
-      await this.clearArtifactPending();
-      return { outcome: "complete" };
+    } catch {
+      return "unreachable";
     }
+  }
 
-    if (pending.stage === "drop") {
-      let response;
-      try {
-        response = await this.identityCall(pending.owner, "artifactdrop", {
-          slug: pending.slug,
-          generation: pending.generation,
-          version: pending.version,
-        });
-      } catch {
-        return this.retryArtifactPending();
+  // Identity no longer lists the artifact, so a remove or fail finishes
+  // without a drop. False when the cell moved on meanwhile.
+  async settleAbsentArtifact(pending) {
+    return this.state.storage.transaction(async (tx) => {
+      if (!samePending(await tx.get(ARTIFACT_PENDING), pending, DECIDE)) {
+        return false;
       }
-      if (!response.ok) {
-        return this.retryArtifactPending({ outcome: "conflict" });
+      if (pending.kind === "remove") {
+        const tombstone = await tx.get("artifactTombstone");
+        if (!tombstone || tombstone.generation !== pending.generation) {
+          return false;
+        }
+        await tx.delete("artifactTombstone");
+      } else {
+        const row = await tx.get("row");
+        if (row?.generation === pending.generation) {
+          row.accountingVersion = pending.version;
+          await tx.put("row", row);
+        }
       }
-      await this.state.storage.transaction(async (tx) => {
-        const current = await tx.get(ARTIFACT_PENDING);
-        if (!current || current.opId !== pending.opId ||
-            current.generation !== pending.generation || current.stage !== "drop") {
+      await tx.delete(ARTIFACT_PENDING);
+      await tx.deleteAlarm();
+      return true;
+    });
+  }
+
+  async refuseArtifact(pending) {
+    const receipt = { status: 507, body: { error: "over-quota" } };
+    await this.state.storage.transaction(async (tx) => {
+      const row = await tx.get("row");
+      if (row) {
+        row.accountingVersion = pending.version;
+        await tx.put("row", row);
+      }
+      await tx.put(this.receiptKey(pending.generation, pending.opId), receipt);
+      await tx.delete(ARTIFACT_PENDING);
+      await tx.deleteAlarm();
+    });
+    return { outcome: "refused", receipt };
+  }
+
+  async finishArtifactDrop(pending) {
+    await this.state.storage.transaction(async (tx) => {
+      if (!samePending(await tx.get(ARTIFACT_PENDING), pending, DROP)) {
+        return;
+      }
+      if (pending.kind === "remove") {
+        const tombstone = await tx.get("artifactTombstone");
+        if (!tombstone || tombstone.generation !== pending.generation) {
           return;
         }
-        if (pending.kind === "remove") {
-          const tombstone = await tx.get("artifactTombstone");
-          if (!tombstone || tombstone.generation !== pending.generation) {
-            return;
-          }
-          await tx.delete("artifactTombstone");
-        }
-        await tx.delete(ARTIFACT_PENDING);
-        await tx.deleteAlarm();
-      });
-      return (await this.state.storage.get(ARTIFACT_PENDING))
-        ? this.retryArtifactPending()
-        : { outcome: "complete" };
-    }
-
-    return this.retryArtifactPending();
+        await tx.delete("artifactTombstone");
+      }
+      await tx.delete(ARTIFACT_PENDING);
+      await tx.deleteAlarm();
+    });
   }
 
   async publishAppend(pending) {
     await this.state.storage.transaction(async (tx) => {
       const current = await tx.get(ARTIFACT_PENDING);
-      if (!current || current.opId !== pending.opId || current.stage !== "decide") {
+      if (!samePending(current, pending, DECIDE)) {
         return;
       }
       await splitLegacyVersions(tx);
@@ -656,7 +660,7 @@ export class Paste {
         ["row", row],
         [versionKey(version.ver), version],
         ["maxVer", version.ver],
-        [ARTIFACT_PENDING, { ...current, stage: "project", attempts: 0 }],
+        [ARTIFACT_PENDING, advance(current)],
         [this.receiptKey(pending.generation, pending.opId), receipt],
       ]);
       if (manifest) {
@@ -674,7 +678,7 @@ export class Paste {
     const latestVersion = (await this.state.storage.get("maxVer")) ?? 1;
     await this.state.storage.transaction(async (tx) => {
       const current = await tx.get(ARTIFACT_PENDING);
-      if (!current || current.opId !== pending.opId || current.stage !== "decide") {
+      if (!samePending(current, pending, DECIDE)) {
         return;
       }
       const { mutation, ...rest } = current;
@@ -712,16 +716,14 @@ export class Paste {
     if (!row.generation) {
       return false;
     }
-    const pending = {
-      kind: "projection",
-      stage: "project",
+    const pending = startPending("projection", {
       opId: "",
       slug: row.slug,
       owner: row.identity,
       generation: row.generation,
       version: row.accountingVersion ?? 0,
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
-    };
+    });
     await this.state.storage.transaction(async (tx) => {
       await tx.put(Object.fromEntries([["row", row], [ARTIFACT_PENDING, pending]]));
       await tx.setAlarm(Date.now());
@@ -793,9 +795,7 @@ export class Paste {
       charge = reuse.charge;
     }
     const target = this.liveCharge(versions) + charge;
-    const pending = {
-      kind: "append",
-      stage: "decide",
+    const pending = startPending("append", {
       opId: body.opId,
       slug: row.slug,
       owner: row.identity,
@@ -814,7 +814,7 @@ export class Paste {
         deleted: false,
         manifest: body.manifest ?? null,
       }, body.uploadId),
-    };
+    });
     try {
       await this.state.storage.transaction(async (tx) => {
         await tx.put(ARTIFACT_PENDING, pending);
@@ -938,9 +938,7 @@ export class Paste {
         freed: before - target,
       },
     };
-    const pending = {
-      kind: "deleteVersion",
-      stage: "decide",
+    const pending = startPending("deleteVersion", {
       opId: body.opId,
       slug: row.slug,
       owner: row.identity,
@@ -949,7 +947,7 @@ export class Paste {
       target,
       userCap: 0,
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
-    };
+    });
     await this.state.storage.transaction(async (tx) => {
       await splitLegacyVersions(tx);
       await tx.put(Object.fromEntries([
@@ -1057,9 +1055,7 @@ export class Paste {
     await this.rollServed(this.state.storage, row, versions);
     const target = this.liveCharge(versions);
     const receipt = { status: 200, body: { pinned: true, ver: wanted } };
-    const pending = {
-      kind: "pin",
-      stage: "decide",
+    const pending = startPending("pin", {
       opId: body.opId,
       slug: row.slug,
       owner: row.identity,
@@ -1068,7 +1064,7 @@ export class Paste {
       target,
       userCap: 0,
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
-    };
+    });
     await this.state.storage.transaction(async (tx) => {
       await tx.put(Object.fromEntries([
         ["row", row],
@@ -1099,9 +1095,7 @@ export class Paste {
       return refused;
     }
     const version = (row.accountingVersion ?? 0) + 1;
-    const pending = {
-      kind: "remove",
-      stage: "decide",
+    const pending = startPending("remove", {
       opId: body.opId,
       slug: row.slug,
       owner: row.identity,
@@ -1110,7 +1104,7 @@ export class Paste {
       target: 0,
       userCap: 0,
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
-    };
+    });
     // The ids are taken inside the removal: once the row is gone the slug can be
     // re-created, and a later read would name the new incarnation's uploads.
     const receipt = await this.state.storage.transaction(async (tx) => {
@@ -1156,9 +1150,7 @@ export class Paste {
     }
     row.status = "failed";
     const receipt = { status: 200, body: { changed: true, status: "failed" } };
-    const pending = {
-      kind: "fail",
-      stage: "decide",
+    const pending = startPending("fail", {
       opId: body.opId,
       slug: row.slug,
       owner: row.identity,
@@ -1167,7 +1159,7 @@ export class Paste {
       target: 0,
       userCap: 0,
       latestVersion: (await this.state.storage.get("maxVer")) ?? 1,
-    };
+    });
     await this.state.storage.transaction(async (tx) => {
       await tx.put(Object.fromEntries([
         ["row", row],
@@ -1201,6 +1193,10 @@ export class Paste {
     }
     if (body.status === "failed") {
       return this.fail(body);
+    }
+    // A pending row moves only to ready or failed (docs/SPEC.md "Paste lifecycle status").
+    if (body.status !== "ready") {
+      return Response.json({ error: "invalid-status" }, { status: 400 });
     }
     const row = await this.state.storage.get("row");
     if (!row) {

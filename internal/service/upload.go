@@ -25,7 +25,7 @@ type PasteRepo interface {
 	Get(domain.Slug) (domain.Paste, error)
 	// MarkReady / MarkFailed advance a still-PENDING paste only (MarkFailed
 	// also releases its reservation), so a late finalizer cannot resurrect a
-	// reconciler-failed paste; both no-op on a non-pending paste. MarkReady
+	// paste already failed; both no-op on a non-pending paste. MarkReady
 	// reports a paste that is gone, absent or under another generation, as
 	// domain.ErrNotFound; MarkFailed no-ops there. docs/SPEC.md "Paste
 	// lifecycle status".
