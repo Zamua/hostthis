@@ -4534,13 +4534,26 @@ never sets a `Domain=.hostthis.dev` cookie, so subdomain pastes cannot
 read apex cookies either. This is the same model major user-content hosts
 (codepen, jsfiddle, codesandbox, gh-pages) rely on.
 
-Within a paste's own origin, the only policy imposed is
-`Content-Security-Policy: form-action 'self'`. JS can do anything any
-same-origin script can do: load libraries from any CDN, fetch any HTTPS
-endpoint, render WebGL, talk to APIs. What a page cannot do is submit a form
-to another origin, which is how a hosted page is turned into a cross-site
-request forgery or credential-harvesting relay against a third party. A
-`srcdoc` iframe inherits the policy, so a page cannot nest its way around it.
+Within a paste's own origin, the policy imposed is
+
+```
+default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval';
+connect-src 'self' https: wss:; form-action 'self'
+```
+
+JS can do anything any same-origin script can do: load libraries from any
+HTTPS CDN, fetch any HTTPS endpoint, open WSS sockets, render WebGL, talk to
+APIs. What a page cannot do:
+
+- load or connect over plain `http:` or `ws:`, which is how a hosted page
+  probes the visitor's own machine, LAN or a cloud metadata address
+  (`http://127.0.0.1`, `http://169.254.169.254`);
+- submit a form to another origin, which is how a hosted page is turned into
+  a cross-site request forgery or credential-harvesting relay against a third
+  party.
+
+A `srcdoc` iframe inherits the policy, so a page cannot nest its way around
+it.
 
 The policy rides every full response of stored bytes (an HTML paste, a site
 or knowledge-base file, any `?raw` body) and never a 304: a cache applies a
@@ -4553,7 +4566,8 @@ Response headers on paste reads:
   (clickjacking defense)
 - `Referrer-Policy: no-referrer` - visiting a paste leaks nothing about
   who sent it
-- `Content-Security-Policy: form-action 'self'` on stored bytes, as above
+- `Content-Security-Policy` (https/wss only, forms same-origin) on stored
+  bytes, as above
 - `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
   - deny everything that needs explicit user grant
 
@@ -4577,6 +4591,8 @@ A paste's HTML cannot:
 - Tell other sites where the visitor came from (Referrer-Policy)
 - Submit a form to another origin, from the page or a `srcdoc` iframe
   (`form-action 'self'`)
+- Load or connect to anything over plain `http:` or `ws:`, including the
+  visitor's localhost and LAN
 
 Treat any URL on hostthis.dev as untrusted user content - same as you'd
 treat a codepen, a gist, or a github.io page.

@@ -497,7 +497,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"key-setup\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -528,7 +528,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -544,7 +544,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -560,7 +560,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -576,7 +576,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "application/json; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -592,7 +592,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -608,7 +608,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -624,7 +624,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -640,7 +640,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -656,7 +656,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "application/pdf",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
@@ -672,7 +672,7 @@
     "header": {
       "Accept-Ranges": "bytes",
       "Cache-Control": "public, no-cache",
-      "Content-Security-Policy": "form-action 'self'",
+      "Content-Security-Policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",

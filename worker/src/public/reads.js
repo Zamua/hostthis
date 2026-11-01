@@ -17,8 +17,9 @@ export const CONTENT_CACHE_CONTROL = "public, no-cache";
 const PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), usb=(), payment=()";
 const HTML = "text/html; charset=utf-8";
 
-// Keeps a stored page's forms on its own origin.
-const SANDBOX_POLICY = "form-action 'self'";
+// Page code may load and connect over https/wss only (no localhost, LAN or
+// metadata addresses), and forms stay on their own origin.
+const SANDBOX_POLICY = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'";
 
 function sandbox() {
   return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer" };
