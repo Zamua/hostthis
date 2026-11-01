@@ -56,3 +56,20 @@ var (
 	// hit its fresh-key quota for the window (the Sybil rate limit).
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
 )
+
+// ErrQuarantined is a slug the operator has quarantined (docs/SPEC.md
+// "Quarantine"). Its QuarantinedError also matches ErrNotFound, so every
+// reader serves a quarantined slug as absent unless it asks otherwise.
+var ErrQuarantined = errors.New("storage: quarantined by the operator")
+
+// QuarantinedError names the quarantined slug's owner, so only that owner is
+// told why it is unavailable.
+type QuarantinedError struct {
+	Identity Identity
+}
+
+func (e *QuarantinedError) Error() string { return ErrQuarantined.Error() }
+
+func (e *QuarantinedError) Is(target error) bool {
+	return target == ErrQuarantined || target == ErrNotFound
+}

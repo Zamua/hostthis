@@ -17,6 +17,9 @@ const PASTE_OPS = {
   versions: read((self) => self.listVersions()),
   resolve: read((self, _body, url) => self.resolve(url)),
   exists: read((self) => self.exists()),
+  operatorrow: read((self) => self.operatorRow()),
+  quarantine: mutation((self, body) => self.quarantine(body)),
+  release: mutation((self) => self.release()),
   put: mutation((self, body) => self.put(body)),
   abortcreate: mutation((self, body) => self.abortCreate(body)),
   status: mutation((self, body) => self.setStatus(body)),
@@ -373,7 +376,44 @@ export class Paste {
     if (!row) {
       return new Response("not found\n", { status: 404 });
     }
+    // Not 404: a caller taking the slug for absent would heal its owner's
+    // listing entry away while the row still exists.
+    if (await this.state.storage.get("quarantine")) {
+      return Response.json({ error: "quarantined", identity: row.identity }, { status: 451 });
+    }
     return Response.json(row);
+  }
+
+  // The row and any quarantine record, for operator tools: the takedown of a
+  // quarantined slug needs the row its get withholds.
+  async operatorRow() {
+    const [row, quarantine] = await Promise.all(["row", "quarantine"].map((k) => this.state.storage.get(k)));
+    if (!row) {
+      return new Response("not found\n", { status: 404 });
+    }
+    return Response.json({ row, quarantine: quarantine ?? null });
+  }
+
+  // A quarantined slug keeps its row, versions and bytes; only reads stop.
+  // The first record stands, so a later quarantine cannot rewrite its reason.
+  async quarantine(body) {
+    const row = await this.state.storage.get("row");
+    if (!row) {
+      return Response.json({ error: "no-such-paste" }, { status: 404 });
+    }
+    const prior = await this.state.storage.get("quarantine");
+    if (!prior) {
+      await this.state.storage.put("quarantine", { reason: body.reason, actor: body.actor, at: body.at });
+    }
+    return Response.json({ identity: row.identity, already: Boolean(prior) });
+  }
+
+  async release() {
+    const released = (await this.state.storage.get("quarantine")) !== undefined;
+    if (released) {
+      await this.state.storage.delete("quarantine");
+    }
+    return Response.json({ released });
   }
 
   // The rules run here, so neither a large manifest nor any other row field
@@ -383,7 +423,8 @@ export class Paste {
     if (!path?.startsWith("/")) {
       return Response.json({ error: "invalid-path" }, { status: 400 });
     }
-    return Response.json(resolveRead(await this.state.storage.get("row"), {
+    const [row, quarantine] = await Promise.all(["row", "quarantine"].map((k) => this.state.storage.get(k)));
+    return Response.json(resolveRead(quarantine ? undefined : row, {
       path,
       raw: url.searchParams.get("raw") === "1",
       files: url.searchParams.get("files") === "1",
@@ -392,7 +433,8 @@ export class Paste {
 
   // Presence, for routes that need no manifest.
   async exists() {
-    return Response.json({ exists: (await this.state.storage.get("row")) !== undefined });
+    const [row, quarantine] = await Promise.all(["row", "quarantine"].map((k) => this.state.storage.get(k)));
+    return Response.json({ exists: row !== undefined && !quarantine });
   }
 
   requireGeneration(row, body) {
@@ -1113,7 +1155,8 @@ export class Paste {
         .map((v) => v.uploadId)
         .filter(Boolean);
       const removed = { status: 200, body: { removed: true, uploads } };
-      await tx.delete("row");
+      // A re-minted slug must not inherit the old incarnation's quarantine.
+      await tx.delete(["row", "quarantine"]);
       await tx.put(Object.fromEntries([
         ["artifactTombstone", {
           slug: row.slug,

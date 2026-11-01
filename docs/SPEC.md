@@ -4560,6 +4560,67 @@ deletes no bytes, so the operator also deletes the upload prefixes its versions
 record. A user-facing "report this paste" UI is out of
 scope for v1.
 
+### Quarantine
+
+Quarantine hides a slug without destroying it, so a suspected abuse page can
+come down at once and the decision to delete can wait for a person. It is
+reversible: release restores the slug exactly as it was.
+
+While a slug is quarantined:
+
+- every public read answers 404, `?raw=1` and `?files=1` included, and the
+  slug's host is purged from the edge cache when it is quarantined and again
+  15 seconds later (the "Purged twice" bound);
+- the Paste cell's `get` answers 451 `{"error":"quarantined"}`, so every SSH
+  verb on it fails with `hostthis: this paste is quarantined by the
+  operator` (exit 4) and its owner can neither change nor delete it. 451 is
+  not 404 on purpose: a delete that took the slug for absent would heal the
+  owner's listing entry away while the row still exists;
+- the row, its versions and its bytes stay, and still count against the
+  owner's quota.
+
+The quarantine record (`reason`, `actor`, `at`) lives in the Paste cell beside
+the row. An operator deletes a quarantined slug with the takedown procedure
+above; the cell's `operatorrow` read returns the row regardless of
+quarantine for that purpose.
+
+**The Abuse cell.** One `Abuse` cell serializes every quarantine, release and
+watcher ban, and keeps the quarantine index (slug, owner, reason, actor, time)
+and an audit log of the last 1000 actions, refused ones included.
+
+**Two credentials.** The Worker's internal token reaches everything,
+including the operator routes:
+
+| route | body | answer |
+| --- | --- | --- |
+| `POST /abuse/quarantine` | `{slug, reason}` | 200 `{slug, quarantined, already, purged}`, 404 `no-such-paste` |
+| `POST /abuse/release` | `{slug}` | 200 `{slug, released, purged}` |
+| `GET /abuse/list` | | `{quarantined: [{slug, owner, reason, actor, at}]}` |
+| `GET /abuse/audit` | | `{entries: [...]}`, newest last |
+
+A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly two routes
+and nowhere else, for an automated abuse watcher:
+
+| route | body |
+| --- | --- |
+| `POST /watcher/quarantine` | `{slug, reason}` |
+| `POST /watcher/ban-key` | `{identity, reason}` (a `SHA256:` fingerprint, `key:` prefix optional) |
+
+It cannot release, delete, or ban a network. Its actions pass two guards the
+operator routes skip:
+
+- **Protected owners.** `HOSTTHIS_PROTECTED_OWNERS` lists owners the watcher
+  may never act on: each item a full fingerprint or the first 16 hex digits
+  of `sha256("key:<fingerprint>")`. A slug they own, or their key, answers
+  403 `protected-owner`.
+- **Rate cap.** At most 5 watcher quarantines and 5 watcher bans in any
+  rolling hour. Past the cap the route answers 429 `rate-capped` and does
+  nothing, so the watcher escalates to a person instead.
+
+Every action, accepted or refused, is appended to the audit log. The purge
+uses `HOSTTHIS_CF_PURGE_TOKEN` and `HOSTTHIS_CF_ZONE_ID`; without them the
+answer says `purged: false` and the edge keeps what it held until its TTL.
+
 ---
 
 ## Health endpoints

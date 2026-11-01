@@ -1196,6 +1196,8 @@ func emitServiceErr(sess gossh.Session, err error) {
 	switch {
 	case errors.Is(err, service.ErrNotFound):
 		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
+	case errors.Is(err, service.ErrQuarantined):
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: this paste is quarantined by the operator")
 	case errors.Is(err, service.ErrInvalidName):
 		fmt.Fprintln(sess.Stderr(), "hostthis: name must be 1–60 printable chars, no newlines")
 	case errors.Is(err, domain.ErrUnsupportedKind):
@@ -1227,7 +1229,7 @@ func emitServiceErr(sess gossh.Session, err error) {
 // to ErrNotFound so existence cannot leak across identities, so a
 // foreign-identity verb attempt and a missing slug both exit ExitNotFound.
 func exitForServiceErr(err error) int {
-	if errors.Is(err, service.ErrNotFound) {
+	if errors.Is(err, service.ErrNotFound) || errors.Is(err, service.ErrQuarantined) {
 		return ExitNotFound
 	}
 	return ExitErr

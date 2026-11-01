@@ -33,7 +33,8 @@ func newCell(base string, c *http.Client) *cell {
 func isCellAnswer(status int) bool {
 	switch status {
 	case http.StatusNotFound, http.StatusConflict, http.StatusLocked,
-		http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage:
+		http.StatusRequestEntityTooLarge, http.StatusInsufficientStorage,
+		http.StatusUnavailableForLegalReasons:
 		return true
 	}
 	return false
