@@ -69,7 +69,7 @@ func (s *Server) streamDocument(w http.ResponseWriter, r *http.Request, slug dom
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
 	h.Set("Cache-Control", contentCacheControl)
-	if notModified(w, r, `"`+entry.Validator()+`"`, updatedAt) {
+	if notModified(w, r, storedETag(entry.Validator()), updatedAt) {
 		return
 	}
 	s.streamEntry(w, r, slug, entry, rawContentType[domain.KindKnowledgeBase], "knowledge base", "document")

@@ -7,6 +7,7 @@ import test from "node:test";
 import { listAssets, REPO } from "../build/shells.mjs";
 import { entryValidator } from "../src/read.js";
 import { goStringList } from "../src/public/gojson.js";
+import { storedETag } from "../src/public/reads.js";
 import { cleanRedirect } from "../src/public/path.js";
 import { rawContentType, renderShell } from "../src/public/shells.js";
 import { publicReads } from "../src/public/surface.js";
@@ -130,7 +131,7 @@ function expectFor(v, row) {
         body: entryBytes(want.entry),
         blob: want.entry.key,
         length: want.entry.decodedSize > 0 ? String(want.entry.decodedSize) : null,
-        headers: { ...validators(`"${entryValidator(want.entry)}"`), "content-type": types[want.action] },
+        headers: { ...validators(storedETag(entryValidator(want.entry))), "content-type": types[want.action] },
       };
     }
     case "shell":
@@ -207,9 +208,9 @@ test("a conditional request is answered before any payload is read, comparing we
   w.blob("uploads/a/0", "<h1>hi</h1>");
   const lastModified = new Date(UPDATED).toUTCString();
   const notModified = [
-    { "If-None-Match": "\"uploads/a/0\"" },
-    { "If-None-Match": "W/\"uploads/a/0\"" },
-    { "If-None-Match": "\"other\", W/\"uploads/a/0\"" },
+    { "If-None-Match": storedETag("uploads/a/0") },
+    { "If-None-Match": `W/${storedETag("uploads/a/0")}` },
+    { "If-None-Match": `"other", W/${storedETag("uploads/a/0")}` },
     { "If-None-Match": " * " },
     { "If-Modified-Since": lastModified },
     { "If-Modified-Since": "Sun, 07 Jun 2026 14:00:00.5 GMT" },
@@ -226,7 +227,7 @@ test("a conditional request is answered before any payload is read, comparing we
     assert.equal(res.status, 304, JSON.stringify(headers));
     assert.equal(await res.text(), "");
     assert.equal(res.headers.get("Content-Security-Policy"), null);
-    assert.equal(res.headers.get("ETag"), "\"uploads/a/0\"");
+    assert.equal(res.headers.get("ETag"), storedETag("uploads/a/0"));
     assert.equal(res.headers.get("Last-Modified"), lastModified);
     assert.equal(res.headers.get("Cache-Control"), "public, no-cache");
     assert.equal(res.headers.get("Content-Type"), null);
@@ -241,7 +242,7 @@ test("a conditional request is answered before any payload is read, comparing we
     { "If-Modified-Since": "Sun, 7 Jun 2026 14:00:00 GMT" },
     // A present If-None-Match decides alone (RFC 9110 section 13.2.2).
     { "If-None-Match": "\"other\"", "If-Modified-Since": lastModified },
-    { "If-None-Match": "W/\"other\", \"uploads/a/1\"", "If-Modified-Since": "Mon, 01 Jan 2035 00:00:00 GMT" },
+    { "If-None-Match": `W/"other", ${storedETag("uploads/a/1")}`, "If-Modified-Since": "Mon, 01 Jan 2035 00:00:00 GMT" },
   ];
   for (const headers of modified) {
     const res = await w.fetch(at("/"), { headers });
