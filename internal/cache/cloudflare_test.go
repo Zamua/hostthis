@@ -195,10 +195,35 @@ func TestCloudflare_CoalescesQueuedPurges(t *testing.T) {
 }
 
 // A backlog drains in calls of at most 30 hosts, spaced by the interval.
+// fakeClock advances only when the purger waits, so spacing is exact.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (f *fakeClock) Now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.now
+}
+
+func (f *fakeClock) After(d time.Duration) <-chan time.Time {
+	f.mu.Lock()
+	f.now = f.now.Add(d)
+	at := f.now
+	f.mu.Unlock()
+	ch := make(chan time.Time, 1)
+	ch <- at
+	return ch
+}
+
 func TestCloudflare_BatchesAndSpacesCalls(t *testing.T) {
 	var api purgeAPI
 	api.hold = make(chan struct{})
+	clock := &fakeClock{now: time.Unix(1_800_000_000, 0)}
+	api.sent.now = clock.Now
 	c := newTestCloudflare(api.start(t, http.StatusOK), io.Discard)
+	c.Clock = clock
 	_ = c.PurgePaste("aaaaaaaa")
 	<-api.arrived
 	for i := range 65 {
@@ -302,10 +327,11 @@ type redirectTransport struct {
 	sent *sendLog
 }
 
-// sendLog records when each request left the client.
+// sendLog records when each request left the client, by now.
 type sendLog struct {
-	mu sync.Mutex
-	at []time.Time
+	mu  sync.Mutex
+	at  []time.Time
+	now func() time.Time
 }
 
 func (l *sendLog) times() []time.Time {
@@ -317,7 +343,11 @@ func (l *sendLog) times() []time.Time {
 func (t redirectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.sent != nil {
 		t.sent.mu.Lock()
-		t.sent.at = append(t.sent.at, time.Now())
+		now := time.Now
+		if t.sent.now != nil {
+			now = t.sent.now
+		}
+		t.sent.at = append(t.sent.at, now())
 		t.sent.mu.Unlock()
 	}
 	u, err := http.NewRequestWithContext(req.Context(), req.Method, t.base+req.URL.Path, req.Body)

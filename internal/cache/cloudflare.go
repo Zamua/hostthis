@@ -56,6 +56,9 @@ type Cloudflare struct {
 	Backoff  time.Duration // wait before the first retry, doubled per retry
 	Attempts int           // calls per batch before it is dropped
 
+	// Clock paces calls and backoff; the wall clock when nil.
+	Clock Clock
+
 	mu     sync.Mutex
 	queue  []scope
 	queued map[scope]bool
@@ -148,11 +151,11 @@ func (c *Cloudflare) run() {
 				return
 			}
 		}
-		if !c.sleep(time.Until(last.Add(c.interval()))) {
+		if !c.sleep(last.Add(c.interval()).Sub(c.clock().Now())) {
 			return
 		}
 		batch := c.take()
-		last = time.Now()
+		last = c.clock().Now()
 		if !c.send(batch) {
 			return
 		}
@@ -280,14 +283,30 @@ func (c *Cloudflare) sleep(d time.Duration) bool {
 	if d <= 0 {
 		return c.ctx.Err() == nil
 	}
-	t := time.NewTimer(d)
-	defer t.Stop()
 	select {
-	case <-t.C:
+	case <-c.clock().After(d):
 		return true
 	case <-c.ctx.Done():
 		return false
 	}
+}
+
+// Clock is the time source the purger paces itself by.
+type Clock interface {
+	Now() time.Time
+	After(d time.Duration) <-chan time.Time
+}
+
+type wallClock struct{}
+
+func (wallClock) Now() time.Time                         { return time.Now() }
+func (wallClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+
+func (c *Cloudflare) clock() Clock {
+	if c.Clock != nil {
+		return c.Clock
+	}
+	return wallClock{}
 }
 
 func (c *Cloudflare) interval() time.Duration {
