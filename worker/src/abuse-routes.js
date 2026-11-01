@@ -31,8 +31,12 @@ export async function purgeSlug(env, slug, fetcher = fetch) {
       headers: { "Authorization": `Bearer ${env.HOSTTHIS_CF_PURGE_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({ hosts: [`${slug}.${apex}`] }),
     });
+    if (!res.ok) {
+      console.warn(`warn: quarantine purge ${slug}: status ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    }
     return res.ok;
-  } catch {
+  } catch (error) {
+    console.warn(`warn: quarantine purge ${slug}: ${error?.message ?? error}`);
     return false;
   }
 }
