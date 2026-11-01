@@ -10,6 +10,8 @@ import { byteStringBytes, goText, validUTF8 } from "./wire.js";
 export const ROOM_MAX_BYTES = 256 * 1024;
 export const ROOM_MAX_KEYS = 256;
 export const ROOM_MAX_KEY_BYTES = 256;
+// The refusal for a value the default room rules turn away (domain.ErrRoomValueNotText).
+export const ROOM_VALUE_NOT_TEXT = "room values must be small text/JSON; host files as a site (tar czf - dir | ssh hostthis.dev)";
 export const APP_MAX_ROOM_BYTES = 48 * 1024 * 1024;
 // domain.MaxAppRooms: rooms one app may ever create.
 export const APP_MAX_ROOMS = 500;

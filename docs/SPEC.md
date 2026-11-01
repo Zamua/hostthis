@@ -1490,6 +1490,19 @@ informs them):
   the operator removed ("Room removal"); an app older than the count starts
   from its rooms that hold bytes. A create past the
   limit is refused with the full-app **507**.
+- **Default room rules.** With `HOSTTHIS_DEFAULT_ROOM_RULES=on` on the
+  Worker, the rooms of every app whose owner is not in
+  `HOSTTHIS_PROTECTED_OWNERS` hold only small text: a write is refused with
+  **415** `room values must be small text/JSON; host files as a site (tar czf -
+  dir | ssh hostthis.dev)` when the value is over **64 KiB**, is not valid
+  UTF-8, starts with a common binary signature (PDF, GIF, PNG, ZIP, ELF, PE,
+  RIFF, audio), or holds a run of more than **8 KiB** of base64-alphabet
+  characters. Such an app's rooms are also held to **1 MiB** in aggregate in
+  place of the per-app ceiling above. An app already past it keeps every
+  value: reads and deletes work, a write that does not raise the app's total
+  is allowed, and growth is refused with the full-app **507**. The Room cell
+  applies the rules, so both servers answer alike; it asks the app cell
+  whether the owner is protected and keeps the answer for ten minutes.
 - **Private rooms.** A private instance such as staging can close its rooms
   API: with `HOSTTHIS_ROOMS_ALLOW` (comma-separated CIDR prefixes) or
   `HOSTTHIS_ROOMS_TOKEN` set on `hostthisd`, a request under `/api/rooms`
@@ -4846,7 +4859,9 @@ HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      
 HOSTTHIS_EDGE_CACHE_MAX_BYTES  largest read response the edge cache stores      (8388608)
 HOSTTHIS_BLOB_CACHE_MAX_BYTES  largest decoded payload cached; 0 is off         (0)
 HOSTTHIS_WATCHER_TOKEN         the abuse watcher's token, /watcher/* only        (unset)
-HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on                 (unset)
+HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on, and owners
+                               the default room rules skip                       (unset)
+HOSTTHIS_DEFAULT_ROOM_RULES    on: small-text rules for other apps' rooms        (off)
 HOSTTHIS_CF_PURGE_TOKEN        cache-purge token for quarantine                  (unset: no purge)
 HOSTTHIS_CF_ZONE_ID            zone that token purges                            (unset)
 ```

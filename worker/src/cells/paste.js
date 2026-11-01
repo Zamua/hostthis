@@ -26,6 +26,7 @@ const PASTE_OPS = {
   rename: mutation((self, body) => self.rename(body)),
   roomcreated: mutation((self, body) => self.roomCreated(body)),
   roomremoved: mutation((self, body) => self.roomRemoved(body)),
+  roompolicy: read((self) => self.roomPolicy()),
   roomcounts: mutation((self, _body, url) => self.roomCounts(url), { body: false }),
   roompreflight: mutation((self, body) => self.roomPreflight(body)),
   roomdecide: mutation((self, body) => self.roomDecide(body)),
@@ -152,6 +153,21 @@ export class Paste {
       await this.state.storage.put(writes);
     }
     return new Response(null, { status: 204 });
+  }
+
+  // Whether the app's owner is protected, so its rooms skip the default room
+  // rules. Listed as in HOSTTHIS_PROTECTED_OWNERS: full fingerprints or
+  // 16-hex owner hashes. An app with no live row is not protected.
+  async roomPolicy() {
+    const row = await this.state.storage.get("row");
+    const items = String(this.env?.HOSTTHIS_PROTECTED_OWNERS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!row?.identity || items.length === 0) {
+      return Response.json({ protected: false });
+    }
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(row.identity));
+    const hash = [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+    const fp = row.identity.replace(/^key:/, "");
+    return Response.json({ protected: items.some((i) => i === hash || i.replace(/^key:/, "") === fp) });
   }
 
   // A room the operator removed stops counting toward the app's limit. Its
