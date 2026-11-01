@@ -1,10 +1,12 @@
 // The Worker entry: the host-picked routers, and the cell classes the runtime
 // binds by name (wrangler.jsonc durable_objects).
+import { abuseRoute } from "./abuse-routes.js";
 import { BLOB_PATH, handleBlob } from "./blobs.js";
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
 
+export { Abuse } from "./cells/abuse.js";
 export { Denylist } from "./cells/denylist.js";
 export { Identity } from "./cells/identity.js";
 export { IntentLog } from "./cells/intentlog.js";
@@ -22,6 +24,10 @@ async function authorized(request, env) {
   if (!token) {
     return true;
   }
+  return bearerIs(request, token);
+}
+
+async function bearerIs(request, token) {
   const header = request.headers.get("Authorization") ?? "";
   const scheme = BEARER.exec(header);
   if (!scheme) {
@@ -48,17 +54,27 @@ function namesCellInternal(pathname) {
   });
 }
 
+const UNAUTHORIZED = () => new Response("unauthorized\n", {
+  status: 401,
+  headers: { "WWW-Authenticate": "Bearer" },
+});
+
 const internalRouter = {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
     }
+    // The watcher's token opens these routes and nothing else.
+    if (url.pathname.startsWith("/watcher/")) {
+      const watcher = Boolean(env.HOSTTHIS_WATCHER_TOKEN) && (await bearerIs(request, env.HOSTTHIS_WATCHER_TOKEN));
+      if (!watcher && !(await authorized(request, env))) {
+        return UNAUTHORIZED();
+      }
+      return abuseRoute(request, env, ctx, url, "watcher");
+    }
     if (!(await authorized(request, env))) {
-      return new Response("unauthorized\n", {
-        status: 401,
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
+      return UNAUTHORIZED();
     }
     if (namesCellInternal(url.pathname)) {
       return new Response("not found\n", { status: 404 });
@@ -79,6 +95,9 @@ const internalRouter = {
         return new Response("subnet required\n", { status: 400 });
       }
       return env.SUBNETS.get(env.SUBNETS.idFromName(subnet)).fetch(request);
+    }
+    if (url.pathname.startsWith("/abuse/")) {
+      return abuseRoute(request, env, ctx, url, "operator");
     }
     if (url.pathname.startsWith("/denylist/")) {
       // One cell holds the whole list.
@@ -109,7 +128,7 @@ export default {
   async fetch(request, env, ctx) {
     const apex = normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? "");
     if (!apex) {
-      return internalRouter.fetch(request, env);
+      return internalRouter.fetch(request, env, ctx);
     }
     const host = normalizeHost(new URL(request.url).hostname);
     if (withinApex(host, apex)) {
@@ -126,6 +145,6 @@ export default {
       }
       return publicRouter(request, env, target, true, { ctx, reads: publicReads(env) });
     }
-    return internalRouter.fetch(request, env);
+    return internalRouter.fetch(request, env, ctx);
   },
 };
