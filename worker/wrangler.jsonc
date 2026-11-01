@@ -15,6 +15,7 @@
       { "name": "PASTES", "class_name": "Paste" },
       { "name": "ROOMS", "class_name": "Room" },
       { "name": "SUBNETS", "class_name": "Subnet" },
+      { "name": "DENYLIST", "class_name": "Denylist" },
       // Unused by the Worker; celld registers only bound classes, so leftover
       // IntentLog cells need it to activate.
       { "name": "INTENT_LOGS", "class_name": "IntentLog" }
@@ -26,6 +27,7 @@
     // celld does not support renamed classes, so IntentLog remains declared to
     // keep the v1 migration resolvable.
     { "tag": "v2", "new_sqlite_classes": ["Identity", "Paste"] },
-    { "tag": "v3", "new_sqlite_classes": ["Subnet"] }
+    { "tag": "v3", "new_sqlite_classes": ["Subnet"] },
+    { "tag": "v4", "new_sqlite_classes": ["Denylist"] }
   ]
 }

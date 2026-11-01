@@ -5,6 +5,7 @@ import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
 
+export { Denylist } from "./cells/denylist.js";
 export { Identity } from "./cells/identity.js";
 export { IntentLog } from "./cells/intentlog.js";
 export { Paste } from "./cells/paste.js";
@@ -78,6 +79,10 @@ const internalRouter = {
         return new Response("subnet required\n", { status: 400 });
       }
       return env.SUBNETS.get(env.SUBNETS.idFromName(subnet)).fetch(request);
+    }
+    if (url.pathname.startsWith("/denylist/")) {
+      // One cell holds the whole list.
+      return env.DENYLIST.get(env.DENYLIST.idFromName("denylist")).fetch(request);
     }
     if (url.pathname.startsWith("/paste/")) {
       const slug = url.searchParams.get("slug");

@@ -57,6 +57,8 @@ type stack struct {
 	repo       *worker.PasteRepo
 	upload     *service.Upload
 	keyGate    *service.KeyGate
+	denyGate   *service.DenyGate
+	endpoint   string
 	keyed      *xssh.Client
 	keyedOwner string
 	anon       *xssh.Client
@@ -64,6 +66,7 @@ type stack struct {
 
 type stackOpts struct {
 	keyGateCap int
+	denylist   bool
 	sites      bool
 	proxyProto bool
 	manageRepo func(*worker.PasteRepo) service.PasteAdmin
@@ -100,6 +103,10 @@ func withLogOutput(w io.Writer) stackOpt { return func(o *stackOpts) { o.logOut 
 // withKeyGate wires a live KeyGate at the given per-subnet fresh-key cap
 // (window fixed at 24h). Loopback traffic all shares 127.0.0.0/24.
 func withKeyGate(cap int) stackOpt { return func(o *stackOpts) { o.keyGateCap = cap } }
+
+// withDenylist wires a DenyGate over the live denylist cell; the test adds
+// entries at s.endpoint and calls s.denyGate.Refresh.
+func withDenylist() stackOpt { return func(o *stackOpts) { o.denylist = true } }
 
 // withSites wires the static-site deploy path on both the ssh and http side.
 func withSites() stackOpt { return func(o *stackOpts) { o.sites = true } }
@@ -162,6 +169,12 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		sshSrv.KeyGate = keyGate
 	}
 
+	var denyGate *service.DenyGate
+	if o.denylist {
+		denyGate = service.NewDenyGate(worker.NewDenylistRepo(endpoint, nil))
+		sshSrv.Denylist = denyGate
+	}
+
 	hs := httptest.NewServer(httpSrv.Handler())
 	t.Cleanup(hs.Close)
 	sshSrv.BuildURL = func(s domain.Slug) string { return hs.URL + "/p/" + s.String() }
@@ -173,7 +186,8 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	go func() { _ = sshSrv.ListenAndServe() }()
 	waitForSSH(t, addr)
 
-	s := &stack{t: t, httpURL: hs.URL, sshAddr: addr, repo: repo, upload: upload, keyGate: keyGate}
+	s := &stack{t: t, httpURL: hs.URL, sshAddr: addr, repo: repo, upload: upload, keyGate: keyGate,
+		denyGate: denyGate, endpoint: endpoint}
 	if !o.proxyProto {
 		s.keyed, s.keyedOwner = newKeyClient(t, addr)
 		s.anon = newAnonClient(t, addr)

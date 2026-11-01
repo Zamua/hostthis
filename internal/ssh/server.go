@@ -17,6 +17,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -59,11 +60,12 @@ type Server struct {
 	Upload      *service.Upload
 	Deploy      service.SiteDeployer // optional; nil disables static-site archive uploads
 	Manage      service.PasteManager
-	Pastes      PasteReader      // by-slug read for the `versions` current-marker
-	Sites       SiteReader       // optional; by-slug site read for `url`/`qr` (nil = paste-only)
-	KeyGate     *service.KeyGate // optional; nil disables the Sybil rate limit
-	Uploads     *UploadAdmission // optional; nil admits every upload at once
-	Now         func() time.Time // clock; defaults to time.Now when nil
+	Pastes      PasteReader       // by-slug read for the `versions` current-marker
+	Sites       SiteReader        // optional; by-slug site read for `url`/`qr` (nil = paste-only)
+	KeyGate     *service.KeyGate  // optional; nil disables the Sybil rate limit
+	Denylist    *service.DenyGate // optional; nil bans nothing
+	Uploads     *UploadAdmission  // optional; nil admits every upload at once
+	Now         func() time.Time  // clock; defaults to time.Now when nil
 	BuildURL    URLBuilder
 	// Pods and PodLinkURL serve `pod`; nil answers that pods are unavailable.
 	Pods       *service.Pods
@@ -182,10 +184,12 @@ func (s *Server) ListenAndServe() error {
 		}),
 		// The LAST middleware in the list wraps the rest and runs FIRST, so
 		// they are listed inner-to-outer to get the call order: keyRequired
-		// (refuses keyless sessions), then the Sybil gate, then the dispatcher.
+		// (refuses keyless sessions), then the denylist, then the Sybil gate,
+		// then the dispatcher.
 		wish.WithMiddleware(
 			s.terminalMiddleware(),
 			s.ratelimitMiddleware(),
+			s.denylistMiddleware(),
 			s.keyRequiredMiddleware(),
 			s.commandLogMiddleware(),
 			// Counts every admitted session, including ones the gates refuse.
@@ -302,6 +306,33 @@ func sessionOwner(sess gossh.Session) (domain.Owner, bool) {
 		return domain.Owner{}, false
 	}
 	return owner, true
+}
+
+// denylistMiddleware refuses a banned key or network ahead of the Sybil gate,
+// so a banned session records nothing there.
+func (s *Server) denylistMiddleware() wish.Middleware {
+	return func(next gossh.Handler) gossh.Handler {
+		return func(sess gossh.Session) {
+			if s.Denylist == nil {
+				next(sess)
+				return
+			}
+			owner, ok := sessionOwner(sess)
+			if !ok {
+				return
+			}
+			addr, _ := netip.AddrFromSlice(remoteIP(sess))
+			if reason, banned := s.Denylist.Check(owner, addr); banned {
+				fmt.Fprintln(sess.Stderr(), "hostthis: this key or network is banned from hostthis") //nolint:errcheck
+				if reason != "" {
+					fmt.Fprintf(sess.Stderr(), "  reason: %s\n", reason) //nolint:errcheck
+				}
+				_ = sess.Exit(ExitBanned)
+				return
+			}
+			next(sess)
+		}
+	}
 }
 
 // ratelimitMiddleware enforces the Sybil cap on how many distinct fresh

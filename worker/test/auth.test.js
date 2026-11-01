@@ -29,6 +29,7 @@ function env(token, calls = []) {
     PASTES: ns("PASTES"),
     ROOMS: ns("ROOMS"),
     SUBNETS: ns("SUBNETS"),
+    DENYLIST: ns("DENYLIST"),
     PAYLOADS: payloads,
   };
   if (token !== undefined) out.HOSTTHIS_WORKER_TOKEN = token;
@@ -46,6 +47,7 @@ const ROUTES = [
   { path: "/paste/get?slug=abc12345", ns: "PASTES" },
   { path: "/room/get?room=app12345%2Fr1", ns: "ROOMS" },
   { path: "/subnet/admit?subnet=10.0.0.0", ns: "SUBNETS" },
+  { path: "/denylist/list", ns: "DENYLIST" },
   { path: `/blob/uploads/${"a".repeat(32)}/0`, ns: "PAYLOADS" },
   { path: `/blob?prefix=uploads/${"a".repeat(32)}/`, ns: "PAYLOADS", method: "DELETE" },
   {

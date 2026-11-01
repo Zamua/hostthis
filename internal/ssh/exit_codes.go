@@ -14,4 +14,5 @@ const (
 	ExitNotFound    = 4 // not found, including owner-collapsed permission failures
 	_               = 5 // reserved, do not reuse
 	ExitSybilRefuse = 6 // Sybil per-subnet rate-limit refusal
+	ExitBanned      = 7 // key or network on the operator denylist
 )
