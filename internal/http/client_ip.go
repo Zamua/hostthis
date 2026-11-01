@@ -77,6 +77,11 @@ func fromCloudflare(host string) bool {
 // only behind a Cloudflare hop, since a direct client can send it too. An
 // unparseable address becomes the "unknown" bucket.
 func clientSubnet(r *http.Request, source ClientIPSource) string {
+	return domain.SubnetOf(clientAddress(r, source))
+}
+
+// clientAddress is the requester's address under source, nil when unparseable.
+func clientAddress(r *http.Request, source ClientIPSource) net.IP {
 	host := ""
 	if source != ClientIPPeer {
 		host = rightmostForwardedFor(r.Header.Values("X-Forwarded-For"))
@@ -94,7 +99,7 @@ func clientSubnet(r *http.Request, source ClientIPSource) string {
 			host = h
 		}
 	}
-	return domain.SubnetOf(net.ParseIP(host))
+	return net.ParseIP(host)
 }
 
 // rightmostForwardedFor is the last value of the X-Forwarded-For list that the

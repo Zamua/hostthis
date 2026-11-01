@@ -56,7 +56,10 @@ type Server struct {
 	Color string
 	// ClientIP names where the room-creation limit reads the client address.
 	ClientIP ClientIPSource
-	Now      func() time.Time
+	// RoomsAccess, when set, limits the rooms API to listed networks or a
+	// token holder.
+	RoomsAccess RoomsAccess
+	Now         func() time.Time
 	// Logf, when set, receives one warn line per 5xx served by the paste/site
 	// read path (docs/SPEC.md "5xx observability on the read surface"): slug +
 	// underlying error, so a read 500 is attributable from the logs while the

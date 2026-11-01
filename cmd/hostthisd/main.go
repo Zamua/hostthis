@@ -201,6 +201,18 @@ func main() {
 		ProxyProtocol: envTrue("HOSTTHIS_SSH_PROXY_PROTOCOL"),
 	}
 
+	roomsAllow, err := sshAllowList(os.Getenv("HOSTTHIS_ROOMS_ALLOW"))
+	if err != nil {
+		logger.Fatalf("HOSTTHIS_ROOMS_ALLOW: %v", err)
+	}
+	roomsAccess := httpapi.RoomsAccess{Allow: roomsAllow, Token: os.Getenv("HOSTTHIS_ROOMS_TOKEN")}
+	if roomsAllow != nil || roomsAccess.Token != "" {
+		networks := 0
+		if roomsAllow != nil {
+			networks = roomsAllow.Len()
+		}
+		logger.Printf("config: rooms API private (%d allowed entries, token %v)", networks, roomsAccess.Token != "")
+	}
 	rooms := service.NewRooms(roomRepo)
 	if rooms.Deny, err = domain.ParseRoomDenyList(os.Getenv("HOSTTHIS_ROOM_DENY")); err != nil {
 		logger.Fatalf("HOSTTHIS_ROOM_DENY: %v", err)
@@ -220,10 +232,11 @@ func main() {
 		Sites:       siteRepo,
 		// Rooms: the no-auth, capability-based app-persistence tier under
 		// /api/rooms.
-		Rooms:    rooms,
-		RoomPush: service.NewRoomPush(roomRepo),
-		Solid:    metadata.Solid,
-		ClientIP: clientIP,
+		Rooms:       rooms,
+		RoomPush:    service.NewRoomPush(roomRepo),
+		Solid:       metadata.Solid,
+		ClientIP:    clientIP,
+		RoomsAccess: roomsAccess,
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
