@@ -68,6 +68,7 @@ type stackOpts struct {
 	keyGateCap int
 	denylist   bool
 	allow      *domain.Denylist
+	screen     *service.ScreenGate
 	sites      bool
 	proxyProto bool
 	manageRepo func(*worker.PasteRepo) service.PasteAdmin
@@ -104,6 +105,9 @@ func withLogOutput(w io.Writer) stackOpt { return func(o *stackOpts) { o.logOut 
 // withKeyGate wires a live KeyGate at the given per-subnet fresh-key cap
 // (window fixed at 24h). Loopback traffic all shares 127.0.0.0/24.
 func withKeyGate(cap int) stackOpt { return func(o *stackOpts) { o.keyGateCap = cap } }
+
+// withScreen wires pre-publish screening into create, update and deploy.
+func withScreen(g *service.ScreenGate) stackOpt { return func(o *stackOpts) { o.screen = g } }
 
 // withDenylist wires a DenyGate over the live denylist cell; the test adds
 // entries at s.endpoint and calls s.denyGate.Refresh.
@@ -154,6 +158,8 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		admin = o.manageRepo(repo)
 	}
 	manage := service.NewManage(admin, blobUnit)
+	upload.Screen = o.screen
+	manage.Screen = o.screen
 
 	httpSrv := &httpapi.Server{Pastes: repo, Blobs: blobUnit}
 	sshSrv := &hostssh.Server{
@@ -172,7 +178,9 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		sites := storage.NewSites(repo)
 		httpSrv.Sites = sites
 		httpSrv.ApexDomain = "paste.test"
-		sshSrv.Deploy = service.NewSiteCacheInvalidating(service.NewDeploySite(sites, repo, blobUnit), o.purger)
+		deploy := service.NewDeploySite(sites, repo, blobUnit)
+		deploy.Screen = o.screen
+		sshSrv.Deploy = service.NewSiteCacheInvalidating(deploy, o.purger)
 	}
 	var keyGate *service.KeyGate
 	if o.keyGateCap > 0 {

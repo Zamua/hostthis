@@ -1207,6 +1207,10 @@ func emitServiceErr(sess gossh.Session, err error) {
 	switch {
 	case errors.Is(err, service.ErrNotFound):
 		fmt.Fprintln(sess.Stderr(), "hostthis: not found")
+	case errors.Is(err, service.ErrContentRefused):
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: "+err.Error())
+	case errors.Is(err, service.ErrScreenUnavailable):
+		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: content screening is unavailable; try again in a few minutes")
 	case errors.Is(err, service.ErrQuarantined):
 		_, _ = fmt.Fprintln(sess.Stderr(), "hostthis: this paste is quarantined by the operator")
 	case errors.Is(err, service.ErrInvalidName):
@@ -1242,6 +1246,9 @@ func emitServiceErr(sess gossh.Session, err error) {
 func exitForServiceErr(err error) int {
 	if errors.Is(err, service.ErrNotFound) || errors.Is(err, service.ErrQuarantined) {
 		return ExitNotFound
+	}
+	if errors.Is(err, service.ErrContentRefused) {
+		return ExitRefused
 	}
 	return ExitErr
 }

@@ -40,6 +40,8 @@ var ErrSlugTaken = errors.New("service: slug taken (after retries)")
 // Upload is the application service for new paste creation.
 type Upload struct {
 	Repo PasteRepo
+	// Screen, when set, screens each upload before it is committed.
+	Screen *ScreenGate
 	// Blob is the byte plane; each upload writes under its own prefix.
 	Blob BlobUnit
 	Now  func() time.Time
@@ -171,6 +173,9 @@ func (u *Upload) Create(body io.Reader, owner domain.Owner, name string, typeHin
 	// as a single document would skip every untar guard.
 	if kind == domain.KindSite {
 		return Result{}, domain.ErrUnsupportedKind
+	}
+	if err := u.Screen.checkStaged(owner, staged, name); err != nil {
+		return Result{}, err
 	}
 	now := u.Now().UTC()
 	p := domain.Paste{

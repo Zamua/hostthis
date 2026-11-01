@@ -15,4 +15,5 @@ const (
 	_               = 5 // reserved, do not reuse
 	ExitSybilRefuse = 6 // Sybil per-subnet rate-limit refusal
 	ExitBanned      = 7 // key or network on the operator denylist
+	ExitRefused     = 8 // upload refused by pre-publish screening
 )
