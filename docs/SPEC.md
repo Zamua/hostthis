@@ -4568,6 +4568,39 @@ deletes no bytes, so the operator also deletes the upload prefixes its versions
 record. A user-facing "report this paste" UI is out of
 scope for v1.
 
+### Pre-publish screening
+
+An upload can be screened before anything about it becomes reachable: no row,
+no URL, no read. hostthisd asks a screening service whether the bytes may be
+hosted and commits the upload only on an allow. The service is deployment
+configuration (`HOSTTHIS_SCREEN_URL`, optional `HOSTTHIS_SCREEN_TOKEN`); what
+it checks is its own business and is not part of this repository, so the
+checks cannot be read and written around.
+
+**What is sent.** `POST <url>/screen` with `X-Hostthis-Shape`:
+
+- `document`, for a paste create or update: the decoded bytes of the one file,
+  at most the first 12 MiB (`X-Hostthis-Truncated: 1` when cut), and
+  `X-Hostthis-Name` when the upload named itself.
+- `archive`, for a site or knowledge-base deploy: a gzip tar built during
+  extraction, holding each text-like file (by extension: html, htm, js, mjs,
+  css, json, svg, txt, md, xml, or none) in full up to 2 MiB, and the first
+  4 KiB of every other file, so file types stay recognizable. Text past
+  64 MiB in total refuses the deploy as too large to screen. Files a redeploy
+  keeps from its base are not sent again.
+
+The answer is `{"allow": true}` or `{"allow": false, "rule": ..., "file": ...}`.
+
+**Outcomes.** A refusal exits 8 with `hostthis: upload refused: it matched a
+content rule (<rule>)`; nothing was committed and any bytes already staged are
+deleted. A service that errors, times out (20 s) or answers anything else
+refuses the upload with `hostthis: content screening is unavailable; try again
+in a few minutes` (exit 1): screening fails closed.
+
+**Exempt keys.** `HOSTTHIS_SCREEN_EXEMPT`, comma-separated key fingerprints,
+skips screening for the operator's own keys and CI, so a screening outage never
+blocks a deploy of our own. Without `HOSTTHIS_SCREEN_URL` nothing is screened.
+
 ### Quarantine
 
 Quarantine hides a slug without destroying it, so a suspected abuse page can
@@ -4747,6 +4780,12 @@ file). Defaults in parens:
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
                          / HOSTTHIS_CF_PURGE_TOKEN          CF token (Cache:Purge scope only)       (required if cloudflare)
                          / HOSTTHIS_CF_ZONE_ID              CF zone id for the apex                 (required if cloudflare)
+
+# Admission and screening
+                         / HOSTTHIS_SSH_ALLOW               keys/CIDRs a private instance admits    (unset: public)
+                         / HOSTTHIS_SCREEN_URL              pre-publish screening service base URL  (unset: off)
+                         / HOSTTHIS_SCREEN_TOKEN            bearer token for the screening service  (unset)
+                         / HOSTTHIS_SCREEN_EXEMPT           key fingerprints that skip screening     (unset)
 ```
 
 The runtime container reads the same env vars. The operator supplies
@@ -4764,6 +4803,10 @@ ASSETS                 static assets binding for /_hostthis/; absent serves them
 HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      (0)
 HOSTTHIS_EDGE_CACHE_MAX_BYTES  largest read response the edge cache stores      (8388608)
 HOSTTHIS_BLOB_CACHE_MAX_BYTES  largest decoded payload cached; 0 is off         (0)
+HOSTTHIS_WATCHER_TOKEN         the abuse watcher's token, /watcher/* only        (unset)
+HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on                 (unset)
+HOSTTHIS_CF_PURGE_TOKEN        cache-purge token for quarantine                  (unset: no purge)
+HOSTTHIS_CF_ZONE_ID            zone that token purges                            (unset)
 ```
 
 See "Public and internal hosts". A deployment runs the bundled Worker,
