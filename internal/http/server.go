@@ -466,6 +466,9 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 	entry domain.ManifestEntry, ct, surface, what string,
 ) {
 	h := w.Header()
+	// Never on a 304: a cache applies a 304's headers to the response it
+	// stored, and a shell's stricter policy must not be replaced.
+	h.Set("Content-Security-Policy", sandboxPolicy)
 	size, known := entry.DecodedLength()
 	status, rng := http.StatusOK, domain.ByteRange{Length: int64(size)}
 	if known {
@@ -569,6 +572,10 @@ const permissionsPolicy = "camera=(), microphone=(), geolocation=(), usb=(), pay
 // must revalidate before each reuse, so an update, pin or delete shows on the
 // next load, and an unchanged file costs a 304.
 const contentCacheControl = "public, no-cache"
+
+// sandboxPolicy keeps a stored page's forms on its own origin: a page cannot
+// submit to a third party's endpoint.
+const sandboxPolicy = "form-action 'self'"
 
 // setSandboxHeaders applies the framing and referrer lockdown every response
 // from a paste origin carries (docs/SPEC.md HTML-sandboxing section).

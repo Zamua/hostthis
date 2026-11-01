@@ -17,6 +17,9 @@ export const CONTENT_CACHE_CONTROL = "public, no-cache";
 const PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), usb=(), payment=()";
 const HTML = "text/html; charset=utf-8";
 
+// Keeps a stored page's forms on its own origin.
+const SANDBOX_POLICY = "form-action 'self'";
+
 function sandbox() {
   return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer" };
 }
@@ -90,6 +93,9 @@ export function readPath(openBlob) {
       if (unchanged(headers)) {
         return new Response(null, { status: 304, headers });
       }
+      // Never on a 304: a cache applies a 304's headers to the response it
+      // stored, and a shell's stricter policy must not be replaced.
+      headers["Content-Security-Policy"] = SANDBOX_POLICY;
       const size = entry.decodedSize;
       const sized = Number.isSafeInteger(size) && size > 0;
       let range = { verdict: "ignored" };

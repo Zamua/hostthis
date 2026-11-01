@@ -4488,10 +4488,18 @@ never sets a `Domain=.hostthis.dev` cookie, so subdomain pastes cannot
 read apex cookies either. This is the same model major user-content hosts
 (codepen, jsfiddle, codesandbox, gh-pages) rely on.
 
-Within a paste's own origin, we do NOT impose a Content-Security-Policy.
-JS can do anything any same-origin script can do: load libraries from any
-CDN, fetch any HTTPS endpoint, render WebGL, talk to APIs. The pragmatic
-default matches the industry - codepen ships no CSP on user pens at all.
+Within a paste's own origin, the only policy imposed is
+`Content-Security-Policy: form-action 'self'`. JS can do anything any
+same-origin script can do: load libraries from any CDN, fetch any HTTPS
+endpoint, render WebGL, talk to APIs. What a page cannot do is submit a form
+to another origin, which is how a hosted page is turned into a cross-site
+request forgery or credential-harvesting relay against a third party. A
+`srcdoc` iframe inherits the policy, so a page cannot nest its way around it.
+
+The policy rides every full response of stored bytes (an HTML paste, a site
+or knowledge-base file, any `?raw` body) and never a 304: a cache applies a
+304's headers to the response it stored, and a client-rendered shell's own,
+stricter policy (`form-action 'none'`) must not be replaced by it.
 
 Response headers on paste reads:
 
@@ -4499,6 +4507,7 @@ Response headers on paste reads:
   (clickjacking defense)
 - `Referrer-Policy: no-referrer` - visiting a paste leaks nothing about
   who sent it
+- `Content-Security-Policy: form-action 'self'` on stored bytes, as above
 - `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
   - deny everything that needs explicit user grant
 
@@ -4520,6 +4529,8 @@ A paste's HTML cannot:
   some categories outright)
 - Be embedded in another site's iframe (X-Frame-Options: DENY)
 - Tell other sites where the visitor came from (Referrer-Policy)
+- Submit a form to another origin, from the page or a `srcdoc` iframe
+  (`form-action 'self'`)
 
 Treat any URL on hostthis.dev as untrusted user content - same as you'd
 treat a codepen, a gist, or a github.io page.

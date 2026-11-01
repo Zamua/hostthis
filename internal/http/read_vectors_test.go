@@ -232,7 +232,7 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 			t.Fatalf("unsupported kind %q has a shell", kind)
 		}
 		return served("shell", map[string]any{"shell": row.Kind})
-	case w.Code == stdhttp.StatusOK && h.Get("Content-Security-Policy") != "":
+	case w.Code == stdhttp.StatusOK && h.Get("Content-Security-Policy") != "" && h.Get("Content-Security-Policy") != sandboxPolicy:
 		for k, sh := range shells {
 			if string(sh.html(k)) != body {
 				continue

@@ -56,10 +56,10 @@ func TestUploadAndServe(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type: got %q, want text/html", ct)
 	}
-	// Paste reads carry NO Content-Security-Policy: origin isolation is the
-	// security boundary, not CSP. Pinned so adding one has to be deliberate.
-	if csp := resp.Header.Get("Content-Security-Policy"); csp != "" {
-		t.Fatalf("Content-Security-Policy should be unset on paste reads, got %q", csp)
+	// Paste reads carry only the form-action policy; origin isolation stays
+	// the boundary for everything else.
+	if csp := resp.Header.Get("Content-Security-Policy"); csp != "form-action 'self'" {
+		t.Fatalf("Content-Security-Policy on paste reads: got %q, want form-action 'self'", csp)
 	}
 	if xfo := resp.Header.Get("X-Frame-Options"); xfo != "DENY" {
 		t.Fatalf("X-Frame-Options: got %q, want DENY", xfo)

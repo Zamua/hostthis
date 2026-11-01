@@ -84,8 +84,8 @@ func TestShells_ServeContractForEveryKind(t *testing.T) {
 			if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
 				t.Errorf("raw ETag %q, want the object key", got)
 			}
-			if csp := w.Header().Get("Content-Security-Policy"); csp != "" {
-				t.Errorf("raw response carries a CSP: %q", csp)
+			if csp := w.Header().Get("Content-Security-Policy"); csp != sandboxPolicy {
+				t.Errorf("raw response carries CSP %q, want the sandbox policy", csp)
 			}
 			if cc := w.Header().Get("Cache-Control"); cc != "public, no-cache" {
 				t.Errorf("raw Cache-Control %q, want public, no-cache", cc)
@@ -105,8 +105,8 @@ func TestHTMLPaste_ServedAsItself(t *testing.T) {
 	if got := w.Body.String(); got != string(body) {
 		t.Errorf("body %q, want the stored bytes", got)
 	}
-	if csp := w.Header().Get("Content-Security-Policy"); csp != "" {
-		t.Errorf("HTML paste carries a CSP: %q", csp)
+	if csp := w.Header().Get("Content-Security-Policy"); csp != sandboxPolicy {
+		t.Errorf("HTML paste carries CSP %q, want the sandbox policy", csp)
 	}
 	if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
 		t.Errorf("ETag %q, want the object key", got)
