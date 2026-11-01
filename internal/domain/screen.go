@@ -27,6 +27,8 @@ type ScreenVerdict struct {
 	Allow bool
 	Rule  string
 	File  string
+	// Message, when set, is the service's explanation for the uploader.
+	Message string
 }
 
 // ScreenDocumentMax bounds the document bytes sent for screening.

@@ -20,6 +20,8 @@ type fakeScreener struct {
 	seen []map[string]string // one file map per request
 	deny func(files map[string]string) string
 	err  error
+	// message is returned with every refusal.
+	message string
 }
 
 func (f *fakeScreener) Screen(_ context.Context, req domain.ScreenRequest) (domain.ScreenVerdict, error) {
@@ -49,7 +51,7 @@ func (f *fakeScreener) Screen(_ context.Context, req domain.ScreenRequest) (doma
 		return domain.ScreenVerdict{}, f.err
 	}
 	if rule := f.deny(files); rule != "" {
-		return domain.ScreenVerdict{Allow: false, Rule: rule}, nil
+		return domain.ScreenVerdict{Allow: false, Rule: rule, Message: f.message}, nil
 	}
 	return domain.ScreenVerdict{Allow: true}, nil
 }
@@ -125,5 +127,15 @@ func TestScreen_FailsClosedAndExemptKeysSkipIt(t *testing.T) {
 	gate.Exempt[g.keyedOwner] = true
 	if _, stderr, code := g.run("", []byte("<h1>hi</h1>")); code != 0 {
 		t.Fatalf("exempt key: exit %d %q", code, stderr)
+	}
+}
+
+// A screener's message reaches the uploader as one line of plain text.
+func TestScreen_RefusalCarriesTheScreenersMessage(t *testing.T) {
+	f := &fakeScreener{deny: denyContaining("PAY"), message: "for personal use\x1b[31m only\n"}
+	g := startStack(t, withScreen(&service.ScreenGate{Screener: f}))
+	_, stderr, code := g.run("", []byte("<h1>PAY me</h1>"))
+	if code != 8 || !strings.Contains(stderr, "hostthis: upload refused: for personal use[31m only (test:PAY)") {
+		t.Fatalf("exit %d stderr %q", code, stderr)
 	}
 }
