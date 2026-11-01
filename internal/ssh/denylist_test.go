@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	xssh "golang.org/x/crypto/ssh"
 )
 
 func (s *stack) denylistOp(op, body string) {
@@ -61,5 +63,31 @@ func TestDenylist_KeylessSessionStillGetsKeyRequired(t *testing.T) {
 	g.denylistOp("add", `{"entry":"127.0.0.0/8","reason":""}`)
 	if _, stderr, code := g.runAnon("whoami", nil); code != 3 || !strings.Contains(stderr, "ssh key required") {
 		t.Fatalf("anon: exit %d (%q), want 3 key required", code, stderr)
+	}
+}
+
+// With an allow-list, only a listed key or a session from a listed network
+// gets in.
+func TestAllowList_AdmitsListedKeysAndNetworksOnly(t *testing.T) {
+	g := startStack(t, withAllow("203.0.113.0/24"))
+	if _, stderr, code := g.run("whoami", nil); code != 7 || !strings.Contains(stderr, "not on its allow-list") {
+		t.Fatalf("unlisted key: exit %d %q, want 7", code, stderr)
+	}
+	g = startStack(t, withAllow("127.0.0.0/8"))
+	if _, stderr, code := g.run("whoami", nil); code != 0 {
+		t.Fatalf("listed network: exit %d %q, want 0", code, stderr)
+	}
+	signer, cfg := freshKeyConfig(t)
+	g = startStack(t, withAllow(fingerprintSigner(signer.PublicKey())))
+	cli, err := xssh.Dial("tcp", g.sshAddr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+	if _, stderr, code := g.runOn(cli, "whoami", nil); code != 0 {
+		t.Fatalf("listed key: exit %d %q, want 0", code, stderr)
+	}
+	if _, _, code := g.run("whoami", nil); code != 7 {
+		t.Fatalf("the stack's own unlisted key: exit %d, want 7", code)
 	}
 }
