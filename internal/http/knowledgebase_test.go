@@ -106,8 +106,8 @@ func TestKnowledgeBase_Serves(t *testing.T) {
 				if w.Body.String() != c.body {
 					t.Fatalf("body: got %q, want %q", w.Body.String(), c.body)
 				}
-				if csp := w.Header().Get("Content-Security-Policy"); csp != "" {
-					t.Fatalf("a raw file carries a CSP: %q", csp)
+				if csp := w.Header().Get("Content-Security-Policy"); csp != sandboxPolicy {
+					t.Fatalf("a raw file carries CSP %q, want the sandbox policy", csp)
 				}
 				return
 			}

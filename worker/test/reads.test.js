@@ -219,11 +219,13 @@ test("a conditional request is answered before any payload is read, comparing we
     // An empty If-None-Match is none, as Go's Header.Get reads it.
     { "If-None-Match": "", "If-Modified-Since": lastModified },
   ];
+  // A 304 carries no CSP: a cache applies its headers to the stored response.
   for (const headers of notModified) {
     w.payloadCalls.length = 0;
     const res = await w.fetch(at("/"), { headers });
     assert.equal(res.status, 304, JSON.stringify(headers));
     assert.equal(await res.text(), "");
+    assert.equal(res.headers.get("Content-Security-Policy"), null);
     assert.equal(res.headers.get("ETag"), "\"uploads/a/0\"");
     assert.equal(res.headers.get("Last-Modified"), lastModified);
     assert.equal(res.headers.get("Cache-Control"), "public, no-cache");
@@ -244,6 +246,7 @@ test("a conditional request is answered before any payload is read, comparing we
   for (const headers of modified) {
     const res = await w.fetch(at("/"), { headers });
     assert.equal(res.status, 200, JSON.stringify(headers));
+    assert.equal(res.headers.get("Content-Security-Policy"), "form-action 'self'");
     assert.equal(await res.text(), "<h1>hi</h1>");
   }
   // A shell's 304 carries the validators and no CSP or Content-Type.
