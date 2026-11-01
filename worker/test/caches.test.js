@@ -4,6 +4,7 @@ import test from "node:test";
 import { BUILD } from "hostthis:build";
 
 import { lockstepTee, withEdgeCache } from "../src/public/caches.js";
+import { storedETag } from "../src/public/reads.js";
 import { publicReads } from "../src/public/surface.js";
 import { decoderStats } from "../src/public/zstd.js";
 import { APEX, at, documentRow, FORWARDED, headersOf, hiRow, SLUG, TOKEN, world } from "./public-world.js";
@@ -112,7 +113,7 @@ test("a GET fills the edge cache, and a hit answers GET, HEAD and conditionals a
     const head = await w.fetch(at("/?raw"), { method: "HEAD" });
     assert.equal(head.status, 200);
     assert.equal(await head.text(), "");
-    const conditional = await w.fetch(at("/?raw"), { headers: { "If-None-Match": "\"uploads/a/0\"" } });
+    const conditional = await w.fetch(at("/?raw"), { headers: { "If-None-Match": storedETag("uploads/a/0") } });
     assert.equal(conditional.status, 304);
     assert.equal(conditional.headers.get("Cache-Control"), "public, no-cache");
     assert.equal(conditional.headers.get("Cache-Tag"), null);
@@ -149,7 +150,7 @@ test("a conditional request or a HEAD that misses fills nothing", async () => {
   const cache = new FakeCache();
   const w = htmlWorld(TTL);
   await withCaches(cache, async () => {
-    assert.equal((await w.fetch(at("/"), { headers: { "If-None-Match": "\"uploads/a/0\"" } })).status, 304);
+    assert.equal((await w.fetch(at("/"), { headers: { "If-None-Match": storedETag("uploads/a/0") } })).status, 304);
     assert.equal((await w.fetch(at("/"), { method: "HEAD" })).status, 200);
     await settle(w);
   });
@@ -401,10 +402,10 @@ test("members of one pack are cached apart and each serves its own slice", async
     for (let i = 0; i < 2; i++) {
       const first = await w.fetch(at("/"));
       assert.equal(await first.text(), "alpha");
-      assert.equal(first.headers.get("ETag"), "\"k-pack@0\"");
+      assert.equal(first.headers.get("ETag"), storedETag("k-pack@0"));
       const second = await w.fetch(at("/b.txt"));
       assert.equal(await second.text(), "bravo!");
-      assert.equal(second.headers.get("ETag"), `"k-pack@${a.length}"`);
+      assert.equal(second.headers.get("ETag"), storedETag(`k-pack@${a.length}`));
       await settle(w);
     }
     assert.equal(cache.entries.size, 2);

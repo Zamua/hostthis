@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	stdhttp "net/http"
 	"net/http/httptest"
@@ -147,8 +148,8 @@ func TestPasteRead_CacheHeaders(t *testing.T) {
 	if got := w.Header().Get("Cache-Control"); got != "public, no-cache" {
 		t.Errorf("Cache-Control: got %q, want public, no-cache", got)
 	}
-	if got := w.Header().Get("ETag"); got != `"`+keyA+`"` {
-		t.Errorf("ETag: got %q, want the object key", got)
+	if got := w.Header().Get("ETag"); got != storedETag(keyA) {
+		t.Errorf("ETag: got %q, want the tagged object key", got)
 	}
 	if got := w.Header().Get("Last-Modified"); got != "Sun, 07 Jun 2026 14:00:00 GMT" {
 		t.Errorf("Last-Modified: got %q", got)
@@ -160,7 +161,7 @@ func TestPasteRead_Conditional304(t *testing.T) {
 	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
 	srv := readyHTMLServer([]byte("body"), updatedAt)
 	for name, hdr := range map[string]map[string]string{
-		"If-None-Match":     {"If-None-Match": `"` + keyA + `"`},
+		"If-None-Match":     {"If-None-Match": storedETag(keyA)},
 		"If-Modified-Since": {"If-Modified-Since": updatedAt.Add(time.Hour).UTC().Format(stdhttp.TimeFormat)},
 	} {
 		w := getPaste(srv, hdr)
@@ -389,5 +390,18 @@ func TestRead5xxCarriesNoContentHeaders(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A stored file's ETag names the header set it was served with, so a change
+// to those headers gives every cached copy a new validator.
+func TestStoredETag_ChangesWithTheSandboxHeaders(t *testing.T) {
+	if got := storedETag("k"); got != `"k-p`+sandboxTag+`"` || len(sandboxTag) != 8 {
+		t.Fatalf("storedETag = %q", got)
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sandboxPolicy + " "))
+	if fmt.Sprintf("%08x", h.Sum32()) == sandboxTag {
+		t.Fatal("a different policy hashed to the same tag")
 	}
 }

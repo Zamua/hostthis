@@ -173,7 +173,7 @@ func observeAnswer(t *testing.T, row *vectorRow, path string, w *httptest.Respon
 		if w.Code != stdhttp.StatusOK || body != "bytes of "+read.Key {
 			t.Fatalf("status %d body %q after reading %+v", w.Code, body, *read)
 		}
-		validated(`"` + read.Validator() + `"`)
+		validated(storedETag(read.Validator()))
 		length := ""
 		if read.DecodedSize > 0 {
 			length = strconv.Itoa(read.DecodedSize)

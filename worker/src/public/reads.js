@@ -21,6 +21,22 @@ const HTML = "text/html; charset=utf-8";
 // metadata addresses), and forms stay on their own origin.
 const SANDBOX_POLICY = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'";
 
+// FNV-1a over the policy, as hostthisd computes it: a stored file's ETag
+// carries it, so a header change gives every cached copy a new validator
+// (a 304 never carries these headers, so it could not refresh them).
+const SANDBOX_TAG = (() => {
+  let h = 0x811c9dc5;
+  for (const b of new TextEncoder().encode(SANDBOX_POLICY)) {
+    h = Math.imul(h ^ b, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, "0");
+})();
+
+// A stored file's ETag: its validator tagged with the header set.
+export function storedETag(validator) {
+  return `"${validator}-p${SANDBOX_TAG}"`;
+}
+
 function sandbox() {
   return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer" };
 }
@@ -90,7 +106,7 @@ export function readPath(openBlob) {
     const unchanged = (headers) => notModified(request.headers, headers.ETag, updatedAt);
 
     const stored = async (contentType, what) => {
-      const headers = content(`"${entryValidator(entry)}"`);
+      const headers = content(storedETag(entryValidator(entry)));
       if (unchanged(headers)) {
         return new Response(null, { status: 304, headers });
       }

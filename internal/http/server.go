@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net/http"
 	"strconv"
@@ -271,7 +272,7 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 	// ETag is the stored file's object key for HTML and for any raw body: a key
 	// never names different bytes. The shell is content-INDEPENDENT, so it
 	// validates on its shell version instead.
-	etag := `"` + root.Validator() + `"`
+	etag := storedETag(root.Validator())
 	if shell != nil && !rawWanted {
 		etag = `"` + shell.version + `"`
 	}
@@ -440,7 +441,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", permissionsPolicy)
 	h.Set("Cache-Control", contentCacheControl)
-	if notModified(w, r, `"`+entry.Validator()+`"`, updatedAt) {
+	if notModified(w, r, storedETag(entry.Validator()), updatedAt) {
 		return
 	}
 
@@ -580,6 +581,20 @@ const contentCacheControl = "public, no-cache"
 // wss, never plain http or ws, so its code cannot reach a visitor's localhost,
 // LAN or a cloud metadata address; and keeps its forms on its own origin.
 const sandboxPolicy = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'"
+
+// storedETag is a stored file's validator, tagged with a hash of the headers
+// stored bytes carry. A 304 never carries those headers, so without the tag a
+// cache that stored the file before a header change would keep revalidating
+// its old copy, and the old headers with it, forever.
+func storedETag(validator string) string {
+	return `"` + validator + "-p" + sandboxTag + `"`
+}
+
+var sandboxTag = func() string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(sandboxPolicy))
+	return fmt.Sprintf("%08x", h.Sum32())
+}()
 
 // setSandboxHeaders applies the framing and referrer lockdown every response
 // from a paste origin carries (docs/SPEC.md HTML-sandboxing section).

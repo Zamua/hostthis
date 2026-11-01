@@ -156,8 +156,8 @@ func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
 				route.Header().Get(hdr), root.Header().Get(hdr))
 		}
 	}
-	if route.Header().Get("ETag") != `"key-index"` {
-		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), `"key-index"`)
+	if route.Header().Get("ETag") != storedETag("key-index") {
+		t.Fatalf("fallback etag: got %q, want %q", route.Header().Get("ETag"), storedETag("key-index"))
 	}
 	// Sites serve no-cache so a re-deploy shows on the next reload. Under
 	// max-age a browser would keep serving cached js/css sub-resources without
@@ -184,7 +184,7 @@ func TestSite_SandboxHeaders(t *testing.T) {
 	if h.Get("Permissions-Policy") == "" {
 		t.Fatalf("missing Permissions-Policy")
 	}
-	if h.Get("ETag") != `"key-index"` {
+	if h.Get("ETag") != storedETag("key-index") {
 		t.Fatalf("etag: got %q", h.Get("ETag"))
 	}
 }
