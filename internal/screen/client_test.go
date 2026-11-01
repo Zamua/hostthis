@@ -16,7 +16,7 @@ func TestClient_SendsTheProtocolAndReadsTheVerdict(t *testing.T) {
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, body = r, must(io.ReadAll(r.Body))
-		_, _ = w.Write([]byte(`{"allow":false,"rule":"yara:x","file":"a/b.html"}`))
+		_, _ = w.Write([]byte(`{"allow":false,"rule":"yara:x","file":"a/b.html","message":"why"}`))
 	}))
 	defer srv.Close()
 	c := &Client{Base: srv.URL + "/", Token: "t"}
@@ -26,7 +26,7 @@ func TestClient_SendsTheProtocolAndReadsTheVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v != (domain.ScreenVerdict{Allow: false, Rule: "yara:x", File: "a/b.html"}) {
+	if v != (domain.ScreenVerdict{Allow: false, Rule: "yara:x", File: "a/b.html", Message: "why"}) {
 		t.Fatalf("verdict %+v", v)
 	}
 	checks := map[string]string{

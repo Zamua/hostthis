@@ -59,14 +59,15 @@ func (c *Client) Screen(ctx context.Context, req domain.ScreenRequest) (domain.S
 		return domain.ScreenVerdict{}, fmt.Errorf("screen: status %d", res.StatusCode)
 	}
 	var v struct {
-		Allow *bool  `json:"allow"`
-		Rule  string `json:"rule"`
-		File  string `json:"file"`
+		Allow   *bool  `json:"allow"`
+		Rule    string `json:"rule"`
+		File    string `json:"file"`
+		Message string `json:"message"`
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&v); err != nil || v.Allow == nil {
 		return domain.ScreenVerdict{}, fmt.Errorf("screen: unreadable answer")
 	}
-	return domain.ScreenVerdict{Allow: *v.Allow, Rule: v.Rule, File: v.File}, nil
+	return domain.ScreenVerdict{Allow: *v.Allow, Rule: v.Rule, File: v.File, Message: v.Message}, nil
 }
 
 // sized gives the body a known length: a file by its size, anything else

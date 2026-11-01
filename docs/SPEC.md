@@ -4589,10 +4589,12 @@ checks cannot be read and written around.
   64 MiB in total refuses the deploy as too large to screen. Files a redeploy
   keeps from its base are not sent again.
 
-The answer is `{"allow": true}` or `{"allow": false, "rule": ..., "file": ...}`.
+The answer is `{"allow": true}` or `{"allow": false, "rule": ..., "file": ...}`,
+optionally with a `message` for the uploader.
 
-**Outcomes.** A refusal exits 8 with `hostthis: upload refused: it matched a
-content rule (<rule>)`; nothing was committed and any bytes already staged are
+**Outcomes.** A refusal exits 8 with `hostthis: upload refused: <message>
+(<rule>)`, the message reduced to at most 200 printable characters, or
+`it matched a content rule` when the service gave none; nothing was committed and any bytes already staged are
 deleted. A service that errors, times out (20 s) or answers anything else
 refuses the upload with `hostthis: content screening is unavailable; try again
 in a few minutes` (exit 1): screening fails closed.
