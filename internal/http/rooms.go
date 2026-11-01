@@ -1,11 +1,14 @@
 package http
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"maps"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -65,6 +68,10 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 	w.Header().Set("Cache-Control", "no-store")
 	if s.Rooms == nil {
 		http.NotFound(w, r)
+		return true
+	}
+	if !s.RoomsAccess.admits(r, s.ClientIP) {
+		http.Error(w, "the rooms API is private on this instance\n", http.StatusForbidden)
 		return true
 	}
 
@@ -281,4 +288,36 @@ func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err erro
 func roomMethodNotAllowed(w http.ResponseWriter, allowed ...string) {
 	w.Header().Set("Allow", strings.Join(allowed, ", "))
 	http.Error(w, "method not allowed\n", http.StatusMethodNotAllowed)
+}
+
+// RoomsAccess makes the rooms API private (docs/SPEC.md "Private rooms"): a
+// request is served when its client address is in Allow or it carries Token
+// in the X-Hostthis-Rooms-Token header. The zero value admits everyone.
+type RoomsAccess struct {
+	Allow *domain.Denylist
+	Token string
+}
+
+// RoomsTokenHeader carries a private instance's rooms token.
+const RoomsTokenHeader = "X-Hostthis-Rooms-Token"
+
+func (a RoomsAccess) admits(r *http.Request, source ClientIPSource) bool {
+	if a.Allow == nil && a.Token == "" {
+		return true
+	}
+	if a.Token != "" {
+		got := sha256.Sum256([]byte(r.Header.Get(RoomsTokenHeader)))
+		want := sha256.Sum256([]byte(a.Token))
+		if subtle.ConstantTimeCompare(got[:], want[:]) == 1 {
+			return true
+		}
+	}
+	if a.Allow != nil {
+		if addr, ok := netip.AddrFromSlice(clientAddress(r, source)); ok {
+			if _, in := a.Allow.Match("", addr); in {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -1490,6 +1490,15 @@ informs them):
   the operator removed ("Room removal"); an app older than the count starts
   from its rooms that hold bytes. A create past the
   limit is refused with the full-app **507**.
+- **Private rooms.** A private instance such as staging can close its rooms
+  API: with `HOSTTHIS_ROOMS_ALLOW` (comma-separated CIDR prefixes) or
+  `HOSTTHIS_ROOMS_TOKEN` set on `hostthisd`, a request under `/api/rooms`
+  (creation, reads, writes, push and the WebSocket) is served only when the
+  client address, derived as for the rate limits, is in a listed prefix, or
+  the request carries the token in `X-Hostthis-Rooms-Token`. Anything else is
+  **403** `the rooms API is private on this instance`. Browsers cannot add a
+  header to a WebSocket, so a browser client needs a listed network; scripts
+  can use the token.
 - **Room value rules.** `HOSTTHIS_ROOM_DENY` (on `hostthisd` and the Worker)
   is a JSON list of content rules a room write is checked against before it
   reaches the room: `{"rule", "pattern", "flags": "i", "message"}` matches
@@ -4813,6 +4822,9 @@ file). Defaults in parens:
 
 # Admission and screening
                          / HOSTTHIS_SSH_ALLOW               keys/CIDRs a private instance admits    (unset: public)
+                         / HOSTTHIS_ROOMS_ALLOW             CIDRs a private rooms API serves        (unset: public)
+                         / HOSTTHIS_ROOMS_TOKEN             token that opens a private rooms API    (unset)
+                         / HOSTTHIS_ROOM_DENY               room value rules (JSON)                 (unset)
                          / HOSTTHIS_SCREEN_URL              pre-publish screening service base URL  (unset: off)
                          / HOSTTHIS_SCREEN_TOKEN            bearer token for the screening service  (unset)
                          / HOSTTHIS_SCREEN_EXEMPT           key fingerprints that skip screening     (unset)
