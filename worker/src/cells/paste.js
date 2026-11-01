@@ -25,6 +25,7 @@ const PASTE_OPS = {
   status: mutation((self, body) => self.setStatus(body)),
   rename: mutation((self, body) => self.rename(body)),
   roomcreated: mutation((self, body) => self.roomCreated(body)),
+  roomremoved: mutation((self, body) => self.roomRemoved(body)),
   roomcounts: mutation((self, _body, url) => self.roomCounts(url), { body: false }),
   roompreflight: mutation((self, body) => self.roomPreflight(body)),
   roomdecide: mutation((self, body) => self.roomDecide(body)),
@@ -153,7 +154,30 @@ export class Paste {
     return new Response(null, { status: 204 });
   }
 
-  // Rooms this app has ever created; rooms are never deleted. An app older
+  // A room the operator removed stops counting toward the app's limit. Its
+  // bytes were released before this call; the marker makes a repeat a no-op.
+  async roomRemoved(body) {
+    if (typeof body?.room !== "string" || body.room === "") {
+      return Response.json({ error: "invalid-room" }, { status: 400 });
+    }
+    const marker = `roomGone:${body.room}`;
+    if (await this.state.storage.get(marker)) {
+      return Response.json({ counted: false });
+    }
+    const allocation = `roomAllocation:${body.room}`;
+    const held = await this.state.storage.get(allocation);
+    if (held && (held.allocated > 0 || held.target > 0)) {
+      return Response.json({ error: "room-still-charged" }, { status: 409 });
+    }
+    const total = await this.roomTotal();
+    await this.state.storage.transaction(async (tx) => {
+      await tx.put({ roomTotal: Math.max(0, total - 1), [marker]: true });
+      await tx.delete(allocation);
+    });
+    return Response.json({ counted: true });
+  }
+
+  // Rooms this app has ever created, less those the operator removed. An app older
   // than the counter starts from its rooms that hold bytes, which leaves out
   // only rooms that never stored a value.
   async roomTotal() {
