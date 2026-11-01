@@ -23,6 +23,7 @@ const ROOM_OPS = {
   pushsubdel: mutation((self, body) => self.pushSubDel(body), { room: true }),
   pushscheduleput: mutation((self, body) => self.pushSchedulePut(body), { room: true }),
   pushtest: mutation((self, body, _url, doc) => self.pushTest(doc, body), { room: true }),
+  remove: mutation((self, body) => self.removeBlocked(body)),
 };
 
 // The kind of a budget operation: a growth carries the mutation it waits to
@@ -338,6 +339,55 @@ export class Room {
     this.broadcast({ type: "delete", seq: doc.seq, key: body.key });
     await this.resumePending(doc);
     return Response.json({ seq: doc.seq, bytes: doc.bytes });
+  }
+
+  // An operator removal (docs/SPEC.md "Room removal"): release the room's
+  // bytes through the ordinary shrink, tell the app cell the room is gone,
+  // then drop every key. Each step can be retried, so a removal interrupted
+  // anywhere completes on the next call.
+  async removeBlocked(body) {
+    let doc = await this.loadRoom();
+    if (!doc) {
+      return Response.json({ removed: false, reason: "absent" });
+    }
+    if (doc.pending) {
+      const recovered = await this.resumePending(doc);
+      if (recovered.outcome === "unavailable") {
+        return Response.json({ error: "app-budget-unavailable" }, { status: 502 });
+      }
+      doc = recovered.doc;
+    }
+    if (doc.bytes > 0 || Object.keys(doc.kv).length > 0) {
+      doc.budgetVersion++;
+      doc.pending = { targetBytes: 0, appCap: 0 };
+      doc.kv = {};
+      doc.wire = {};
+      doc.bytes = 0;
+      doc.seq++;
+      doc.meta.updatedAt = body.now;
+      await this.persistPending(doc);
+      const released = await this.resumePending(doc);
+      if (released.outcome !== "complete") {
+        return Response.json({ error: "app-budget-unavailable" }, { status: 502 });
+      }
+    }
+    const gone = await this.appCall(doc.meta.appSlug, "roomremoved", { room: doc.meta.id });
+    if (!gone.ok) {
+      return Response.json({ error: "app-ledger-unavailable" }, { status: 502 });
+    }
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.close(1000, "room removed");
+      } catch {
+        // already closing
+      }
+    }
+    await this.state.storage.deleteAlarm();
+    const keys = [...(await this.state.storage.list()).keys()];
+    for (let i = 0; i < keys.length; i += 128) {
+      await this.state.storage.delete(keys.slice(i, i + 128));
+    }
+    return Response.json({ removed: true });
   }
 
   async commitDelete(doc, body) {

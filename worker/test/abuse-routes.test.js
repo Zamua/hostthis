@@ -32,7 +32,7 @@ test("the watcher token opens its two routes and nothing else", async () => {
   const { env: e, calls } = env();
   assert.equal((await worker.fetch(req("/watcher/quarantine", WATCHER, { slug: "abcd2345", reason: "x" }), e)).status, 200);
   assert.equal((await worker.fetch(req("/watcher/ban-key", WATCHER, { identity: "SHA256:x", reason: "x" }), e)).status, 200);
-  for (const path of ["/abuse/list", "/abuse/release", "/denylist/list", "/paste/get?slug=abcd2345", "/watcher/release"]) {
+  for (const path of ["/abuse/list", "/abuse/release", "/abuse/room-delete", "/denylist/list", "/paste/get?slug=abcd2345", "/watcher/release", "/watcher/room-delete"]) {
     const res = await worker.fetch(req(path, WATCHER, path.includes("release") ? { slug: "abcd2345" } : undefined), e);
     assert.ok([401, 404].includes(res.status), `${path} answered ${res.status}`);
   }

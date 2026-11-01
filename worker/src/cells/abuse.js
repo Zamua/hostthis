@@ -15,7 +15,8 @@ const INDEX = "q:";
 const KEY = /^SHA256:[0-9a-f]{64}$/;
 const SLUG = /^[a-z0-9]{1,64}$/;
 
-const ACTIONS = { quarantine: "quarantine", release: "release", bankey: "ban-key" };
+const ACTIONS = { quarantine: "quarantine", release: "release", bankey: "ban-key", roomdelete: "room-delete" };
+const ROOM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 async function ownerHash(identity) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(identity));
@@ -30,6 +31,7 @@ const ABUSE_OPS = {
   quarantine: mutation((self, body) => self.quarantine(body)),
   release: mutation((self, body) => self.release(body)),
   bankey: mutation((self, body) => self.banKey(body)),
+  roomdelete: mutation((self, body) => self.roomDelete(body)),
   list: read((self) => self.list()),
   audit: read((self) => self.auditLog()),
 };
@@ -173,6 +175,27 @@ export class Abuse {
     }
     await this.record(body, fp, "ok");
     return Response.json({ identity: fp, banned: true });
+  }
+
+  // Operator only: the router never maps the watcher's credential here.
+  async roomDelete(input) {
+    const body = { ...input, op: "roomdelete" };
+    if (!SLUG.test(body.app ?? "") || !ROOM_ID.test(body.room ?? "")) {
+      return fail(400, "invalid-request");
+    }
+    const target = `${body.app}/${await ownerHash(body.room)}`;
+    const ns = this.env.ROOMS;
+    const res = await ns.get(ns.idFromName(`${body.app}|${body.room}`)).fetch(new Request(
+      `https://cell/room/remove?room=${encodeURIComponent(`${body.app}|${body.room}`)}`,
+      { method: "POST", body: JSON.stringify({ now: body.now }) },
+    ));
+    const answer = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      await this.record(body, target, `room-${res.status}`);
+      return fail(502, answer.error ?? "room-remove-failed");
+    }
+    await this.record(body, target, answer.removed ? "ok" : "absent");
+    return Response.json({ app: body.app, removed: Boolean(answer.removed) });
   }
 
   async list() {

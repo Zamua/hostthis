@@ -144,3 +144,20 @@ test("a watcher ban can name the key as a slug's owner, under the same guards", 
   assert.equal((await call(w.abuse, "bankey", { slug: "efgh2345", reason: "x", actor: "watcher", now: NOW })).status, 403);
   assert.equal((await call(w.abuse, "bankey", { slug: "nope2345", reason: "x", actor: "watcher", now: NOW })).status, 404);
 });
+
+test("an operator room delete reaches the room by app and id and is audited", async () => {
+  const w = abuseWorld();
+  const seen = [];
+  w.abuse.env.ROOMS = {
+    idFromName: (n) => n,
+    get: (n) => ({ fetch: async (req) => { seen.push([n, new URL(req.url).pathname]); return Response.json({ removed: true }); } }),
+  };
+  const room = "11111111-1111-4111-8111-111111111111";
+  const res = await call(w.abuse, "roomdelete", { app: "abcd2345", room, actor: "operator", now: NOW });
+  assert.deepEqual(res.body, { app: "abcd2345", removed: true });
+  assert.deepEqual(seen, [[`abcd2345|${room}`, "/room/remove"]]);
+  const entry = (await call(w.abuse, "audit")).body.entries.at(-1);
+  assert.deepEqual([entry.action, entry.outcome], ["room-delete", "ok"]);
+  assert.ok(!entry.target.includes(room), "the audit log keeps the room id hashed");
+  assert.equal((await call(w.abuse, "roomdelete", { app: "abcd2345", room: "nope", actor: "operator", now: NOW })).status, 400);
+});

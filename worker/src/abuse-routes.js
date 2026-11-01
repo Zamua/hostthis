@@ -11,6 +11,7 @@ const ROUTES = {
     "/abuse/release": { op: "release", fields: ["slug"], purge: true },
     "/abuse/list": { op: "list" },
     "/abuse/audit": { op: "audit" },
+    "/abuse/room-delete": { op: "roomdelete", fields: ["app", "room"] },
   },
   watcher: {
     "/watcher/quarantine": { op: "quarantine", fields: ["slug", "reason"], purge: true },
