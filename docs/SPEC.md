@@ -2703,6 +2703,49 @@ operator to bump `--fresh-keys-per-subnet` temporarily. The gate is
 deliberately a subnet-scoped abuse control, not a per-key whitelist -
 this is the trade-off.
 
+### Operator denylist: banned keys and networks
+
+An operator can ban a key fingerprint or an IP network outright. A banned
+session is refused at SSH admission, before the Sybil gate, so it records
+nothing: no keygate row, no subnet note, no verb. It exits 7 with the stderr
+line `hostthis: this key or network is banned from hostthis`, plus
+`  reason: <reason>` when the entry has one.
+
+An entry is one of:
+
+- **a key**: `SHA256:<64 lowercase hex>`, the fingerprint `whoami` prints.
+  It matches every session presenting that key, from any network.
+- **a network**: a CIDR prefix, `/8` to `/32` for IPv4 and `/16` to `/128`
+  for IPv6, stored in canonical masked form. It matches any session whose
+  peer address it contains, whatever key it presents. The Sybil gate's
+  `/24` and `/48` are the usual widths; a wider prefix covers a provider's
+  block.
+
+Each entry carries a `reason` (at most 200 bytes, shown to the refused client,
+so it must be fine for them to read) and its `addedAt` time.
+
+**Storage.** One `Denylist` cell holds every entry; the list is small and
+operator-written, so one cell needs no fan-out. The Worker's internal router
+serves it at `/denylist/list` (GET), `/denylist/add` and `/denylist/remove`
+(POST `{entry, reason}` and `{entry}`). Add is idempotent and replaces the
+reason of an entry already present; removing an absent entry succeeds. A
+malformed entry answers 400 `invalid-entry`. The cap is 1000 entries
+(507 `denylist-full`).
+
+**Operator path.** Entries change through the Worker's internal API with its
+bearer token, so a ban needs no deploy and no restart.
+
+**Admission reads a cached copy.** Each hostthisd replica refreshes the list
+every 30 seconds and checks sessions against its last good copy, so admission
+costs no Worker call and a ban takes effect within one refresh. A failed
+refresh keeps the last good copy. Before the first successful refresh the list
+is empty: the denylist fails open, because refusing every session while the
+Worker is unreachable would turn a metadata outage into a full SSH outage,
+and an unreachable Worker already fails every verb that needs it.
+
+The denylist governs SSH admission only. Content already published stays
+until the operator takes it down ("Abuse reporting").
+
 ### Where the rules live
 
 Two rules were, until recently, expressed only inside the storage adapters, and

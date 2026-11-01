@@ -127,6 +127,9 @@ func main() {
 	manageSvc.KeyGate = keyGate
 	logger.Printf("config: fresh_keys/subnet=%d per %s", *freshKeysLimit, *freshKeysWindow)
 
+	denyGate := service.NewDenyGate(metadata.Denylist)
+	denyGate.Logger = logger
+
 	landing, err := os.ReadFile(*landingPath)
 	if err != nil {
 		logger.Printf("warn: landing not loaded from %q: %v (apex will serve a stub)", *landingPath, err)
@@ -168,6 +171,7 @@ func main() {
 		Pastes:      pasteRepo,
 		Now:         time.Now,
 		KeyGate:     keyGate,
+		Denylist:    denyGate,
 		Uploads:     uploadGate,
 		BuildURL:    build,
 		Pods:        pods,
@@ -246,6 +250,8 @@ func main() {
 	// them all down.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	// Polls the operator denylist; sessions before its first load are admitted.
+	go denyGate.Run(ctx)
 
 	errs := make(chan error, 3)
 	go func() { errs <- sshServer.ListenAndServe() }()
