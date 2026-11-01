@@ -141,3 +141,15 @@ test("a watcher ban adds the key to the denylist, capped separately", async () =
   const bad = await call(w.abuse, "bankey", { identity: "203.0.113.0/24", reason: "x", actor: "watcher", now: NOW });
   assert.equal(bad.status, 400);
 });
+
+test("a watcher ban can name the key as a slug's owner, under the same guards", async () => {
+  const w = abuseWorld({ protectedOwners: OTHER });
+  w.pastes.set("abcd2345", await pasteWithRow(OWNER, "abcd2345"));
+  w.pastes.set("efgh2345", await pasteWithRow(OTHER, "efgh2345"));
+  const ban = await call(w.abuse, "bankey", { slug: "abcd2345", reason: "phishing", actor: "watcher", now: NOW });
+  assert.equal(ban.status, 200);
+  assert.equal(ban.body.identity, FP);
+  assert.deepEqual((await call(w.denylist, "list")).body.entries.map((e) => e.entry), [FP]);
+  assert.equal((await call(w.abuse, "bankey", { slug: "efgh2345", reason: "x", actor: "watcher", now: NOW })).status, 403);
+  assert.equal((await call(w.abuse, "bankey", { slug: "nope2345", reason: "x", actor: "watcher", now: NOW })).status, 404);
+});
