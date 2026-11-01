@@ -191,9 +191,9 @@ export class Room {
     return runOp(this, ROOM_OPS.del, body);
   }
 
-  async recordRoomCreated(body) {
+  async recordRoomCreated(body, fresh) {
     const ledger = await this.appCall(body.appSlug, "roomcreated", {
-      id: body.id, subnet: body.subnet, at: body.at,
+      id: body.id, subnet: body.subnet, at: body.at, fresh,
     });
     return ledger.ok;
   }
@@ -201,14 +201,14 @@ export class Room {
   async createBlocked(body) {
     const doc = await this.loadRoom();
     if (doc) {
-      if (!await this.recordRoomCreated(body)) {
+      if (!await this.recordRoomCreated(body, false)) {
         return Response.json({ error: "room-ledger-unavailable" }, { status: 502 });
       }
       return Response.json({ created: false });
     }
     if (body.appCap > 0) {
       const preflight = await this.appCall(body.appSlug, "roompreflight", {
-        appCap: body.appCap,
+        appCap: body.appCap, roomLimit: body.roomLimit ?? 0,
       });
       if (preflight.status === 507) {
         return Response.json({ error: "app-full" }, { status: 507 });
@@ -217,7 +217,7 @@ export class Room {
         return Response.json({ error: "app-budget-unavailable" }, { status: 502 });
       }
     }
-    if (!await this.recordRoomCreated(body)) {
+    if (!await this.recordRoomCreated(body, true)) {
       return Response.json({ error: "room-ledger-unavailable" }, { status: 502 });
     }
     await this.saveRoom({

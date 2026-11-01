@@ -44,7 +44,7 @@ func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now
 			CreatedAt: room.CreatedAt.UTC().UnixMilli(),
 			UpdatedAt: room.UpdatedAt.UTC().UnixMilli(),
 			Subnet:    subnet, At: now.UTC().UnixMilli(),
-			AppCap: appCap,
+			AppCap: appCap, RoomLimit: domain.MaxAppRooms,
 		}, &res, map[int]error{http.StatusInsufficientStorage: domain.ErrAppRoomsFull}); err != nil {
 		return err
 	}

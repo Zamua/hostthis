@@ -1473,7 +1473,7 @@ informs them):
   - generous for those, tight enough that a room cannot be turned into a
   free file host.
 - **Per-app aggregate.** A popular app's rooms in aggregate are bounded by
-  **default 64 MiB of room value bytes per app** (and the room-creation rate
+  **default 48 MiB of room value bytes per app** (and the room-creation rate
   limit caps the growth rate). The ceiling is exact across sibling rooms and
   concurrent writes. A mutation that would exceed it returns **507** with its
   prior room state intact. A new room is also refused with 507 while the app is
@@ -1484,6 +1484,21 @@ informs them):
   charge MORE than the committed room bytes while recovering an interrupted
   mutation, but it must never charge less. This is the room-tier analogue of
   the per-identity paste quota: one app cannot consume the whole service.
+- **Rooms per app.** An app may create at most **500 rooms** over its
+  lifetime: rooms never expire and have no delete, so the count only grows.
+  The app cell counts each room it records for the first time; an app older
+  than the count starts from its rooms that hold bytes. A create past the
+  limit is refused with the full-app **507**.
+- **Room value rules.** `HOSTTHIS_ROOM_DENY` (on `hostthisd` and the Worker)
+  is a JSON list of content rules a room write is checked against before it
+  reaches the room: `{"rule", "pattern", "flags": "i", "message"}` matches
+  the value read as UTF-8, `{"rule", "prefixHex", "message"}` its first
+  bytes. A match answers **403** `room value refused: <message> (<rule>)`
+  (the message defaults to `it matched a content rule`) and the room is
+  untouched. The rules are deployment configuration, kept out of this
+  repository; patterns must mean the same in RE2 and ECMAScript. `hostthisd`
+  refuses to start on a list that does not parse; the Worker, which cannot,
+  logs it and applies no rules.
 - **Room bytes count against the app owner's quota.** An app's room bytes
   (the per-app total above) are charged to the identity that owns the app's
   paste or site, inside the same 1 GiB `UserQuotaBytes` as its pastes and
