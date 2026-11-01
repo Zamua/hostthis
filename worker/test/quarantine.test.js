@@ -109,22 +109,13 @@ test("the watcher cannot touch a protected owner, by fingerprint or by hash", as
   assert.deepEqual(outcomes, ["protected-owner", "protected-owner", "protected-owner"]);
 });
 
-test("the watcher is capped at 5 quarantines per rolling hour, and the operator is not", async () => {
+test("watcher quarantines are not rate-capped", async () => {
   const w = abuseWorld();
-  for (let i = 0; i < 7; i++) {
+  for (let i = 0; i < 8; i++) {
     const slug = `slug${i}abc`;
     w.pastes.set(slug, await pasteWithRow(OWNER, slug));
+    assert.equal((await call(w.abuse, "quarantine", { slug, reason: "x", actor: "watcher", now: NOW + i })).status, 200);
   }
-  for (let i = 0; i < 5; i++) {
-    assert.equal((await call(w.abuse, "quarantine", { slug: `slug${i}abc`, reason: "x", actor: "watcher", now: NOW + i })).status, 200);
-  }
-  const capped = await call(w.abuse, "quarantine", { slug: "slug5abc", reason: "x", actor: "watcher", now: NOW + 10 });
-  assert.equal(capped.status, 429);
-  assert.equal(capped.body.error, "rate-capped");
-  assert.equal((await call(w.pastes.get("slug5abc"), "get")).status, 200);
-  assert.equal((await call(w.abuse, "quarantine", { slug: "slug5abc", reason: "x", actor: "operator", now: NOW + 11 })).status, 200);
-  // The window rolls: an hour after the first, one slot is free again.
-  assert.equal((await call(w.abuse, "quarantine", { slug: "slug6abc", reason: "x", actor: "watcher", now: NOW + 3_600_000 })).status, 200);
 });
 
 test("a watcher ban adds the key to the denylist, capped separately", async () => {
