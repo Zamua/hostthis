@@ -211,3 +211,24 @@ func TestRoomsSvc_CrossRoomIsolation(t *testing.T) {
 		t.Fatalf("B read A's key: %v", err)
 	}
 }
+
+func TestRoomsSvc_DenyRulesRefuseBeforeTheWrite(t *testing.T) {
+	svc, _ := newRoomsSvc(t)
+	deny, err := domain.ParseRoomDenyList(`[{"rule":"pay","pattern":"ko-fi\\.com/","message":"personal use only"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.Deny = deny
+	room, _ := svc.Create("app12345", "10.0.0.0/24")
+	_, err = svc.Put(room.AppSlug, room.ID, "k", []byte("see ko-fi.com/me"))
+	refused, ok := errors.AsType[*RoomValueRefused](err)
+	if !ok || refused.Rule != "pay" || err.Error() != "room value refused: personal use only (pay)" {
+		t.Fatalf("Put = %v, want the pay refusal", err)
+	}
+	if _, err := svc.Get(room.AppSlug, room.ID, "k"); !errors.Is(err, ErrRoomNotFound) {
+		t.Fatalf("a refused value was stored: %v", err)
+	}
+	if _, err := svc.Put(room.AppSlug, room.ID, "k", []byte(`{"score":3}`)); err != nil {
+		t.Fatalf("an ordinary value: %v", err)
+	}
+}

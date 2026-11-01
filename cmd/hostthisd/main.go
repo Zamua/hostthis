@@ -201,6 +201,11 @@ func main() {
 		ProxyProtocol: envTrue("HOSTTHIS_SSH_PROXY_PROTOCOL"),
 	}
 
+	rooms := service.NewRooms(roomRepo)
+	if rooms.Deny, err = domain.ParseRoomDenyList(os.Getenv("HOSTTHIS_ROOM_DENY")); err != nil {
+		logger.Fatalf("HOSTTHIS_ROOM_DENY: %v", err)
+	}
+
 	clientIP, err := clientIPSource()
 	if err != nil {
 		logger.Fatalf("HOSTTHIS_HTTP_CLIENT_IP_SOURCE: %v", err)
@@ -215,7 +220,7 @@ func main() {
 		Sites:       siteRepo,
 		// Rooms: the no-auth, capability-based app-persistence tier under
 		// /api/rooms.
-		Rooms:    service.NewRooms(roomRepo),
+		Rooms:    rooms,
 		RoomPush: service.NewRoomPush(roomRepo),
 		Solid:    metadata.Solid,
 		ClientIP: clientIP,

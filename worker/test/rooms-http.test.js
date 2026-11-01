@@ -758,3 +758,27 @@ test("an unknown room is 404 and a cell fault is 500, never a 101", async () => 
   };
   await goError(await w.fetch(url(`/api/rooms/${id}/ws`), { headers: WS }), 500, "internal error\n\n");
 });
+
+test("configured room value rules refuse a write before the room is touched", async () => {
+  const w = world({
+    HOSTTHIS_ROOM_DENY: JSON.stringify([
+      { rule: "pay", pattern: "ko-fi\\.com/", flags: "i", message: "personal use only" },
+      { rule: "exe", prefixHex: "4d5a" },
+    ]),
+  });
+  w.app();
+  const id = await w.room();
+  await goError(await put(w, id, "k", '{"tip":"https://KO-FI.com/me"}'), 403,
+    "room value refused: personal use only (pay)\n\n");
+  await goError(await put(w, id, "k", new Uint8Array([0x4d, 0x5a, 0x90, 0])), 403,
+    "room value refused: it matched a content rule (exe)\n\n");
+  assert.equal((await put(w, id, "k", '{"score":3}')).status, 204);
+  assert.equal(w.doc(APP, id).bytes, '{"score":3}'.length);
+});
+
+test("an unparseable rule list refuses nothing", async () => {
+  const w = world({ HOSTTHIS_ROOM_DENY: "not json" });
+  w.app();
+  const id = await w.room();
+  assert.equal((await put(w, id, "k", "MZ")).status, 204);
+});
