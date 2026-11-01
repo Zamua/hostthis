@@ -4611,7 +4611,8 @@ While a slug is quarantined:
 
 - every public read answers 404, `?raw=1` and `?files=1` included, and the
   slug's host is purged from the edge cache when it is quarantined and again
-  15 seconds later (the "Purged twice" bound);
+  15 seconds later (the "Purged twice" bound), the second purge also
+  retrying a first one the purge API rate-limited;
 - the Paste cell's `get` answers 451 `{"error":"quarantined"}`, so every SSH
   verb on it fails with `hostthis: this paste is quarantined by the
   operator` (exit 4) and its owner can neither change nor delete it. 451 is

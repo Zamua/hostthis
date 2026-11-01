@@ -20,11 +20,15 @@ const ROUTES = {
 
 // Purges a slug's host from the zone's cache; false when the deployment names
 // no purge credential.
+function canPurge(env) {
+  return Boolean(env.HOSTTHIS_CF_PURGE_TOKEN && env.HOSTTHIS_CF_ZONE_ID && normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? ""));
+}
+
 export async function purgeSlug(env, slug, fetcher = fetch) {
-  const apex = normalizeHost(env.HOSTTHIS_APEX_DOMAIN ?? "");
-  if (!env.HOSTTHIS_CF_PURGE_TOKEN || !env.HOSTTHIS_CF_ZONE_ID || !apex) {
+  if (!canPurge(env)) {
     return false;
   }
+  const apex = normalizeHost(env.HOSTTHIS_APEX_DOMAIN);
   try {
     const res = await fetcher(`https://api.cloudflare.com/client/v4/zones/${env.HOSTTHIS_CF_ZONE_ID}/purge_cache`, {
       method: "POST",
@@ -72,9 +76,10 @@ export async function abuseRoute(request, env, ctx, url, actor, { now = Date.now
   }
   const answer = await res.json();
   const purged = await purgeSlug(env, body.slug, fetcher);
-  if (purged) {
+  if (canPurge(env)) {
     // A read that resolved before the change can still fill the edge cache
-    // for up to 10 seconds; a second purge drops it.
+    // for up to 10 seconds, and a rate-limited first purge needs a retry: the
+    // second purge covers both.
     const wait = sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     ctx?.waitUntil(wait(REPURGE_MS).then(() => purgeSlug(env, body.slug, fetcher)));
   }
