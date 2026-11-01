@@ -56,10 +56,10 @@ func TestUploadAndServe(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 		t.Fatalf("content-type: got %q, want text/html", ct)
 	}
-	// Paste reads carry only the form-action policy; origin isolation stays
-	// the boundary for everything else.
-	if csp := resp.Header.Get("Content-Security-Policy"); csp != "form-action 'self'" {
-		t.Fatalf("Content-Security-Policy on paste reads: got %q, want form-action 'self'", csp)
+	// Paste reads carry the sandbox policy: https/wss only, forms same-origin.
+	const want = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'"
+	if csp := resp.Header.Get("Content-Security-Policy"); csp != want {
+		t.Fatalf("Content-Security-Policy on paste reads: got %q, want %q", csp, want)
 	}
 	if xfo := resp.Header.Get("X-Frame-Options"); xfo != "DENY" {
 		t.Fatalf("X-Frame-Options: got %q, want DENY", xfo)

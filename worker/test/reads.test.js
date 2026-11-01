@@ -246,7 +246,8 @@ test("a conditional request is answered before any payload is read, comparing we
   for (const headers of modified) {
     const res = await w.fetch(at("/"), { headers });
     assert.equal(res.status, 200, JSON.stringify(headers));
-    assert.equal(res.headers.get("Content-Security-Policy"), "form-action 'self'");
+    assert.equal(res.headers.get("Content-Security-Policy"),
+      "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'");
     assert.equal(await res.text(), "<h1>hi</h1>");
   }
   // A shell's 304 carries the validators and no CSP or Content-Type.

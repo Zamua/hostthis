@@ -576,9 +576,10 @@ const permissionsPolicy = "camera=(), microphone=(), geolocation=(), usb=(), pay
 // next load, and an unchanged file costs a 304.
 const contentCacheControl = "public, no-cache"
 
-// sandboxPolicy keeps a stored page's forms on its own origin: a page cannot
-// submit to a third party's endpoint.
-const sandboxPolicy = "form-action 'self'"
+// sandboxPolicy lets a stored page load and connect anywhere over https or
+// wss, never plain http or ws, so its code cannot reach a visitor's localhost,
+// LAN or a cloud metadata address; and keeps its forms on its own origin.
+const sandboxPolicy = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'"
 
 // setSandboxHeaders applies the framing and referrer lockdown every response
 // from a paste origin carries (docs/SPEC.md HTML-sandboxing section).
