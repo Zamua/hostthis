@@ -531,7 +531,9 @@ With* options. Refusal behavior is pinned by
 
 ## Paste lifecycle status (async blob write)
 
-A paste has a **status**: `pending`, `ready`, or `failed`. The status
+A paste has a **status**: `pending`, `ready`, or `failed`, and moves only from
+`pending` to one of the other two; a request for any other status is refused
+`invalid-status` (400) with the row unchanged. The status
 exists to hide the slow part of `Create` (the blob write to object
 storage, ~250 ms of a ~400 ms paste) behind a fast metadata-only
 acknowledgement, so the uploader gets a URL back as soon as the paste is
