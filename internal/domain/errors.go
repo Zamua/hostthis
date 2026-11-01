@@ -57,6 +57,10 @@ var (
 	ErrTooManyNewKeys = errors.New("storage: too many new keys from this network")
 )
 
+// ErrRoomValueNotText is a room value the default room rules refuse: binary,
+// too large, or carrying a long base64 run (docs/SPEC.md "Default room rules").
+var ErrRoomValueNotText = errors.New("room values must be small text/JSON; host files as a site (tar czf - dir | ssh hostthis.dev)")
+
 // ErrQuarantined is a slug the operator has quarantined (docs/SPEC.md
 // "Quarantine"). Its QuarantinedError also matches ErrNotFound, so every
 // reader serves a quarantined slug as absent unless it asks otherwise.

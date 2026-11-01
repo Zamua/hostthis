@@ -194,6 +194,8 @@ func (s *Rooms) Put(appSlug domain.Slug, id domain.RoomID, key string, val []byt
 		return 0, ErrRoomNotFound
 	case errors.Is(err, domain.ErrRoomDataFull):
 		return 0, ErrRoomDataCap
+	case errors.Is(err, domain.ErrRoomValueNotText):
+		return 0, err
 	case errors.Is(err, domain.ErrAppRoomsFull):
 		return 0, ErrAppRoomsCap
 	default:

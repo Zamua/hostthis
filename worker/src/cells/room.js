@@ -40,6 +40,34 @@ export function alarmDeadline(pending, push) {
   return times.length ? Math.min(...times) : null;
 }
 
+// Default room rules for apps whose owner is not protected: values are small
+// text or JSON, so a room cannot hold files.
+const STRANGER_VALUE_BYTES = 64 * 1024;
+const STRANGER_APP_BYTES = 1024 * 1024;
+const STRANGER_BASE64_RUN = 8 * 1024;
+const POLICY_TTL_MS = 10 * 60 * 1000;
+const BINARY_MAGIC = ["%PDF", "GIF8", "PK\u0003\u0004", "\u007fELF", "MZ", "ID3", "OggS", "fLaC", "\u0089PNG"]
+  .map((m) => Uint8Array.from(m, (c) => c.charCodeAt(0)));
+
+export function roomValueAllowed(bytes) {
+  if (bytes.length > STRANGER_VALUE_BYTES) return false;
+  if (BINARY_MAGIC.some((m) => m.every((b, i) => bytes[i] === b))) return false;
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[8] === 0x57 && bytes[9] === 0x45) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  let run = 0;
+  for (const c of bytes) {
+    const b64 = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57)
+      || c === 43 || c === 47 || c === 61 || c === 45 || c === 95;
+    run = b64 ? run + 1 : 0;
+    if (run > STRANGER_BASE64_RUN) return false;
+  }
+  return true;
+}
+
 export class Room {
   constructor(state, env) {
     this.state = state;
@@ -250,10 +278,39 @@ export class Room {
     if (checked.error) {
       return checked.error;
     }
+    const policy = this.env?.HOSTTHIS_DEFAULT_ROOM_RULES === "on" ? await this.appPolicy(doc) : { protected: true };
+    if (policy.unavailable) {
+      return Response.json({ error: "app-policy-unavailable" }, { status: 502 });
+    }
+    if (!policy.protected) {
+      if (!roomValueAllowed(base64Bytes(body.value))) {
+        return Response.json({ error: "value-not-text" }, { status: 415 });
+      }
+      body = { ...body, appCap: body.appCap > 0 ? Math.min(body.appCap, STRANGER_APP_BYTES) : STRANGER_APP_BYTES };
+    }
     if (checked.next === doc.bytes) {
       return this.commitEqualPut(doc, body, checked.next);
     }
     return this.putBudgeted(doc, body, checked.next);
+  }
+
+  // Whether the app's owner is protected (docs/SPEC.md "Default room rules"),
+  // asked of the app cell and kept for a while in the room's own document.
+  async appPolicy(doc) {
+    const now = Date.now();
+    if (doc.policy && now - doc.policy.at < POLICY_TTL_MS) {
+      return doc.policy;
+    }
+    try {
+      const res = await this.appCall(doc.meta.appSlug, "roompolicy", {});
+      if (!res.ok) {
+        return { unavailable: true };
+      }
+      doc.policy = { protected: (await res.json()).protected === true, at: now };
+      return doc.policy;
+    } catch {
+      return { unavailable: true };
+    }
   }
 
   checkPut(doc, body) {
