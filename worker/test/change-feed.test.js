@@ -80,6 +80,16 @@ test("backfill adds only missing rooms and keeps a present room's touch", async 
   ]);
 });
 
+test("drop removes only the named index entries, and nothing of the rooms", async () => {
+  const p = paste([["roomAllocation:a", { version: 1, allocated: 5, target: 5 }], ["roomAllocated", 5]]);
+  await p.roomIndexAdd({ rooms: ["a", "b"].map((room) => ({ room, createdAt: 1, touchedAt: 1 })) });
+  assert.deepEqual(await (await p.roomIndexDrop({ rooms: ["a", "missing"] })).json(), { dropped: 1 });
+  assert.deepEqual((await index(p)).map((r) => r.room), ["b"]);
+  assert.deepEqual(await p.state.storage.get("roomAllocation:a"), { version: 1, allocated: 5, target: 5 });
+  assert.equal(await p.state.storage.get("roomAllocated"), 5);
+  assert.equal((await p.roomIndexDrop({ rooms: [""] })).status, 400);
+});
+
 test("the index pages by key", async () => {
   const p = paste();
   await p.roomIndexAdd({ rooms: ["a", "b", "c"].map((room) => ({ room, createdAt: 1, touchedAt: 1 })) });
