@@ -26,6 +26,7 @@ WORKDIR /app
 
 COPY --from=build /out/hostthisd /app/hostthisd
 COPY web/landing.html /app/web/landing.html
+COPY web/llms.txt /app/web/llms.txt
 
 EXPOSE 2222 8080
 
