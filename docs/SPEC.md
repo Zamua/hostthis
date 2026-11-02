@@ -3339,7 +3339,10 @@ upload, and `hostthisd` prints `your pod refused the write (<status>); check
 that its hostthis/ folder is still shared with hostthis, or run pod link again`
 and exits 1. A new paste's bytes are written after its URL is printed (see
 "Paste lifecycle status"), so there it marks the paste failed. On a read it
-is a 500, the same as a missing object.
+is a 503 with the body `this paste's storage is offline right now`,
+`Cache-Control: no-store` and `Retry-After: 300`, from both read servers: the
+bytes are the owner's and come back with their pod, so a reader is told to
+try later rather than shown an internal error.
 
 **Unlinking.** `pod unlink` stops new uploads from going to the pod. It does
 not touch the pod or existing versions, which keep reading from it for as

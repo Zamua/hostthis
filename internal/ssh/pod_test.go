@@ -56,6 +56,9 @@ func solidKeyJWK(t *testing.T) string {
 type podStack struct {
 	*stack
 	pod *fakePod
+	// worker is the Worker's listener; addressed by the apex host it is the
+	// public read surface.
+	worker string
 }
 
 func startPodStack(t *testing.T, acp, register bool, storages ...string) *podStack {
@@ -128,7 +131,7 @@ func startPodStack(t *testing.T, acp, register bool, storages ...string) *podSta
 	waitForSSH(t, addr)
 	s := &stack{t: t, httpURL: origin, sshAddr: addr, repo: repo, upload: upload}
 	s.keyed, s.keyedOwner = newKeyClient(t, addr)
-	return &podStack{stack: s, pod: pod}
+	return &podStack{stack: s, pod: pod, worker: rt.URL}
 }
 
 var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -226,6 +229,28 @@ func siteArchive(t *testing.T, files map[string]string) []byte {
 	_ = tw.Close()
 	_ = gz.Close()
 	return buf.Bytes()
+}
+
+func assertStorageOffline(t *testing.T, server, u, host string) {
+	t.Helper()
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "" {
+		req.Host = host
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close() //nolint:errcheck
+	b, _ := io.ReadAll(res.Body)
+	if res.StatusCode != 503 || string(b) != "this paste's storage is offline right now\n" ||
+		res.Header.Get("Retry-After") != "300" || res.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("%s: %d %q Retry-After %q Cache-Control %q", server, res.StatusCode, b,
+			res.Header.Get("Retry-After"), res.Header.Get("Cache-Control"))
+	}
 }
 
 func httpBody(t *testing.T, u string) (int, string) {
@@ -330,6 +355,9 @@ func TestPodStorageEndToEnd(t *testing.T) {
 			if code == 0 || !strings.Contains(stderr, "your pod refused the write (403)") {
 				t.Fatalf("refused deploy: exit %d %q", code, stderr)
 			}
+			// A read the pod refuses tells the reader the storage is offline, from both servers.
+			assertStorageOffline(t, "hostthisd", pasteURL+"?raw", "")
+			assertStorageOffline(t, "worker", s.worker+strings.TrimPrefix(pasteURL, s.httpURL)+"?raw", "localhost")
 			s.pod.setDeny(false)
 
 			// After unlink, new bytes go to the bucket; the pod's paste still reads.
