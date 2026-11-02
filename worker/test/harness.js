@@ -77,9 +77,9 @@ export class FakeStorage {
   }
 
   // Key order, as storage lists.
-  async list({ prefix = "", start, limit = Infinity } = {}) {
+  async list({ prefix = "", start, end, limit = Infinity } = {}) {
     return new Map([...this.data]
-      .filter(([key]) => key.startsWith(prefix) && (start === undefined || key >= start))
+      .filter(([key]) => key.startsWith(prefix) && (start === undefined || key >= start) && (end === undefined || key < end))
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .slice(0, limit)
       .map(([key, value]) => [key, clone(value)]));

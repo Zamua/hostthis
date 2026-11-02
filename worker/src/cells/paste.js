@@ -1,6 +1,7 @@
 import { b64url } from "../solid/jose.js";
 import { ECDSA_P256, VAPID_KEY, VAPID_TTL_MS, httpsOrigin, rawPoint, signVapid } from "../push.js";
 import { manifestObjects, resolveRead } from "../read.js";
+import { noteChange } from "./feed.js";
 import { cellRoute } from "./image.js";
 import { USER_QUOTA_BYTES } from "../rooms/policy.js";
 import { DECIDE, DROP, PROJECT, advance, decisionEvent, nextPending, samePending, startPending } from "./artifact-saga.js";
@@ -26,6 +27,8 @@ const PASTE_OPS = {
   rename: mutation((self, body) => self.rename(body)),
   roomcreated: mutation((self, body) => self.roomCreated(body)),
   roomremoved: mutation((self, body) => self.roomRemoved(body)),
+  roomindex: read((self, _body, url) => self.roomIndex(url)),
+  roomindexadd: mutation((self, body) => self.roomIndexAdd(body)),
   roompolicy: read((self) => self.roomPolicy()),
   roomcounts: mutation((self, _body, url) => self.roomCounts(url), { body: false }),
   roompreflight: mutation((self, body) => self.roomPreflight(body)),
@@ -40,16 +43,128 @@ const PASTE_OPS = {
   pushsign: mutation((self, body) => self.pushSign(body)),
 };
 
+// Every room of the app: roomIndex:<room UUID> -> { createdAt, touchedAt }
+// (docs/SPEC.md "Change feed and room index").
+const ROOM_INDEX = "roomIndex:";
+const ROOM_INDEX_PAGE = 1000;
+// The feed hears of an app's room activity at most this often.
+const FEED_ROOMS_EVERY_MS = 10 * 60 * 1000;
+
+// What a reader of the row or its quarantine could see change.
+function rowStamp(row, quarantine) {
+  if (!row) {
+    return quarantine ? "q" : "";
+  }
+  return JSON.stringify([row.generation, row.updatedAt, row.status, row.size, row.uploadId, row.name, row.kind,
+    row.pinned ?? null, quarantine?.at ?? null]);
+}
+
 export class Paste {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.now = () => Date.now();
   }
 
   async fetch(request) {
-    return (await cellRoute(this.state, request))
-      ?? (await dispatch(this, PASTE_OPS, request))
-      ?? new Response("unknown op\n", { status: 404 });
+    const cell = await cellRoute(this.state, request);
+    if (cell) {
+      return cell;
+    }
+    const slug = new URL(request.url).searchParams.get("slug");
+    // Every caller names the cell's slug in the query; the room index needs it
+    // for feed entries, which a room op's body does not carry.
+    if (slug) {
+      this.slug = slug;
+    }
+    return this.noticed(slug, async () => (await dispatch(this, PASTE_OPS, request))
+      ?? new Response("unknown op\n", { status: 404 }));
+  }
+
+  // Runs work and, when it changed the row or its quarantine, tells the feed.
+  // The feed is best-effort: a stamp that cannot be read skips the note and
+  // never fails the work.
+  async noticed(slug, work) {
+    const before = await this.stamp();
+    const out = await work();
+    const after = before && await this.stamp();
+    if (after && after.stamp !== before.stamp) {
+      await noteChange(this.env, before.slug ?? after.slug ?? slug, "paste");
+    }
+    return out;
+  }
+
+  async stamp() {
+    try {
+      const [row, quarantine] = await Promise.all(["row", "quarantine"].map((k) => this.state.storage.get(k)));
+      return { stamp: rowStamp(row, quarantine), slug: row?.slug };
+    } catch {
+      return null;
+    }
+  }
+
+  // Index entries touched at or after `since`, in key order, a page at a time.
+  async roomIndex(url) {
+    const since = Number(url.searchParams.get("since") ?? 0);
+    const limit = Math.min(Number(url.searchParams.get("limit") ?? ROOM_INDEX_PAGE), ROOM_INDEX_PAGE);
+    if (!Number.isSafeInteger(since) || since < 0 || !Number.isSafeInteger(limit) || limit < 1) {
+      return Response.json({ error: "invalid-page" }, { status: 400 });
+    }
+    const start = url.searchParams.get("start") ?? ROOM_INDEX;
+    const rows = await this.state.storage.list({ prefix: ROOM_INDEX, start, limit: limit + 1 });
+    const rooms = [];
+    let next = null;
+    let seen = 0;
+    for (const [key, entry] of rows) {
+      if (seen === limit) {
+        next = key;
+        break;
+      }
+      seen++;
+      if ((entry.touchedAt ?? 0) >= since) {
+        rooms.push({ room: key.slice(ROOM_INDEX.length), ...entry });
+      }
+    }
+    return Response.json({ rooms, next });
+  }
+
+  // Backfill: adds rooms the index lacks and leaves present ones alone, so a
+  // repeat or an interrupted run is harmless.
+  async roomIndexAdd(body) {
+    if (!Array.isArray(body?.rooms) || body.rooms.length > ROOM_INDEX_PAGE ||
+        !body.rooms.every((r) => typeof r?.room === "string" && r.room !== "")) {
+      return Response.json({ error: "invalid-rooms" }, { status: 400 });
+    }
+    const keys = body.rooms.map((r) => ROOM_INDEX + r.room);
+    const present = await this.state.storage.get(keys);
+    const adds = {};
+    body.rooms.forEach((r, i) => {
+      if (!present.has(keys[i])) {
+        adds[keys[i]] = { createdAt: r.createdAt ?? null, touchedAt: r.touchedAt ?? r.createdAt ?? null };
+      }
+    });
+    if (Object.keys(adds).length > 0) {
+      await this.state.storage.put(adds);
+    }
+    return Response.json({ added: Object.keys(adds).length, present: present.size });
+  }
+
+  // Stamps a room as touched now and, at most every FEED_ROOMS_EVERY_MS, tells
+  // the feed the app's rooms moved.
+  async touchRoom(room, createdAt) {
+    const storage = this.state.storage;
+    const now = this.now();
+    const key = ROOM_INDEX + room;
+    const [entry, told] = await Promise.all([storage.get(key), storage.get("feedRoomsAt")]);
+    const writes = { [key]: { createdAt: entry?.createdAt ?? createdAt ?? now, touchedAt: now } };
+    const tell = !told || now - told >= FEED_ROOMS_EVERY_MS;
+    if (tell) {
+      writes.feedRoomsAt = now;
+    }
+    await storage.put(writes);
+    if (tell) {
+      await noteChange(this.env, this.slug, "rooms");
+    }
   }
 
   async put(body) {
@@ -141,6 +256,7 @@ export class Paste {
   // having been deployed yet.
 
   async roomCreated(body) {
+    await this.touchRoom(body.id, body.at);
     const ledger = (await this.state.storage.get("roomLedger")) ?? [];
     if (!ledger.some((entry) => entry.id === body.id)) {
       ledger.push({ id: body.id, subnet: body.subnet, at: body.at });
@@ -188,7 +304,7 @@ export class Paste {
     const total = await this.roomTotal();
     await this.state.storage.transaction(async (tx) => {
       await tx.put({ roomTotal: Math.max(0, total - 1), [marker]: true });
-      await tx.delete(allocation);
+      await tx.delete([allocation, ROOM_INDEX + body.room]);
     });
     return Response.json({ counted: true });
   }
@@ -316,6 +432,9 @@ export class Paste {
         updates.set("roomAllocated", decision.nextTotal);
       }
       await storage.put(Object.fromEntries(updates));
+      if (decision.body.granted) {
+        await this.touchRoom(body.room);
+      }
       if (decision.body.granted && decision.nextTotal < total && owner.identity) {
         // A failed release leaves the owner over-charged until the next decision
         // settles it, which the accounting allows.
@@ -1278,14 +1397,14 @@ export class Paste {
   // A thrown alarm would fall to the runtime's own retry, which neither backs
   // off far enough nor keeps the operation's state.
   async alarm() {
-    await this.state.blockConcurrencyWhile(async () => {
+    await this.noticed(null, () => this.state.blockConcurrencyWhile(async () => {
       try {
         await this.resumeArtifactPending(true);
       } catch (error) {
         console.error(`paste alarm: ${error}`);
         await this.retryArtifactPending();
       }
-    });
+    }));
   }
 
   // Only a still-PENDING row transitions, so a late finalizer cannot resurrect
