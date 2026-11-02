@@ -28,15 +28,18 @@ function req(path, token, body) {
   return new Request(ORIGIN + path, init);
 }
 
-test("the watcher token opens its two routes and nothing else", async () => {
+test("the watcher token opens its three routes and nothing else", async () => {
   const { env: e, calls } = env();
   assert.equal((await worker.fetch(req("/watcher/quarantine", WATCHER, { slug: "abcd2345", reason: "x" }), e)).status, 200);
   assert.equal((await worker.fetch(req("/watcher/ban-key", WATCHER, { identity: "SHA256:x", reason: "x" }), e)).status, 200);
-  for (const path of ["/abuse/list", "/abuse/release", "/abuse/room-delete", "/denylist/list", "/paste/get?slug=abcd2345", "/watcher/release", "/watcher/room-delete"]) {
+  assert.equal((await worker.fetch(req("/watcher/ban-owner", WATCHER, { slug: "abcd2345", reason: "x", retentionDays: 90 }), e)).status, 200);
+  for (const path of ["/abuse/list", "/abuse/release", "/abuse/room-delete", "/abuse/ban-owner", "/abuse/unban-owner", "/denylist/list", "/paste/get?slug=abcd2345", "/watcher/release", "/watcher/room-delete", "/watcher/unban-owner"]) {
     const res = await worker.fetch(req(path, WATCHER, path.includes("release") ? { slug: "abcd2345" } : undefined), e);
     assert.ok([401, 404].includes(res.status), `${path} answered ${res.status}`);
   }
-  assert.deepEqual(calls.map((c) => c.path), ["/abuse/quarantine", "/abuse/bankey"]);
+  assert.deepEqual(calls.map((c) => c.path), ["/abuse/quarantine", "/abuse/bankey", "/abuse/banowner"]);
+  assert.equal(calls[2].body.retentionDays, undefined, "the watcher cannot set the retention");
+  assert.equal(calls[2].body.actor, "watcher");
 });
 
 test("no token, or a wrong one, reaches neither route family", async () => {

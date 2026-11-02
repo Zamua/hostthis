@@ -4730,7 +4730,7 @@ Until `deleteAfter`, `/abuse/unban-owner {banId}` lifts the ban: it removes the
 key from the denylist, releases exactly the slugs the ban quarantined (a slug
 quarantined on its own stays quarantined) and cancels the deletion. After
 deletion the record stays as a tombstone (owner hash, counts, times). The
-watcher's credential reaches neither route; its `ban-key` stays a bare ban.
+watcher's credential reaches `/watcher/ban-owner` (below) but never `unban-owner`; lifting a ban stays with the operator.
 
 **Room removal.** Rooms have no delete in the public API; the operator route
 `/abuse/room-delete` removes one. The Room cell releases the room's bytes
@@ -4755,22 +4755,23 @@ including the operator routes:
 | `POST /abuse/unban-owner` | `{banId}` | 200 `{banId, released}`, 404 `no-such-ban`, 409 `already-deleted` |
 | `GET /abuse/bans` | | `{bans: [{banId, owner, reason, at, deleteAfter, state, slugs, quarantined, deleted, failed}]}` |
 
-A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly two routes
+A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly three routes
 and nowhere else, for an automated abuse watcher:
 
 | route | body |
 | --- | --- |
 | `POST /watcher/quarantine` | `{slug, reason}` |
 | `POST /watcher/ban-key` | `{identity, reason}` (a `SHA256:` fingerprint, `key:` prefix optional), or `{slug, reason}` to ban that slug's owner without the caller ever holding the fingerprint |
+| `POST /watcher/ban-owner` | the same body as `ban-key`; runs the operator's owner ban ("Owner ban") at the default 7-day retention, which the watcher cannot change |
 
-It cannot release, delete, or ban a network. Its actions pass two guards the
+It cannot release, delete directly, lift a ban, or ban a network. Its actions pass two guards the
 operator routes skip:
 
 - **Protected owners.** `HOSTTHIS_PROTECTED_OWNERS` lists owners the watcher
   may never act on: each item a full fingerprint or the first 16 hex digits
   of `sha256("key:<fingerprint>")`. A slug they own, or their key, answers
   403 `protected-owner`.
-- **Rate cap on bans.** At most 5 watcher bans in any rolling hour. Past the
+- **Rate cap on bans.** At most 5 watcher bans (key and owner bans together) in any rolling hour. Past the
   cap the route answers 429 `rate-capped` and does nothing, so the watcher
   escalates to a person instead. Quarantines are not capped: they are
   reversible and keep everything.

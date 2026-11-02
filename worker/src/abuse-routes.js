@@ -19,6 +19,7 @@ const ROUTES = {
   watcher: {
     "/watcher/quarantine": { op: "quarantine", fields: ["slug", "reason"], purge: true },
     "/watcher/ban-key": { op: "bankey", fields: ["identity", "slug", "reason"] },
+    "/watcher/ban-owner": { op: "banowner", fields: ["identity", "slug", "reason"] },
   },
 };
 
