@@ -23,7 +23,7 @@ func (s *stack) denylistOp(op, body string) {
 	}
 }
 
-// A banned key is refused with exit 7 before the Sybil gate records it.
+// A banned key is refused with exit 7 and no reason, before the Sybil gate records it.
 func TestDenylist_BannedKeyExits7AndLeavesNoKeygateRow(t *testing.T) {
 	g := startStack(t, withKeyGate(5), withDenylist())
 	g.denylistOp("add", `{"entry":"`+g.keyedOwner+`","reason":"probing a third party"}`)
@@ -31,10 +31,8 @@ func TestDenylist_BannedKeyExits7AndLeavesNoKeygateRow(t *testing.T) {
 	if code != 7 {
 		t.Fatalf("exit %d (%q), want 7", code, stderr)
 	}
-	for _, want := range []string{"this key or network is banned from hostthis", "reason: probing a third party"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr %q lacks %q", stderr, want)
-		}
+	if strings.TrimSpace(stderr) != "hostthis: connection refused" {
+		t.Fatalf("stderr %q, want the bare refusal with no reason", stderr)
 	}
 	n, _, err := g.keyGate.Repo.SubnetSnapshot("127.0.0.0/24", time.Now(), 24*time.Hour)
 	if err != nil || n != 0 {
@@ -48,8 +46,8 @@ func TestDenylist_NetworkBanCoversEveryKeyUntilRemoved(t *testing.T) {
 	g.denylistOp("add", `{"entry":"127.0.0.0/8","reason":""}`)
 	c, _ := newKeyClient(t, g.sshAddr)
 	_, stderr, code := g.runOn(c, "whoami", nil)
-	if code != 7 || strings.Contains(stderr, "reason:") {
-		t.Fatalf("exit %d (%q), want 7 with no reason line", code, stderr)
+	if code != 7 || strings.TrimSpace(stderr) != "hostthis: connection refused" {
+		t.Fatalf("exit %d (%q), want 7 connection refused", code, stderr)
 	}
 	g.denylistOp("remove", `{"entry":"127.0.0.0/8"}`)
 	if _, stderr, code := g.runOn(c, "whoami", nil); code != 0 {
