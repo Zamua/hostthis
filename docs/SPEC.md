@@ -2449,8 +2449,7 @@ no external assets.
 note in the llms.txt shape for AI agents: what hostthis is, how to use it, and
 its acceptable-use terms (personal, non-commercial use; no business sites,
 booking or point-of-sale systems, storefronts, payment flows, advertising or
-search-ranking links; such content is removed and the uploading key loses
-access). It is `web/llms.txt` beside the landing page, `{{APEX}}` filled in the
+search-ranking links). It is `web/llms.txt` beside the landing page, `{{APEX}}` filled in the
 same way, served `text/markdown; charset=utf-8` with the landing page's cache
 lifetime, on the apex and every host that is not a slug's. The landing page
 points to it for agents that read raw HTML (`<link rel="alternate"
