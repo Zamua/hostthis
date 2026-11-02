@@ -6,6 +6,9 @@ import { zstdDecoder } from "./zstd.js";
 // The object is missing or does not decode; the message names why.
 export class BlobError extends Error {}
 
+// The object lives in its owner's pod, which refused or did not answer.
+export class StorageOfflineError extends BlobError {}
+
 // The stream's first chunk is read before returning, so a missing magic or a
 // damaged frame header surfaces here, where the caller can still answer 500.
 // A later decode error errors the returned stream.
@@ -64,7 +67,7 @@ export async function openPayload(env, { key, offset, length }) {
     object = await payloads.get(env, key, length > 0 ? { offset, length } : undefined);
   } catch (error) {
     if (error instanceof PodError) {
-      throw new BlobError(error.message);
+      throw new StorageOfflineError(error.message);
     }
     throw error;
   }

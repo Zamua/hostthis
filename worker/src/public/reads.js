@@ -1,6 +1,6 @@
 // The read path: one slug's answer from its Paste cell, mapped to the response
 // hostthisd gives for the same case (docs/SPEC.md "The public surface").
-import { reportingErrors } from "./blobs.js";
+import { StorageOfflineError, reportingErrors } from "./blobs.js";
 import { entryValidator } from "../read.js";
 import { notModified } from "./conditional.js";
 import { goStringList } from "./gojson.js";
@@ -49,6 +49,11 @@ function warn(slug, cause) {
 // keep.
 function failure(message = "internal error") {
   return goError(500, message, { "Cache-Control": "no-store" });
+}
+
+// The owner's pod holds the bytes and is not answering (docs/SPEC.md "Pod storage").
+function storageOffline() {
+  return goError(503, "this paste's storage is offline right now", { "Cache-Control": "no-store", "Retry-After": "300" });
 }
 
 // The answer for target, from a request built of parsed values alone.
@@ -141,7 +146,7 @@ export function readPath(openBlob) {
         body = await openBlob(env, entry, ctx);
       } catch (error) {
         warn(target.slug, `${what} blob read: ${error.message}`);
-        return failure();
+        return error instanceof StorageOfflineError ? storageOffline() : failure();
       }
       // Held to its recorded decoded length, damage found after the headers
       // leaves a body short of its Content-Length. An entry without one
