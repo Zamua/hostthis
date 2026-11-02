@@ -187,7 +187,7 @@ class Runtime {
 // 404s or throws renders nothing and says so only here.
 export class PageErrors {
   private problems: string[] = [];
-  private ignored: string[] = [];
+  private ignored: Array<string | RegExp> = [];
 
   constructor(page: Page) {
     page.on('pageerror', (e) => this.add(`uncaught exception: ${e.message}`));
@@ -202,14 +202,14 @@ export class PageErrors {
     });
   }
 
-  // ignore drops problems naming a URL a fixture asks for ON PURPOSE. Keep the
-  // substring as specific as the URL: a loose one silences real evidence.
-  ignore(substr: string) {
-    this.ignored.push(substr);
+  // ignore drops problems a fixture provokes ON PURPOSE. Keep the match as
+  // specific as the problem: a loose one silences real evidence.
+  ignore(match: string | RegExp) {
+    this.ignored.push(match);
   }
 
   list() {
-    return this.problems.filter((p) => !this.ignored.some((s) => p.includes(s)));
+    return this.problems.filter((p) => !this.ignored.some((m) => (typeof m === 'string' ? p.includes(m) : m.test(p))));
   }
 
   expectNone() {
