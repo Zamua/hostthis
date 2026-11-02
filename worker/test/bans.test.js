@@ -47,7 +47,9 @@ function world({ protectedOwners = "" } = {}) {
     PASTES: ns((slug) => pastes.get(slug) ?? new Paste(state(new FakeStorage()))),
     DENYLIST: ns(() => denylist),
     IDENTITY: ns((identity) => ({
-      fetch: async () => Response.json((index.get(identity) ?? []).map((slug) => ({ slug }))),
+      fetch: async (req) => (new URL(req.url).pathname.endsWith("/subnetlist")
+        ? Response.json({ subnets: [{ subnet: "203.0.113.0/24", at: NOW - 5 }] })
+        : Response.json((index.get(identity) ?? []).map((slug) => ({ slug })))),
     })),
     PAYLOADS: {
       list: async ({ prefix }) => ({ objects: [{ key: `${prefix}0` }], truncated: false }),
@@ -85,6 +87,7 @@ test("ban-owner bans the key, quarantines every slug, and deletes them after the
   assert.equal(res.status, 200);
   assert.equal(res.body.slugs, 23);
   assert.equal(res.body.deleteAfter, NOW + 7 * DAY);
+  assert.deepEqual(res.body.subnets, [{ subnet: "203.0.113.0/24", at: NOW - 5 }]);
   assert.deepEqual((await call(w.denylist, "list")).body.entries.map((e) => [e.entry, e.expiresAt]), [[FP, undefined]]);
 
   await w.runAlarms(NOW + DAY);
