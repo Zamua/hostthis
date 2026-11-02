@@ -61,6 +61,7 @@ func (g *ScreenGate) check(owner domain.Owner, req domain.ScreenRequest) error {
 	if !g.applies(owner) {
 		return nil
 	}
+	req.Uploader = owner.Fingerprint()
 	ctx, cancel := context.WithTimeout(context.Background(), screenTimeout)
 	defer cancel()
 	verdict, err := g.Screener.Screen(ctx, req)

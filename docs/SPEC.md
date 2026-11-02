@@ -4663,6 +4663,9 @@ checks cannot be read and written around.
   64 MiB in total refuses the deploy as too large to screen. Files a redeploy
   keeps from its base are not sent again.
 
+Every request carries `X-Hostthis-Key`, the uploading key's fingerprint, so
+the service's policy can depend on who uploads (exempt keys are never sent).
+
 The answer is `{"allow": true}` or `{"allow": false, "rule": ..., "file": ...}`,
 optionally with a `message` for the uploader.
 

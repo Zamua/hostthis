@@ -21,7 +21,7 @@ func TestClient_SendsTheProtocolAndReadsTheVerdict(t *testing.T) {
 	defer srv.Close()
 	c := &Client{Base: srv.URL + "/", Token: "t"}
 	v, err := c.Screen(context.Background(), domain.ScreenRequest{
-		Shape: domain.ScreenDocument, Name: "n.html", Truncated: true, Body: bytes.NewBufferString("<h1>x</h1>"),
+		Shape: domain.ScreenDocument, Name: "n.html", Truncated: true, Uploader: "SHA256:ab", Body: bytes.NewBufferString("<h1>x</h1>"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -32,9 +32,11 @@ func TestClient_SendsTheProtocolAndReadsTheVerdict(t *testing.T) {
 	checks := map[string]string{
 		"path": got.URL.Path, "shape": got.Header.Get("X-Hostthis-Shape"), "name": got.Header.Get("X-Hostthis-Name"),
 		"truncated": got.Header.Get("X-Hostthis-Truncated"), "auth": got.Header.Get("Authorization"), "body": string(body),
+		"key": got.Header.Get("X-Hostthis-Key"),
 	}
 	want := map[string]string{
 		"path": "/screen", "shape": "document", "name": "n.html", "truncated": "1", "auth": "Bearer t", "body": "<h1>x</h1>",
+		"key": "SHA256:ab",
 	}
 	for k := range want {
 		if checks[k] != want[k] {
