@@ -3950,7 +3950,7 @@ specified under "Room storage."
 ### Moving cells between runtimes
 
 A deployment moves between runtimes (celld and Cloudflare Workers) by copying
-each cell whole. Every cell class answers five internal paths on its own
+each cell whole. Every cell class answers four internal paths on its own
 `fetch`, which the Worker's router never forwards, so only code holding the
 class binding reaches them:
 
@@ -3977,12 +3977,16 @@ class binding reaches them:
   ms> | null }`, the time it was set for. A mover disarms the original before
   restoring its copy with that alarm, so a scheduled push never fires from
   both. Entries are untouched.
+
+A Room cell answers a fifth, which retires a copy a move left under a name
+nothing addresses:
+
 - `POST /__cell/clear` takes `{ name }` and drops every entry and the alarm of
-  the cell, answering `{ cleared: true, entries: <n> }`. It acts only when
-  `name` equals the name the cell was addressed by (`state.id.name`); a cell
-  addressed by another name, or by none, answers 409 `{ cleared: false, reason:
-  "name-mismatch" }` and is left as it was. An operator retires a copy that a
-  move left under a name nothing addresses by naming that exact name.
+  the cell, answering `{ cleared: true, entries: <n> }`. It acts only when the
+  Room namespace maps `name` to this cell's own id (the runtime reports a cell
+  no name, so the id is the proof); otherwise it answers 409 `{ cleared: false,
+  reason: "name-mismatch" }` and leaves the cell as it was. A body without a
+  name answers 400 `invalid-name`. Every other cell class answers 404.
 
 A cell too large for one image (a site with hundreds of versions holds tens of
 megabytes of manifests, past what one isolate can hold as JSON) moves in parts:

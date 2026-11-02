@@ -311,16 +311,20 @@ async function restoreCell(state, request) {
   });
 }
 
-// Drops everything a cell holds, but only when the caller names the name the
-// cell was addressed by: retiring a copy a move left under a name nothing
-// addresses must not reach a cell that is in use.
-async function clearCell(state, request) {
+// Drops everything a cell holds, but only when the caller names the cell by a
+// name its own namespace maps to this cell's id: retiring a copy a move left
+// under a name nothing addresses must not reach a cell that is in use. The
+// runtime does not report a cell its name, so the id is the proof.
+async function clearCell(state, request, namespace) {
+  if (typeof namespace?.idFromName !== "function") {
+    return new Response("unknown cell route\n", { status: 404 });
+  }
   const name = await request.json().then((body) => body?.name, () => undefined);
   if (typeof name !== "string" || name === "") {
     return Response.json({ error: "invalid-name" }, { status: 400 });
   }
   return state.blockConcurrencyWhile(async () => {
-    if (state.id.name !== name) {
+    if (namespace.idFromName(name).toString() !== state.id.toString()) {
       return Response.json({ cleared: false, reason: "name-mismatch" }, { status: 409 });
     }
     const { storage } = state;
@@ -351,8 +355,9 @@ const CELL_ROUTES = {
   },
 };
 
-// Null for a path outside /__cell/, which the class then routes itself.
-export async function cellRoute(state, request) {
+// Null for a path outside /__cell/, which the class then routes itself. A
+// class that owns a namespace of its own cells passes it, which enables clear.
+export async function cellRoute(state, request, namespace) {
   const { pathname } = new URL(request.url);
   if (!pathname.startsWith(CELL_PATH)) {
     return null;
@@ -364,5 +369,5 @@ export async function cellRoute(state, request) {
   if (request.method !== CELL_ROUTES[name].method) {
     return new Response("method not allowed\n", { status: 405 });
   }
-  return CELL_ROUTES[name].run(state, request);
+  return CELL_ROUTES[name].run(state, request, namespace);
 }
