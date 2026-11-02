@@ -1,11 +1,11 @@
 import { b64url } from "../solid/jose.js";
 import { unb64u } from "../push.js";
-import { putInBatches, setOwn } from "./records.js";
+import { deleteInBatches, putInBatches, setOwn } from "./records.js";
 
 // --- moving cells between runtimes -------------------------------------------
 //
-// Every cell class answers /__cell/name, /__cell/image, /__cell/restore and
-// /__cell/disarm on
+// Every cell class answers /__cell/name, /__cell/image, /__cell/restore,
+// /__cell/disarm and /__cell/clear on
 // its own fetch, ahead of its op table. The Worker's router forwards only
 // /identity/, /paste/, /room/ and /subnet/ paths, so only code holding a class
 // binding reaches these.
@@ -311,6 +311,26 @@ async function restoreCell(state, request) {
   });
 }
 
+// Drops everything a cell holds, but only when the caller names the name the
+// cell was addressed by: retiring a copy a move left under a name nothing
+// addresses must not reach a cell that is in use.
+async function clearCell(state, request) {
+  const name = await request.json().then((body) => body?.name, () => undefined);
+  if (typeof name !== "string" || name === "") {
+    return Response.json({ error: "invalid-name" }, { status: 400 });
+  }
+  return state.blockConcurrencyWhile(async () => {
+    if (state.id.name !== name) {
+      return Response.json({ cleared: false, reason: "name-mismatch" }, { status: 409 });
+    }
+    const { storage } = state;
+    await storage.deleteAlarm();
+    const keys = [...(await storage.list()).keys()];
+    await deleteInBatches(storage, keys);
+    return Response.json({ cleared: true, entries: keys.length });
+  });
+}
+
 const CELL_ROUTES = {
   name: { method: "GET", run: (state) => Response.json({ name: state.id.name ?? null }) },
   image: {
@@ -320,6 +340,7 @@ const CELL_ROUTES = {
   restore: { method: "POST", run: restoreCell },
   // Stops a cell's alarm and answers the time it was set for, so a mover can
   // hand the alarm to the copy and the original never fires again.
+  clear: { method: "POST", run: clearCell },
   disarm: {
     method: "POST",
     run: (state) => state.blockConcurrencyWhile(async () => {

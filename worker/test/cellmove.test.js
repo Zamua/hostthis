@@ -268,6 +268,35 @@ test("disarm stops the alarm, answers its time, and leaves the entries", async (
   assert.deepStrictEqual(await ok(room, "/__cell/disarm", {}), { alarm: null });
 });
 
+test("clear drops every entry and the alarm of a cell addressed by the named name", async () => {
+  for (const [ns, Cls] of Object.entries(CLASSES)) {
+    const storage = new FakeStorage(new Map([["a", 1], ["b", 2]]), false, 7_000);
+    const res = await call(new Cls(cellState(storage, "app%7Cr1"), {}), "/__cell/clear", { name: "app%7Cr1" });
+    assert.deepStrictEqual([res.status, res.body], [200, { cleared: true, entries: 2 }], ns);
+    assert.equal(storage.data.size, 0, ns);
+    assert.equal(storage.alarm ?? null, null, ns);
+  }
+});
+
+test("clear leaves a cell addressed by another name, or by none, as it was", async () => {
+  for (const name of ["app|r1", "app%7Cr2", undefined]) {
+    const storage = new FakeStorage(new Map([["a", 1]]), false, 7_000);
+    const res = await call(new Room(cellState(storage, name), {}), "/__cell/clear", { name: "app%7Cr1" });
+    assert.deepStrictEqual([res.status, res.body], [409, { cleared: false, reason: "name-mismatch" }], String(name));
+    assert.deepStrictEqual([...storage.data], [["a", 1]], String(name));
+    assert.equal(storage.alarm, 7_000, String(name));
+  }
+});
+
+test("clear needs a name to match, and a nameless cell never matches one", async () => {
+  const storage = new FakeStorage(new Map([["a", 1]]));
+  for (const body of [{}, { name: "" }, { name: null }, { name: 5 }, "not json"]) {
+    const res = await call(new Room(cellState(storage, undefined), {}), "/__cell/clear", body);
+    assert.equal(res.status, 400, JSON.stringify(body));
+  }
+  assert.deepStrictEqual([...storage.data], [["a", 1]]);
+});
+
 test("a cell holding anything refuses a restore and is left as it was", async () => {
   const image = await call(new Paste(cellState(new FakeStorage(new Map([["row", 1]]), false, 9), "s"), {}), "/__cell/image");
   for (const held of [new FakeStorage(new Map([["other", 2]])), new FakeStorage(new Map(), false, 123)]) {
@@ -334,6 +363,7 @@ test("cell routes answer only their own method", async () => {
   assert.equal((await call(paste, "/__cell/name", {})).status, 405);
   assert.equal((await call(paste, "/__cell/restore")).status, 405);
   assert.equal((await call(paste, "/__cell/disarm")).status, 405);
+  assert.equal((await call(paste, "/__cell/clear")).status, 405);
   assert.equal((await call(paste, "/__cell/get")).status, 404);
 });
 
@@ -358,8 +388,10 @@ test("the Worker's router never forwards a cell route", async () => {
     const res = await worker.fetch(new Request(`https://w${path}`), env);
     assert.equal(res.status, 404, path);
   }
-  const restore = await worker.fetch(new Request("https://w/__cell/restore", { method: "POST", body: "{}" }), env);
-  assert.equal(restore.status, 404);
+  for (const route of ["restore", "clear"]) {
+    const res = await worker.fetch(new Request(`https://w/__cell/${route}`, { method: "POST", body: "{}" }), env);
+    assert.equal(res.status, 404, route);
+  }
   assert.deepStrictEqual(forwarded, []);
 
   for (const path of ["/paste/__cell/image?slug=s", "/identity/__cell/image?scope=s",
