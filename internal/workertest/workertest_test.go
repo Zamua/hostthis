@@ -1,12 +1,16 @@
 package workertest
 
 import (
+	"bufio"
 	"io"
 	"maps"
 	"net/http"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func get(t *testing.T, base, host, path string, header http.Header) (*http.Response, string) {
@@ -74,5 +78,53 @@ func TestSharedRuntimesDropThePublicVariables(t *testing.T) {
 	res, _ := get(t, strings.TrimSuffix(Endpoint(t), "/"), "abcdefgh.public.test", "/_hostthis/md.js", nil)
 	if res.StatusCode == 200 {
 		t.Fatal("the shared runtime serves the public surface")
+	}
+}
+
+// A runtime whose parent goes away (stdin closed, stdout unread) leaves no
+// temp directory behind, Miniflare's own stores included.
+func TestRuntimeLeavesNoTempDirWhenItsParentGoes(t *testing.T) {
+	tmp := t.TempDir()
+	cmd := exec.Command("node", "serve.mjs")
+	cmd.Dir = localrtDir()
+	cmd.Env = append(runtimeEnv(), "TMPDIR="+tmp)
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(out).ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "LISTENING ") {
+		t.Fatalf("runtime did not start: %q %v", line, err)
+	}
+	_ = out.Close()
+	_ = in.Close()
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait() // a runtime stopped by its own handler may still exit nonzero
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("runtime did not exit after its parent's pipes closed")
+	}
+	left, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		names := make([]string, len(left))
+		for i, e := range left {
+			names[i] = e.Name()
+		}
+		t.Fatalf("temp entries left behind: %v", names)
 	}
 }
