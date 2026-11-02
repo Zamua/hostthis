@@ -29,6 +29,7 @@ const PASTE_OPS = {
   roomremoved: mutation((self, body) => self.roomRemoved(body)),
   roomindex: read((self, _body, url) => self.roomIndex(url)),
   roomindexadd: mutation((self, body) => self.roomIndexAdd(body)),
+  roomindexdrop: mutation((self, body) => self.roomIndexDrop(body)),
   roompolicy: read((self) => self.roomPolicy()),
   roomcounts: mutation((self, _body, url) => self.roomCounts(url), { body: false }),
   roompreflight: mutation((self, body) => self.roomPreflight(body)),
@@ -147,6 +148,21 @@ export class Paste {
       await this.state.storage.put(adds);
     }
     return Response.json({ added: Object.keys(adds).length, present: present.size });
+  }
+
+  // Removes index entries only: the rooms, their documents and their bytes are
+  // untouched.
+  async roomIndexDrop(body) {
+    if (!Array.isArray(body?.rooms) || body.rooms.length > ROOM_INDEX_PAGE ||
+        !body.rooms.every((r) => typeof r === "string" && r !== "")) {
+      return Response.json({ error: "invalid-rooms" }, { status: 400 });
+    }
+    const keys = body.rooms.map((r) => ROOM_INDEX + r);
+    const present = await this.state.storage.get(keys);
+    if (present.size > 0) {
+      await this.state.storage.delete([...present.keys()]);
+    }
+    return Response.json({ dropped: present.size });
   }
 
   // Stamps a room as touched now and, at most every FEED_ROOMS_EVERY_MS, tells

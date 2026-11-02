@@ -3910,7 +3910,9 @@ that leaves a room's size unchanged does not touch it. A room older than the
 index enters it on its next size change, or through `roomindexadd`
 (`{rooms: [{room, createdAt, touchedAt}]}`, at most 1000), which adds only the
 rooms the index lacks and answers `{added, present}`, so a repeated or
-interrupted backfill is harmless. `GET /paste/roomindex?slug=&since=<ms>`
+interrupted backfill is harmless. `roomindexdrop` (`{rooms: [room UUID]}`, at most
+1000) removes those index entries and nothing else, no room and no bytes,
+answering `{dropped}`; it is for entries that name no reachable room. `GET /paste/roomindex?slug=&since=<ms>`
 lists, in key order, the entries whose `touchedAt` is at or after `since`, as
 `{rooms: [{room, createdAt, touchedAt}], next}`; at most 1000 keys are walked
 per page and `start=<next>` resumes.
