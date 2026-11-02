@@ -18,6 +18,7 @@ import (
 type fakeScreener struct {
 	mu   sync.Mutex
 	seen []map[string]string // one file map per request
+	keys []string            // the Uploader of each request
 	deny func(files map[string]string) string
 	err  error
 	// message is returned with every refusal.
@@ -46,6 +47,7 @@ func (f *fakeScreener) Screen(_ context.Context, req domain.ScreenRequest) (doma
 	}
 	f.mu.Lock()
 	f.seen = append(f.seen, files)
+	f.keys = append(f.keys, req.Uploader)
 	f.mu.Unlock()
 	if f.err != nil {
 		return domain.ScreenVerdict{}, f.err
@@ -112,6 +114,21 @@ func TestScreen_SiteDeploySendsABundleAndARefusalPublishesNothing(t *testing.T) 
 	stdout, stderr, code := g.run("", bad)
 	if code != 8 || stdout != "" {
 		t.Fatalf("refused deploy: exit %d stdout %q stderr %q", code, stdout, stderr)
+	}
+}
+
+// Paste and site uploads both name the uploading key to the screener.
+func TestScreen_RequestsNameTheUploadingKey(t *testing.T) {
+	f := &fakeScreener{deny: denyContaining("never")}
+	g := startStack(t, withSites(), withScreen(&service.ScreenGate{Screener: f}))
+	if _, stderr, code := g.run("", []byte("<h1>hi</h1>")); code != 0 {
+		t.Fatalf("paste: exit %d %q", code, stderr)
+	}
+	if _, stderr, code := g.run("", makeSiteArchive(t, map[string]string{"index.html": "<h1>ok</h1>"})); code != 0 {
+		t.Fatalf("site: exit %d %q", code, stderr)
+	}
+	if len(f.keys) != 2 || f.keys[0] != g.keyedOwner || f.keys[1] != g.keyedOwner {
+		t.Fatalf("uploaders %q, want %q twice", f.keys, g.keyedOwner)
 	}
 }
 

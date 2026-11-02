@@ -40,6 +40,9 @@ func (c *Client) Screen(ctx context.Context, req domain.ScreenRequest) (domain.S
 	if req.Name != "" {
 		hreq.Header.Set("X-Hostthis-Name", req.Name)
 	}
+	if req.Uploader != "" {
+		hreq.Header.Set("X-Hostthis-Key", req.Uploader)
+	}
 	if req.Truncated {
 		hreq.Header.Set("X-Hostthis-Truncated", "1")
 	}

@@ -19,7 +19,9 @@ type ScreenRequest struct {
 	Name  string
 	// Truncated marks a document cut to its first ScreenDocumentMax bytes.
 	Truncated bool
-	Body      io.Reader
+	// Uploader is the uploading key's fingerprint, for deployment policy.
+	Uploader string
+	Body     io.Reader
 }
 
 // ScreenVerdict is the screening service's answer.
