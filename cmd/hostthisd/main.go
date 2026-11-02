@@ -156,6 +156,14 @@ func main() {
 	if len(landing) > 0 {
 		landing = []byte(strings.ReplaceAll(string(landing), "{{APEX}}", *apexDomain))
 	}
+	notesPath := filepath.Join(filepath.Dir(*landingPath), "llms.txt")
+	notes, err := os.ReadFile(notesPath)
+	if err != nil {
+		logger.Printf("warn: agent notes not loaded from %q: %v (/llms.txt will 404)", notesPath, err)
+	}
+	if len(notes) > 0 {
+		notes = []byte(strings.ReplaceAll(string(notes), "{{APEX}}", *apexDomain))
+	}
 
 	uploadGate, err := buildUploadAdmission(logger)
 	if err != nil {
@@ -226,6 +234,7 @@ func main() {
 		Pastes:      pasteRepo,
 		Blobs:       blobUnit,
 		LandingHTML: landing,
+		AgentNotes:  notes,
 		ApexDomain:  *apexDomain,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 		Logf:        logger.Printf,

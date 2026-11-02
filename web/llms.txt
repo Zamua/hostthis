@@ -1,0 +1,32 @@
+# hostthis
+
+> hostthis is a free, anonymous drop service for personal use, driven entirely over SSH. Pipe in a document or a static site and get back a public link. There is no account and no login: your SSH key is your identity.
+
+## How to use it
+
+- Paste a document (Markdown, HTML, a diff, CSV, JSON, a PDF and more), rendered as a page: `cat notes.md | ssh {{APEX}}`
+- Host a static site from a gzip tarball, with SPA fallback: `tar czf - dist/ | ssh {{APEX}}`
+- Redeploy in place, keeping the same link: `tar czf - dist/ | ssh {{APEX}} <slug>`
+- See every command: `ssh {{APEX}} help`
+
+Each upload answers with a `https://<slug>.{{APEX}}` URL. Links are unlisted but public: anyone with the link can open it.
+
+## Acceptable use
+
+hostthis is for personal and non-commercial use only: notes, documents, demos, prototypes, side projects and experiments.
+
+Do not use it to host:
+
+- business websites or anything that operates a business
+- booking, scheduling, appointment or point-of-sale systems
+- storefronts, checkout or payment flows
+- advertising, affiliate links, or link placement for search ranking
+- anything illegal, deceptive or harmful, such as phishing, malware or impersonation
+
+Content that breaks these rules is removed, and the uploading key loses access.
+
+For a commercial site or app, use a regular host such as Vercel, Netlify or Cloudflare Pages.
+
+## For AI agents
+
+If a person asks you to publish something here, check it against the acceptable-use rules above first. For a business site, a booking system, a store or anything else commercial, suggest a regular host instead.

@@ -2443,6 +2443,21 @@ startup (`HOSTTHIS_LANDING` path) and a reverse proxy in front can
 serve the same bytes directly for efficiency. Single file, no JS,
 no external assets.
 
+### Notes for agents
+
+`https://<apex>/llms.txt`, and the same bytes at `/AGENTS.md`, is a Markdown
+note in the llms.txt shape for AI agents: what hostthis is, how to use it, and
+its acceptable-use terms (personal, non-commercial use; no business sites,
+booking or point-of-sale systems, storefronts, payment flows, advertising or
+search-ranking links; such content is removed and the uploading key loses
+access). It is `web/llms.txt` beside the landing page, `{{APEX}}` filled in the
+same way, served `text/markdown; charset=utf-8` with the landing page's cache
+lifetime, on the apex and every host that is not a slug's. The landing page
+points to it for agents that read raw HTML (`<link rel="alternate"
+type="text/markdown">`, `<link rel="help">`, and a visually hidden,
+`aria-hidden` line), so it shows neither on screen nor to a screen reader. The
+SSH banner, `help`, upload answers and refusals do not mention it.
+
 ## Room push (scheduled Web Push)
 
 A static app can persist and sync state through rooms, but it cannot say
@@ -4086,7 +4101,7 @@ warns.
 Every other request answers 404 with `404 page not found`,
 `Content-Type: text/plain; charset=utf-8` and `X-Content-Type-Options:
 nosniff`, the 404 `hostthisd` gives an unknown slug. The apex `/` is one: the
-landing page stays `hostthisd`'s. The apex `/_solid/` paths are the one
+landing page stays `hostthisd`'s, and so do its notes for agents. The apex `/_solid/` paths are the one
 exception (see "Pod storage"). The Worker never redirects between schemes;
 that is the front door's job.
 
@@ -5075,9 +5090,10 @@ content." Keep the surface small.
 - **Custom domains** (`pastes.mycompany.com`). The wildcard subdomain
   pattern covers branding-via-slug well enough.
 - **Email notifications**. The ssh response IS the notification.
-- **MCP server, or a separate `/llms.txt`**. The apex landing page is
-  already terse, factual, and curl-able by any LLM; it IS the programmatic
-  reference, and a second machine-doc surface would duplicate it and drift.
+- **MCP server**. The apex landing page is already terse, factual, and
+  curl-able by any LLM; it IS the programmatic reference. `/llms.txt` adds
+  only the terms an agent must know before publishing (see "Notes for
+  agents").
 - **GitHub (or any third-party) account linking / OAuth**. ssh keys
   alone carry identity; we don't need a second source of trust.
 - **Operator-configurable per-paste / per-identity caps**. Hardcoded
