@@ -4699,6 +4699,32 @@ quarantine for that purpose.
 watcher ban, and keeps the quarantine index (slug, owner, reason, actor, time)
 and an audit log of the last 1000 actions, refused ones included.
 
+**Owner ban.** `/abuse/ban-owner` takes an owner out entirely: it adds the
+owner's key to the denylist (permanent), quarantines every slug in the owner's
+listing, and schedules each for permanent deletion a retention window later
+(7 days by default, `retentionDays` 1 to 90). The owner is named by key
+(`identity`) or as the owner of a slug (`slug`); a protected owner is refused
+(403 `protected-owner`). The Abuse cell keeps one ban record per owner (its id
+`banId`, the owner hash, reason, times, the slugs it quarantined, and progress
+counters) and works it from its alarm in small batches, so an owner with many
+slugs never makes one request fan out unbounded:
+
+- quarantine each listed slug as `actor: "ban:<banId>"`, purging its host
+  twice as a single quarantine does;
+- sweep the listing again a minute after the ban, and on each later pass, so a
+  slug created by a session admitted before every replica refreshed its
+  denylist copy is caught too;
+- at `deleteAfter`, delete each slug the ban quarantined as the owner's own
+  delete would (the row, every version's upload prefix, the cached host),
+  recording each outcome. A slug that cannot be deleted is retried on the next
+  pass and reported in the record.
+
+Until `deleteAfter`, `/abuse/unban-owner {banId}` lifts the ban: it removes the
+key from the denylist, releases exactly the slugs the ban quarantined (a slug
+quarantined on its own stays quarantined) and cancels the deletion. After
+deletion the record stays as a tombstone (owner hash, counts, times). The
+watcher's credential reaches neither route; its `ban-key` stays a bare ban.
+
 **Room removal.** Rooms have no delete in the public API; the operator route
 `/abuse/room-delete` removes one. The Room cell releases the room's bytes
 through the ordinary shrink (freeing the app's ceiling and the owner's quota),
@@ -4718,6 +4744,9 @@ including the operator routes:
 | `GET /abuse/list` | | `{quarantined: [{slug, owner, reason, actor, at}]}` |
 | `GET /abuse/audit` | | `{entries: [...]}`, newest last |
 | `POST /abuse/room-delete` | `{app, room}` (the room's UUID) | 200 `{app, removed}` (`false`: no such room), 502 when a step could not finish |
+| `POST /abuse/ban-owner` | `{identity}` or `{slug}`, `reason`, optional `retentionDays` | 200 `{banId, owner, slugs, deleteAfter}`, 403 `protected-owner`, 404 `no-such-paste`, 409 `already-banned` with the open ban's `banId` |
+| `POST /abuse/unban-owner` | `{banId}` | 200 `{banId, released}`, 404 `no-such-ban`, 409 `already-deleted` |
+| `GET /abuse/bans` | | `{bans: [{banId, owner, reason, at, deleteAfter, state, slugs, quarantined, deleted, failed}]}` |
 
 A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly two routes
 and nowhere else, for an automated abuse watcher:
