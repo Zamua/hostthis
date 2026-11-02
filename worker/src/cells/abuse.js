@@ -83,6 +83,11 @@ export class Abuse {
       && now - e.at < HOUR_MS).length;
   }
 
+  // Key bans and owner bans share the watcher's hourly cap.
+  async watcherBans(now) {
+    return await this.watcherCount(ACTIONS.bankey, now) + await this.watcherCount(ACTIONS.banowner, now);
+  }
+
   validReason(reason) {
     return typeof reason === "string" && new TextEncoder().encode(reason).length <= REASON_MAX;
   }
@@ -153,7 +158,7 @@ export class Abuse {
     if (fp instanceof Response) {
       return fp;
     }
-    if (body.actor === "watcher" && await this.watcherCount(ACTIONS.bankey, body.now) >= WATCHER_BANS_PER_HOUR) {
+    if (body.actor === "watcher" && await this.watcherBans(body.now) >= WATCHER_BANS_PER_HOUR) {
       await this.record(body, fp, "rate-capped");
       return fail(429, "rate-capped");
     }
@@ -209,7 +214,8 @@ export class Abuse {
     await this.state.storage.delete(INDEX + slug);
   }
 
-  // Operator only: the router never maps the watcher's credential here.
+  // The watcher reaches this without retentionDays (its route has no such
+  // field), under the same hourly cap as its key bans.
   async banOwner(input) {
     const body = { ...input, op: "banowner" };
     const days = body.retentionDays ?? RETENTION_DAYS.default;
@@ -223,6 +229,10 @@ export class Abuse {
     }
     const identity = `key:${fp}`;
     const hash = await ownerHash(identity);
+    if (body.actor === "watcher" && await this.watcherBans(body.now) >= WATCHER_BANS_PER_HOUR) {
+      await this.record(body, hash, "rate-capped");
+      return fail(429, "rate-capped");
+    }
     if (await this.isProtected(identity)) {
       await this.record(body, hash, "protected-owner");
       return fail(403, "protected-owner");
