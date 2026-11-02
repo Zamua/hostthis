@@ -482,7 +482,8 @@
   (async function () {
     try {
       var resp = await fetch(location.pathname + "?raw=1");
-      if (!resp.ok) return fail("Failed to load paste.");
+      // A 503 explains itself (docs/SPEC.md "Pod storage").
+      if (!resp.ok) return fail(resp.status === 503 ? (await resp.text()).trim() : "Failed to load paste.");
       var text = await resp.text();
       state.raw = text;
 
