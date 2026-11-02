@@ -504,8 +504,12 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 
 	rc, _, err := s.Blobs.Read(r.Context(), entry)
 	if err != nil {
-		s.logf("warn: %s read 500: slug=%s %s blob read: %v", surface, slug, what, err)
-		serveReadError(w, "internal error")
+		s.logf("warn: %s read failed: slug=%s %s blob read: %v", surface, slug, what, err)
+		if errors.As(err, new(*domain.PodRefusedError)) {
+			serveStorageOffline(w)
+		} else {
+			serveReadError(w, "internal error")
+		}
 		return
 	}
 	defer rc.Close() //nolint:errcheck
@@ -621,6 +625,18 @@ var contentHeaders = []string{
 // serveReadError answers a read-path 5xx with its text alone. Validators or a
 // cacheable posture left on a 500 would let a cache store the error, or
 // revalidate it against the content it replaced.
+// serveStorageOffline answers a read whose bytes live in an owner's pod that
+// refused or did not answer (docs/SPEC.md "Pod storage").
+func serveStorageOffline(w http.ResponseWriter) {
+	h := w.Header()
+	for _, k := range contentHeaders {
+		h.Del(k)
+	}
+	h.Set("Cache-Control", "no-store")
+	h.Set("Retry-After", "300")
+	http.Error(w, "this paste's storage is offline right now", http.StatusServiceUnavailable)
+}
+
 func serveReadError(w http.ResponseWriter, text string) {
 	h := w.Header()
 	for _, k := range contentHeaders {
