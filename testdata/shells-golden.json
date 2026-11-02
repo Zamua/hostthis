@@ -41,8 +41,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 20025,
-    "sha256": "2d901018f10ad41402dadb6a7379c815ef16944e41c9751adf0eb262540ab2c6"
+    "size": 20137,
+    "sha256": "9c9339a0c26d0482f55c0c32bc254dcf42f521e65e574c8834fc5b33ed47a1c8"
   },
   "asset/deeplink.js": {
     "status": 200,
@@ -68,8 +68,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 12606,
-    "sha256": "3712600737fbbf5299601219371df820a933cc363d5a23894dccfb53df8f8751"
+    "size": 12783,
+    "sha256": "ab209195cef826b5f7c4a71475f50ea34ad4d96348bd69d8fdb35b0080993005"
   },
   "asset/diff2html-ui-base.min.js": {
     "status": 200,
@@ -140,8 +140,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 9831,
-    "sha256": "0ceeb49c74b3e2d6960b48a0f5c9d5aa2478e12c4cc9eb1104664daf733cf3af"
+    "size": 9987,
+    "sha256": "ea272474c295db46baa9492426fab83ba0fcd0b8ceb7daba59683842eb274bd3"
   },
   "asset/flatbuffers.js": {
     "status": 200,
@@ -248,8 +248,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 21700,
-    "sha256": "3f80a62c46d8fc0b93ba426d461c0113787f20022c4dec5986ceea4ed0a7002e"
+    "size": 21856,
+    "sha256": "dc7b6b81c1f5b90b77bca3bea0dc4846eb4946e84dd35d49e2cbbf6411a23cd3"
   },
   "asset/marked.min.js": {
     "status": 200,
@@ -275,8 +275,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 5488,
-    "sha256": "1ed73926ed6f0e3f2859fed7de9b4d38b7f8fe6abde75970171d4ee87fb4e04b"
+    "size": 5600,
+    "sha256": "ac4d7856eca3f5e6d8e093e03da557024af483543cc1032a7365f5dc3a23f608"
   },
   "asset/mdshell/md.js": {
     "status": 200,
@@ -284,8 +284,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 5488,
-    "sha256": "1ed73926ed6f0e3f2859fed7de9b4d38b7f8fe6abde75970171d4ee87fb4e04b"
+    "size": 5600,
+    "sha256": "ac4d7856eca3f5e6d8e093e03da557024af483543cc1032a7365f5dc3a23f608"
   },
   "asset/mermaid.css": {
     "status": 200,
@@ -302,8 +302,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 1357,
-    "sha256": "7882dc5ff29dc10895488c1c9b83ad6f0d565addf6bb82b27b3347b7343a537d"
+    "size": 1467,
+    "sha256": "dce4eb0bb797e2d97aa14a39c1efc702d012a0c2d4aebc2804b07f570332c72c"
   },
   "asset/pdf.css": {
     "status": 200,
@@ -401,8 +401,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 3005,
-    "sha256": "e5a6f01f37cb278d42b489570743660207c6bba5516dad5ee40b6eb790315db0"
+    "size": 3161,
+    "sha256": "b4820fa237e57a21dd5f96941166e4d6e7cbad4309319274e9209864f53c6c1d"
   },
   "asset/tslib.js": {
     "status": 200,

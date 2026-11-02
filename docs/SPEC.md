@@ -3342,7 +3342,8 @@ and exits 1. A new paste's bytes are written after its URL is printed (see
 is a 503 with the body `this paste's storage is offline right now`,
 `Cache-Control: no-store` and `Retry-After: 300`, from both read servers: the
 bytes are the owner's and come back with their pod, so a reader is told to
-try later rather than shown an internal error.
+try later rather than shown an internal error. A render shell whose raw fetch
+gets a 503 shows that line in place of the document.
 
 **Unlinking.** `pod unlink` stops new uploads from going to the pod. It does
 not touch the pod or existing versions, which keep reading from it for as

@@ -510,6 +510,8 @@
 
   fetch(location.pathname + "?raw=1", { credentials: "same-origin" })
     .then(function (r) {
+      // A 503 explains itself (docs/SPEC.md "Pod storage").
+      if (r.status === 503) return r.text().then(function (t) { throw new Error(t.trim()); });
       if (!r.ok) throw new Error("fetch failed: " + r.status);
       return r.text();
     })
