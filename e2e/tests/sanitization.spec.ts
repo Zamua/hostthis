@@ -105,6 +105,9 @@ test('sanitization', async ({ server, page, pageErrors, shot }) => {
   // The decoy image's 404 is the fixture doing its job. Scoped to that exact
   // URL, so every other missing subresource still fails the page.
   pageErrors.ignore(server.baseURL + '/p/' + decoyImageSrc);
+  // The shell's CSP blocks the payloads' inline handlers while the sanitizer
+  // parses them, and Chromium reports each block as a console error.
+  pageErrors.ignore(/Executing inline event handler violates .*'script-src 'self''.*\/_hostthis\/purify\.min\.js/);
 
   // Every paste is uploaded up front, so the finalizer works on the later
   // ones while the browser is busy with the earlier.
