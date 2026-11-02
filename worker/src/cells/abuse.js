@@ -1,5 +1,5 @@
 import { cellRoute } from "./image.js";
-import { BAN, RETENTION_DAYS, advance, clearOpenBan, createBan, openBanId, ownerSlugs, summary } from "./bans.js";
+import { BAN, RETENTION_DAYS, advance, clearOpenBan, createBan, openBanId, ownerSlugs, ownerSubnets, summary } from "./bans.js";
 import { dispatch, mutation, read } from "./ops.js";
 
 // The ABUSE cell (docs/SPEC.md "Quarantine"): serializes quarantine, release
@@ -242,7 +242,8 @@ export class Abuse {
     });
     await this.schedule(body.now);
     await this.record(body, hash, "ok", { banId, slugs: slugs.length });
-    return Response.json({ banId, owner: hash, slugs: slugs.length, deleteAfter: record.deleteAfter });
+    const subnets = await ownerSubnets(this.env, identity, body.now);
+    return Response.json({ banId, owner: hash, slugs: slugs.length, deleteAfter: record.deleteAfter, subnets });
   }
 
   async unbanOwner(input) {
