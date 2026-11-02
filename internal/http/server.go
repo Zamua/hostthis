@@ -51,7 +51,9 @@ type Server struct {
 	// nil leaves them 404.
 	Solid       http.Handler
 	LandingHTML []byte // optional; apex landing page bytes embedded at build
-	ApexDomain  string // e.g. "hostthis.dev"; used to peel slug subdomains
+	// AgentNotes is /llms.txt (and /AGENTS.md) beside the landing page; nil 404s.
+	AgentNotes []byte
+	ApexDomain string // e.g. "hostthis.dev"; used to peel slug subdomains
 	// Color labels the replica in blue/green deploys, echoed in the
 	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
@@ -120,6 +122,12 @@ func (s *Server) Handler() http.Handler {
 		}
 		if r.URL.Path == "/" {
 			s.serveLanding(w, r)
+			return
+		}
+		if (r.URL.Path == "/llms.txt" || r.URL.Path == "/AGENTS.md") && len(s.AgentNotes) > 0 {
+			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+			w.Header().Set("Cache-Control", "public, max-age=300")
+			_, _ = w.Write(s.AgentNotes)
 			return
 		}
 		http.NotFound(w, r)
