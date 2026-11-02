@@ -157,3 +157,21 @@ test("unban after deletion started is refused", async () => {
   assert.equal((await call(w.abuse, "unbanowner", { banId, actor: "operator", now: NOW + 2 * DAY })).status, 409);
   assert.equal((await call(w.abuse, "unbanowner", { banId: "nope", actor: "operator", now: NOW })).status, 404);
 });
+
+test("the watcher's owner ban runs the cascade at the default retention under the shared hourly cap", async () => {
+  const w = world({ protectedOwners: OTHER });
+  await w.add(OWNER, "aaaa2345");
+  await w.add(OTHER, "cccc2345");
+  assert.equal((await call(w.abuse, "banowner", { slug: "cccc2345", reason: "x", actor: "watcher", now: NOW })).status, 403);
+  const res = await call(w.abuse, "banowner", { slug: "aaaa2345", reason: "spam", actor: "watcher", now: NOW });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.deleteAfter, NOW + 7 * DAY);
+  await w.runAlarms(NOW + 60_000);
+  assert.equal(await publicFound(w.pastes.get("aaaa2345")), false);
+  for (let i = 1; i < 5; i++) {
+    const fp = "SHA256:" + String(i).repeat(64);
+    assert.equal((await call(w.abuse, "bankey", { identity: fp, reason: "x", actor: "watcher", now: NOW + i })).status, 200);
+  }
+  const capped = await call(w.abuse, "banowner", { identity: "SHA256:" + "9".repeat(64), reason: "x", actor: "watcher", now: NOW + 9 });
+  assert.equal(capped.status, 429);
+});
