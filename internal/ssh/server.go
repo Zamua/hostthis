@@ -333,11 +333,9 @@ func (s *Server) denylistMiddleware() wish.Middleware {
 					return
 				}
 			}
-			if reason, banned := s.Denylist.Check(owner, addr); banned {
-				fmt.Fprintln(sess.Stderr(), "hostthis: this key or network is banned from hostthis") //nolint:errcheck
-				if reason != "" {
-					fmt.Fprintf(sess.Stderr(), "  reason: %s\n", reason) //nolint:errcheck
-				}
+			if _, banned := s.Denylist.Check(owner, addr); banned {
+				// No reason and no matched entry: a refused client learns nothing.
+				fmt.Fprintln(sess.Stderr(), "hostthis: connection refused") //nolint:errcheck
 				_ = sess.Exit(ExitBanned)
 				return
 			}

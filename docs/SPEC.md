@@ -2744,10 +2744,10 @@ this is the trade-off.
 ### Operator denylist: banned keys and networks
 
 An operator can ban a key fingerprint or an IP network outright. A banned
-session is refused at SSH admission, before the Sybil gate, so it records
-nothing: no keygate row, no subnet note, no verb. It exits 7 with the stderr
-line `hostthis: this key or network is banned from hostthis`, plus
-`  reason: <reason>` when the entry has one.
+session is refused at SSH admission, whatever its command, before the Sybil
+gate, so it records nothing: no keygate row, no subnet note, no verb. It exits
+7 with the bare stderr line `hostthis: connection refused`. The refusal names
+no reason and does not say which entry matched.
 
 An entry is one of:
 
@@ -2759,15 +2759,21 @@ An entry is one of:
   `/24` and `/48` are the usual widths; a wider prefix covers a provider's
   block.
 
-Each entry carries a `reason` (at most 200 bytes, shown to the refused client,
-so it must be fine for them to read) and its `addedAt` time.
+Each entry carries a `reason` (at most 200 bytes, for operators; never shown
+to the refused client), its `addedAt` time, and an optional `expiresAt`
+(milliseconds since the epoch, in the future when written). An entry past its
+`expiresAt` no longer matches: the cell leaves it out of `list` and drops it
+when it next counts toward the cap, and each replica also ignores an expired
+entry in its cached copy, so a replica that cannot refresh never extends a
+ban. An entry without `expiresAt` is permanent.
 
 **Storage.** One `Denylist` cell holds every entry; the list is small and
 operator-written, so one cell needs no fan-out. The Worker's internal router
 serves it at `/denylist/list` (GET), `/denylist/add` and `/denylist/remove`
-(POST `{entry, reason}` and `{entry}`). Add is idempotent and replaces the
-reason of an entry already present; removing an absent entry succeeds. A
-malformed entry answers 400 `invalid-entry`. The cap is 1000 entries
+(POST `{entry, reason, expiresAt?}` and `{entry}`). Add is idempotent and
+replaces the reason and expiry of an entry already present; removing an absent
+entry succeeds. A malformed entry, or an `expiresAt` that is not a future safe
+integer, answers 400 `invalid-entry`. The cap is 1000 entries
 (507 `denylist-full`).
 
 **Operator path.** Entries change through the Worker's internal API with its

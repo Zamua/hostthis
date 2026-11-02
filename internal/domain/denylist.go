@@ -3,13 +3,37 @@ package domain
 import (
 	"net/netip"
 	"regexp"
+	"time"
 )
 
 // DenyEntry is one operator denylist entry as stored: a key fingerprint or a
 // CIDR prefix (docs/SPEC.md "Operator denylist").
 type DenyEntry struct {
-	Entry  string
-	Reason string
+	Entry     string
+	Reason    string
+	ExpiresAt time.Time // zero: permanent
+}
+
+// Live reports whether the entry still applies at now.
+func (e DenyEntry) Live(now time.Time) bool {
+	return e.ExpiresAt.IsZero() || now.Before(e.ExpiresAt)
+}
+
+// LiveDenyEntries returns the entries that apply at now and the earliest
+// time one of them expires (zero when none expires).
+func LiveDenyEntries(entries []DenyEntry, now time.Time) ([]DenyEntry, time.Time) {
+	var live []DenyEntry
+	var next time.Time
+	for _, e := range entries {
+		if !e.Live(now) {
+			continue
+		}
+		live = append(live, e)
+		if !e.ExpiresAt.IsZero() && (next.IsZero() || e.ExpiresAt.Before(next)) {
+			next = e.ExpiresAt
+		}
+	}
+	return live, next
 }
 
 var denyKeyShape = regexp.MustCompile(`^SHA256:[0-9a-f]{64}$`)

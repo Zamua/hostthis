@@ -10,6 +10,10 @@ const REASON_MAX = 200;
 const ENTRY = "e:";
 const KEY = /^SHA256:[0-9a-f]{64}$/;
 
+function expired(row, now) {
+  return typeof row.expiresAt === "number" && row.expiresAt <= now;
+}
+
 function invalid() {
   return Response.json({ error: "invalid-entry" }, { status: 400 });
 }
@@ -97,6 +101,7 @@ const DENYLIST_OPS = {
 export class Denylist {
   constructor(state) {
     this.state = state;
+    this.now = () => Date.now();
   }
 
   async fetch(request) {
@@ -106,8 +111,10 @@ export class Denylist {
   }
 
   async list() {
+    const now = this.now();
     const rows = await this.state.storage.list({ prefix: ENTRY });
-    const entries = [...rows].map(([key, row]) => ({ entry: key.slice(ENTRY.length), ...row }));
+    const entries = [...rows].filter(([, row]) => !expired(row, now))
+      .map(([key, row]) => ({ entry: key.slice(ENTRY.length), ...row }));
     entries.sort((a, b) => a.addedAt - b.addedAt);
     return Response.json({ entries });
   }
@@ -115,17 +122,35 @@ export class Denylist {
   async add(body) {
     const entry = canonicalEntry(body?.entry);
     const reason = body?.reason;
+    const expiresAt = body?.expiresAt ?? null;
+    const now = this.now();
     if (!entry || typeof reason !== "string" || new TextEncoder().encode(reason).length > REASON_MAX) {
+      return invalid();
+    }
+    if (expiresAt !== null && !(Number.isSafeInteger(expiresAt) && expiresAt > now)) {
       return invalid();
     }
     const key = ENTRY + entry;
     const prior = await this.state.storage.get(key);
-    if (!prior && (await this.state.storage.list({ prefix: ENTRY })).size >= DENYLIST_CAP) {
+    if (!prior && await this.liveCount(now) >= DENYLIST_CAP) {
       return Response.json({ error: "denylist-full" }, { status: 507 });
     }
-    const row = { reason, addedAt: prior?.addedAt ?? Date.now() };
+    const row = { reason, addedAt: prior?.addedAt ?? now };
+    if (expiresAt !== null) {
+      row.expiresAt = expiresAt;
+    }
     await this.state.storage.put(key, row);
     return Response.json({ entry, ...row });
+  }
+
+  // Counts unexpired entries, deleting expired ones on the way.
+  async liveCount(now) {
+    const rows = await this.state.storage.list({ prefix: ENTRY });
+    const gone = [...rows].filter(([, row]) => expired(row, now)).map(([key]) => key);
+    for (let i = 0; i < gone.length; i += 128) {
+      await this.state.storage.delete(gone.slice(i, i + 128));
+    }
+    return rows.size - gone.length;
   }
 
   async remove(body) {

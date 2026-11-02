@@ -27,7 +27,28 @@ type DenyGate struct {
 	Source   DenylistSource
 	Interval time.Duration
 	Logger   *log.Logger
-	list     atomic.Pointer[domain.Denylist]
+	Now      func() time.Time // defaults to time.Now
+	list     atomic.Pointer[compiledDenylist]
+}
+
+// compiledDenylist is one loaded list: the live entries indexed, plus what is
+// needed to drop entries as they expire between refreshes.
+type compiledDenylist struct {
+	entries []domain.DenyEntry
+	index   domain.Denylist
+	next    time.Time // earliest expiry among live entries; zero when none
+}
+
+func compileDenylist(entries []domain.DenyEntry, now time.Time) *compiledDenylist {
+	live, next := domain.LiveDenyEntries(entries, now)
+	return &compiledDenylist{entries: live, index: domain.NewDenylist(live), next: next}
+}
+
+func (g *DenyGate) now() time.Time {
+	if g.Now != nil {
+		return g.Now()
+	}
+	return time.Now()
 }
 
 func NewDenyGate(src DenylistSource) *DenyGate {
@@ -41,8 +62,7 @@ func (g *DenyGate) Refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	d := domain.NewDenylist(entries)
-	g.list.Store(&d)
+	g.list.Store(compileDenylist(entries, g.now()))
 	return nil
 }
 
@@ -71,5 +91,11 @@ func (g *DenyGate) Check(owner domain.Owner, addr netip.Addr) (string, bool) {
 	if d == nil {
 		return "", false
 	}
-	return d.Match(owner.Fingerprint(), addr)
+	// A cached copy never outlives an entry's expiry, even when refreshes fail.
+	if now := g.now(); !d.next.IsZero() && !now.Before(d.next) {
+		fresh := compileDenylist(d.entries, now)
+		g.list.CompareAndSwap(d, fresh)
+		d = fresh
+	}
+	return d.index.Match(owner.Fingerprint(), addr)
 }
