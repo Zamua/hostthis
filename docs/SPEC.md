@@ -2705,6 +2705,13 @@ two ways, and they need opposite key orders:
    nothing, so a stale answer is a cosmetic inaccuracy, never a
    weakened control.
 
+   The identity-leading entry also records when its pair was last
+   introduced to the gate, and is kept for 30 days rather than the
+   window: the count above reads only in-window entries, while an
+   owner ban ("Owner ban") reports every subnet the key was seen in
+   over the last 30 days. Only the `/24` or `/48` is kept, never a
+   full address.
+
 On a relational backend one composite primary key
 `(identity, ip_subnet)` serves the second for free (leading-column
 seek) and a secondary index serves the first. **A KV backend cannot
@@ -4744,7 +4751,7 @@ including the operator routes:
 | `GET /abuse/list` | | `{quarantined: [{slug, owner, reason, actor, at}]}` |
 | `GET /abuse/audit` | | `{entries: [...]}`, newest last |
 | `POST /abuse/room-delete` | `{app, room}` (the room's UUID) | 200 `{app, removed}` (`false`: no such room), 502 when a step could not finish |
-| `POST /abuse/ban-owner` | `{identity}` or `{slug}`, `reason`, optional `retentionDays` | 200 `{banId, owner, slugs, deleteAfter}`, 403 `protected-owner`, 404 `no-such-paste`, 409 `already-banned` with the open ban's `banId` |
+| `POST /abuse/ban-owner` | `{identity}` or `{slug}`, `reason`, optional `retentionDays` | 200 `{banId, owner, slugs, deleteAfter, subnets: [{subnet, at}]}` (the key's subnets over the last 30 days, for the operator to judge), 403 `protected-owner`, 404 `no-such-paste`, 409 `already-banned` with the open ban's `banId` |
 | `POST /abuse/unban-owner` | `{banId}` | 200 `{banId, released}`, 404 `no-such-ban`, 409 `already-deleted` |
 | `GET /abuse/bans` | | `{bans: [{banId, owner, reason, at, deleteAfter, state, slugs, quarantined, deleted, failed}]}` |
 

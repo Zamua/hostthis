@@ -3,6 +3,10 @@ import { cellRoute } from "./image.js";
 import { cellCall, dispatch, mutation, read, requireShape } from "./ops.js";
 import { CREATE_INTENT_GRACE_MS, INTENT_PREFIX, ROOM_CHARGE_PREFIX, artifactAccountKey, chargedSize, fence, intentKey, roomChargeKey, toRow } from "./records.js";
 
+// How long the identity-side subnet index keeps an entry (docs/SPEC.md "Sybil
+// rate limit"): longer than the gate's window so an owner ban can name them.
+export const SUBNET_RETENTION_MS = 30 * 86_400_000;
+
 // Sign-in attempts one pending pod link keeps (docs/SPEC.md "Pod storage").
 const LINK_LOGIN_ATTEMPTS = 8;
 
@@ -19,6 +23,7 @@ const IDENTITY_OPS = {
   artifactdrop: mutation((self, body) => self.artifactDrop(body)),
   roomcharge: mutation((self, body) => self.roomCharge(body)),
   notesubnet: mutation((self, body) => self.noteSubnet(body)),
+  subnetlist: read((self, _body, url) => self.subnetList(url)),
   // The owner's pod link, and the link cells (`podlink:<id>`) that record each
   // link (docs/SPEC.md "Pod storage").
   podget: read((self) => self.podGet()),
@@ -443,14 +448,25 @@ export class Identity {
     });
   }
 
-  // The reverse index avoids fan-out across every subnet cell.
+  // The reverse index avoids fan-out across every subnet cell. Each entry
+  // holds the last time its pair was introduced to the gate.
   async noteSubnet(body) {
     const subnets = (await this.state.storage.get("subnets")) ?? {};
-    if (!Object.hasOwn(subnets, body.subnet)) {
-      subnets[body.subnet] = body.now;
+    if (subnets[body.subnet] !== body.now) {
+      subnets[body.subnet] = Math.max(subnets[body.subnet] ?? 0, body.now);
       await this.state.storage.put("subnets", subnets);
     }
     return new Response(null, { status: 204 });
+  }
+
+  // The subnets this key was seen in over the retention period, for an
+  // operator's owner ban.
+  async subnetList(url) {
+    const now = Number(url.searchParams.get("now"));
+    const subnets = (await this.state.storage.get("subnets")) ?? {};
+    const list = Object.entries(subnets).filter(([, at]) => now - at < SUBNET_RETENTION_MS)
+      .map(([subnet, at]) => ({ subnet, at })).sort((a, b) => b.at - a.at);
+    return Response.json({ subnets: list });
   }
 
   async podGet() {
@@ -540,10 +556,10 @@ export class Identity {
     let changed = false;
     let n = 0;
     for (const [cidr, at] of Object.entries(subnets)) {
-      if (now - at >= windowMs) {
+      if (now - at >= Math.max(windowMs, SUBNET_RETENTION_MS)) {
         delete subnets[cidr];
         changed = true;
-      } else {
+      } else if (now - at < windowMs) {
         n++;
       }
     }
