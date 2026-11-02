@@ -137,7 +137,7 @@ export class Room {
   }
 
   async fetch(request) {
-    const handled = (await cellRoute(this.state, request)) ?? (await dispatch(this, ROOM_OPS, request));
+    const handled = (await cellRoute(this.state, request, this.env.ROOMS)) ?? (await dispatch(this, ROOM_OPS, request));
     if (handled) {
       return handled;
     }

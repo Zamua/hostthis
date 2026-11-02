@@ -268,31 +268,37 @@ test("disarm stops the alarm, answers its time, and leaves the entries", async (
   assert.deepStrictEqual(await ok(room, "/__cell/disarm", {}), { alarm: null });
 });
 
-test("clear drops every entry and the alarm of a cell addressed by the named name", async () => {
-  for (const [ns, Cls] of Object.entries(CLASSES)) {
-    const storage = new FakeStorage(new Map([["a", 1], ["b", 2]]), false, 7_000);
-    const res = await call(new Cls(cellState(storage, "app%7Cr1"), {}), "/__cell/clear", { name: "app%7Cr1" });
-    assert.deepStrictEqual([res.status, res.body], [200, { cleared: true, entries: 2 }], ns);
-    assert.equal(storage.data.size, 0, ns);
-    assert.equal(storage.alarm ?? null, null, ns);
-  }
+// A ROOMS namespace in which only `name` maps to the cell the tests build.
+function roomsMapping(name) {
+  return { idFromName: (n) => ({ toString: () => (n === name ? "c".repeat(64) : "d".repeat(64)) }) };
+}
+
+test("clear drops every entry and the alarm of a room whose namespace maps the name to it", async () => {
+  const storage = new FakeStorage(new Map([["a", 1], ["b", 2]]), false, 7_000);
+  const room = new Room(cellState(storage, undefined), { ROOMS: roomsMapping("app%7Cr1") });
+  const res = await call(room, "/__cell/clear", { name: "app%7Cr1" });
+  assert.deepStrictEqual([res.status, res.body], [200, { cleared: true, entries: 2 }]);
+  assert.equal(storage.data.size, 0);
+  assert.equal(storage.alarm ?? null, null);
 });
 
-test("clear leaves a cell addressed by another name, or by none, as it was", async () => {
-  for (const name of ["app|r1", "app%7Cr2", undefined]) {
-    const storage = new FakeStorage(new Map([["a", 1]]), false, 7_000);
-    const res = await call(new Room(cellState(storage, name), {}), "/__cell/clear", { name: "app%7Cr1" });
-    assert.deepStrictEqual([res.status, res.body], [409, { cleared: false, reason: "name-mismatch" }], String(name));
-    assert.deepStrictEqual([...storage.data], [["a", 1]], String(name));
-    assert.equal(storage.alarm, 7_000, String(name));
-  }
+test("clear leaves a room alone when its namespace maps the name to another cell", async () => {
+  const storage = new FakeStorage(new Map([["a", 1]]), false, 7_000);
+  const room = new Room(cellState(storage, "app%7Cr1"), { ROOMS: roomsMapping("app%7Cr2") });
+  const res = await call(room, "/__cell/clear", { name: "app%7Cr1" });
+  assert.deepStrictEqual([res.status, res.body], [409, { cleared: false, reason: "name-mismatch" }]);
+  assert.deepStrictEqual([...storage.data], [["a", 1]]);
+  assert.equal(storage.alarm, 7_000);
 });
 
-test("clear needs a name to match, and a nameless cell never matches one", async () => {
+test("clear refuses a body without a name, and is no route of a cell with no namespace of its own", async () => {
   const storage = new FakeStorage(new Map([["a", 1]]));
+  const room = new Room(cellState(storage, "n"), { ROOMS: roomsMapping("n") });
   for (const body of [{}, { name: "" }, { name: null }, { name: 5 }, "not json"]) {
-    const res = await call(new Room(cellState(storage, undefined), {}), "/__cell/clear", body);
-    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal((await call(room, "/__cell/clear", body)).status, 400, JSON.stringify(body));
+  }
+  for (const cell of [new Room(cellState(storage, "n"), {}), new Paste(cellState(storage, "n"), { ROOMS: roomsMapping("n") })]) {
+    assert.equal((await call(cell, "/__cell/clear", { name: "n" })).status, 404);
   }
   assert.deepStrictEqual([...storage.data], [["a", 1]]);
 });
