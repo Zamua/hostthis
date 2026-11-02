@@ -8,6 +8,7 @@ import { publicReads } from "./public/surface.js";
 
 export { Abuse } from "./cells/abuse.js";
 export { Denylist } from "./cells/denylist.js";
+export { Feed } from "./cells/feed.js";
 export { Identity } from "./cells/identity.js";
 export { IntentLog } from "./cells/intentlog.js";
 export { Paste } from "./cells/paste.js";

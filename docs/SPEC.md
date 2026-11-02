@@ -3856,6 +3856,8 @@ identity:
   pending budget operation, push subscriptions, schedule and send counters, the
   shared alarm, and hibernatable sockets.
 - **Subnet**, one per source network: Sybil-admission rows.
+- **Feed**, one cell named `changes`: which apps changed and when (see "Change
+  feed and room index").
 
 The deprecated `IntentLog` class remains only so the original migration stays
 resolvable. No request routes to it, but it keeps a binding (`INTENT_LOGS`):
@@ -3890,6 +3892,41 @@ Two read-only Paste ops answer a read without handing out the row:
 
 Neither carries the owner identity, the name, the generation, or any version
 but the served one.
+
+### Change feed and room index
+
+An operator's usage scan reads what changed since its last run instead of
+every cell. Two records make that possible, both written where the change
+already happens, and both best-effort: a failed record never fails the write,
+and the scan keeps a periodic full pass as the backstop that catches anything
+they missed.
+
+**Room index.** Each app's Paste cell keeps `roomIndex:<room UUID>` →
+`{createdAt, touchedAt}` for every room of the app. `roomcreated`, which every
+room creation calls whether or not a room ceiling applies, adds the room;
+`roomdecide`, which every write that changes a room's byte size calls (growth
+and shrink alike), sets `touchedAt` to now; `roomremoved` drops it. A write
+that leaves a room's size unchanged does not touch it. A room older than the
+index enters it on its next size change, or through `roomindexadd`
+(`{rooms: [{room, createdAt, touchedAt}]}`, at most 1000), which adds only the
+rooms the index lacks and answers `{added, present}`, so a repeated or
+interrupted backfill is harmless. `GET /paste/roomindex?slug=&since=<ms>`
+lists, in key order, the entries whose `touchedAt` is at or after `since`, as
+`{rooms: [{room, createdAt, touchedAt}], next}`; at most 1000 keys are walked
+per page and `start=<next>` resumes.
+
+**Feed.** The `changes` cell holds `{slug, kind, at}` entries, kept 8 days:
+
+- `paste`, whenever a request or alarm on a Paste cell changes what a reader of
+  its row or quarantine could see (compared before and after, at the cell's
+  entry, so every write path is covered);
+- `rooms`, when one of the app's rooms is created or touched, at most once per
+  10 minutes per app.
+
+`GET /feed/since?at=<ms>` answers `{entries, next}` oldest first, at most 1000
+per page, `start=<next>` resuming. A deployment without the `FEED` binding
+records nothing. Cost: one feed write per paste change, and at most six an
+hour per app with room activity.
 
 ### Concurrency and local atomicity
 
