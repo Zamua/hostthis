@@ -17,10 +17,38 @@
 // Worker: the static assets (dist/assets) and the assets too large for them,
 // stored in PAYLOADS.
 import { Miniflare } from "miniflare";
-import { fstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { fstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+// Everything this run writes to temp storage, Miniflare's own stores included,
+// lives under one directory removed on exit. A run killed before it could
+// clean up is swept by the next one: each directory records its owner's pid.
+const TEMP_PREFIX = "hostthis-localrt-";
+const systemTmp = tmpdir();
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+for (const name of readdirSync(systemTmp)) {
+  if (!name.startsWith(TEMP_PREFIX)) continue;
+  const dir = join(systemTmp, name);
+  let pid;
+  try {
+    pid = Number(readFileSync(join(dir, "pid"), "utf8"));
+  } catch {
+    continue;
+  }
+  if (Number.isSafeInteger(pid) && pid > 0 && !alive(pid)) rmSync(dir, { recursive: true, force: true });
+}
+const runTmp = mkdtempSync(join(systemTmp, TEMP_PREFIX));
+writeFileSync(join(runTmp, "pid"), String(process.pid));
+process.env.TMPDIR = runTmp;
 
 const here = dirname(fileURLToPath(import.meta.url));
 const workerDir = join(here, "..");
@@ -76,8 +104,8 @@ if (publicSurface && !token) {
 }
 
 const persist = process.env.PERSIST_DIR;
-const tempDir = persist ? null : mkdtempSync(join(tmpdir(), "hostthis-localrt-"));
-if (persist) mkdirSync(persist, { recursive: true });
+const tempDir = persist ? null : join(runTmp, "r2");
+mkdirSync(persist ?? tempDir, { recursive: true });
 
 const mf = new Miniflare({
   modules: true,
@@ -119,11 +147,22 @@ async function stop() {
   if (stopping) return;
   stopping = true;
   await mf.dispose().catch(() => {});
-  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  rmSync(runTmp, { recursive: true, force: true });
   process.exit(0);
 }
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
+process.on("SIGHUP", stop);
+// A parent that exits closes the pipes it read; a write to one must stop the
+// runtime cleanly rather than kill it before it removes its temp directory.
+process.stdout.on("error", stop);
+process.stderr.on("error", stop);
+process.on("uncaughtException", (error) => {
+  try {
+    process.stderr.write(`worker runtime: ${error?.stack ?? error}\n`);
+  } catch {}
+  stop();
+});
 // Node's child_process hands a child a socket for stdin, Go's os/exec a FIFO.
 const stdin = fstatSync(0);
 if (stdin.isFIFO() || stdin.isSocket()) {
