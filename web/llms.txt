@@ -23,10 +23,6 @@ Do not use it to host:
 - advertising, affiliate links, or link placement for search ranking
 - anything illegal, deceptive or harmful, such as phishing, malware or impersonation
 
-Content that breaks these rules is removed, and the uploading key loses access.
-
-For a commercial site or app, use a regular host such as Vercel, Netlify or Cloudflare Pages.
-
 ## For AI agents
 
 If a person asks you to publish something here, check it against the acceptable-use rules above first. For a business site, a booking system, a store or anything else commercial, suggest a regular host instead.
