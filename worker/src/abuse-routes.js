@@ -12,6 +12,9 @@ const ROUTES = {
     "/abuse/list": { op: "list" },
     "/abuse/audit": { op: "audit" },
     "/abuse/room-delete": { op: "roomdelete", fields: ["app", "room"] },
+    "/abuse/ban-owner": { op: "banowner", fields: ["identity", "slug", "reason", "retentionDays"] },
+    "/abuse/unban-owner": { op: "unbanowner", fields: ["banId"] },
+    "/abuse/bans": { op: "bans" },
   },
   watcher: {
     "/watcher/quarantine": { op: "quarantine", fields: ["slug", "reason"], purge: true },
@@ -26,24 +29,36 @@ function canPurge(env) {
 }
 
 export async function purgeSlug(env, slug, fetcher = fetch) {
+  return purgeSlugs(env, [slug], fetcher);
+}
+
+// The purge API takes at most 30 hosts per call.
+const PURGE_HOSTS_MAX = 30;
+
+export async function purgeSlugs(env, slugs, fetcher = fetch) {
   if (!canPurge(env)) {
     return false;
   }
   const apex = normalizeHost(env.HOSTTHIS_APEX_DOMAIN);
-  try {
-    const res = await fetcher(`https://api.cloudflare.com/client/v4/zones/${env.HOSTTHIS_CF_ZONE_ID}/purge_cache`, {
-      method: "POST",
-      headers: { "Authorization": `Bearer ${env.HOSTTHIS_CF_PURGE_TOKEN}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ hosts: [`${slug}.${apex}`] }),
-    });
-    if (!res.ok) {
-      console.warn(`warn: quarantine purge ${slug}: status ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  let ok = true;
+  for (let i = 0; i < slugs.length; i += PURGE_HOSTS_MAX) {
+    const batch = slugs.slice(i, i + PURGE_HOSTS_MAX);
+    try {
+      const res = await fetcher(`https://api.cloudflare.com/client/v4/zones/${env.HOSTTHIS_CF_ZONE_ID}/purge_cache`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${env.HOSTTHIS_CF_PURGE_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ hosts: batch.map((slug) => `${slug}.${apex}`) }),
+      });
+      if (!res.ok) {
+        console.warn(`warn: purge ${batch.join(",")}: status ${res.status}: ${(await res.text()).slice(0, 200)}`);
+        ok = false;
+      }
+    } catch (error) {
+      console.warn(`warn: purge ${batch.join(",")}: ${error?.message ?? error}`);
+      ok = false;
     }
-    return res.ok;
-  } catch (error) {
-    console.warn(`warn: quarantine purge ${slug}: ${error?.message ?? error}`);
-    return false;
   }
+  return ok;
 }
 
 export async function abuseRoute(request, env, ctx, url, actor, { now = Date.now, fetcher = fetch, sleep } = {}) {
