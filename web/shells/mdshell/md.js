@@ -100,7 +100,8 @@
   try {
     var resp = await fetch(location.pathname + "?raw=1");
     if (!resp.ok) {
-      content.textContent = "Failed to load paste.";
+      // A 503 explains itself (docs/SPEC.md "Pod storage").
+      content.textContent = resp.status === 503 ? (await resp.text()).trim() : "Failed to load paste.";
       return;
     }
     var md = await resp.text();

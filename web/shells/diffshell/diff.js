@@ -309,15 +309,17 @@
 
   fetch(location.pathname + "?raw=1")
     .then(function (resp) {
-      if (!resp.ok) throw new Error("fetch failed");
+      // A 503 explains itself (docs/SPEC.md "Pod storage").
+      if (resp.status === 503) return resp.text().then(function (t) { throw new Error(t.trim()); });
+      if (!resp.ok) throw new Error("");
       return resp.text();
     })
     .then(function (text) {
       diffText = text;
       render();
     })
-    .catch(function () {
+    .catch(function (err) {
       mount.setAttribute("aria-busy", "false");
-      mount.textContent = "Failed to load paste.";
+      mount.textContent = (err && err.message) || "Failed to load paste.";
     });
 })();
