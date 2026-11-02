@@ -74,15 +74,23 @@ export async function handleBlob(request, env, url) {
   }
 }
 
+// Deletes every payload object under one upload's prefix, wherever it lives.
+export async function deleteUploadPrefix(env, prefix) {
+  if (!validBlobPrefix(prefix)) {
+    throw new Error(`invalid upload prefix ${prefix}`);
+  }
+  if (!(await payloads.deletePodPrefix(env, prefix))) {
+    await deleteBlobPrefix(env.PAYLOADS, prefix);
+  }
+}
+
 async function handleBlobRoute(request, env, url) {
   if (url.pathname === "/blob" && request.method === "DELETE") {
     const prefix = url.searchParams.get("prefix");
     if (!validBlobPrefix(prefix)) {
       return new Response("invalid prefix\n", { status: 400 });
     }
-    if (!(await payloads.deletePodPrefix(env, prefix))) {
-      await deleteBlobPrefix(env.PAYLOADS, prefix);
-    }
+    await deleteUploadPrefix(env, prefix);
     return new Response(null, { status: 204 });
   }
   if (!url.pathname.startsWith(BLOB_PATH)) {
