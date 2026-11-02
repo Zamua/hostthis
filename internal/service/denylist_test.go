@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 )
@@ -69,5 +70,30 @@ func TestDenyGate_NilGateBansNothing(t *testing.T) {
 	var g *DenyGate
 	if _, banned := g.Check(gateOwner, gateAddr); banned {
 		t.Fatal("a nil gate refused a session")
+	}
+}
+
+// An expired entry stops matching at its expiry even without a refresh.
+func TestDenyGate_ExpiredEntryStopsMatchingWithoutARefresh(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	src := &scriptedDenySource{entries: []domain.DenyEntry{
+		{Entry: "203.0.113.0/24", ExpiresAt: now.Add(time.Minute)},
+		{Entry: "198.51.100.0/24"},
+	}}
+	g := NewDenyGate(src)
+	g.Now = func() time.Time { return now }
+	if err := g.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, banned := g.Check(gateOwner, gateAddr); !banned {
+		t.Fatal("live expiring entry did not match")
+	}
+	src.err = errors.New("worker down")
+	now = now.Add(time.Minute)
+	if _, banned := g.Check(gateOwner, gateAddr); banned {
+		t.Fatal("expired entry still matched")
+	}
+	if _, banned := g.Check(gateOwner, netip.MustParseAddr("198.51.100.9")); !banned {
+		t.Fatal("permanent entry dropped with the expired one")
 	}
 }

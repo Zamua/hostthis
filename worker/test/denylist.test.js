@@ -82,3 +82,37 @@ test("the list stops at its cap, and replacing an entry still works there", asyn
   assert.equal(full.body.error, "denylist-full");
   assert.equal((await op(c, "add", { entry: "10.0.0.0/24", reason: "again" })).status, 200);
 });
+
+test("an expiring entry lists until its time and then stops counting", async () => {
+  const c = cell();
+  let now = 1_800_000_000_000;
+  c.now = () => now;
+  const res = await op(c, "add", { entry: "203.0.113.0/24", reason: "", expiresAt: now + 1000 });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.expiresAt, now + 1000);
+  await op(c, "add", { entry: KEY, reason: "" });
+  assert.deepEqual((await op(c, "list")).body.entries.map((e) => e.entry).sort(), ["203.0.113.0/24", KEY].sort());
+  now += 1000;
+  assert.deepEqual((await op(c, "list")).body.entries.map((e) => e.entry), [KEY]);
+});
+
+test("an expiry in the past or of the wrong type is refused", async () => {
+  const c = cell();
+  c.now = () => 1_800_000_000_000;
+  for (const expiresAt of [1_800_000_000_000, "soon", 1.5]) {
+    assert.equal((await op(c, "add", { entry: KEY, reason: "", expiresAt })).status, 400, String(expiresAt));
+  }
+});
+
+test("expired entries free their slots under the cap", async () => {
+  const c = cell();
+  let now = 1_800_000_000_000;
+  c.now = () => now;
+  for (let i = 0; i < DENYLIST_CAP; i++) {
+    await op(c, "add", { entry: `10.${i >> 8}.${i & 255}.0/24`, reason: "", expiresAt: now + 1000 });
+  }
+  assert.equal((await op(c, "add", { entry: KEY, reason: "" })).status, 507);
+  now += 1000;
+  assert.equal((await op(c, "add", { entry: KEY, reason: "" })).status, 200);
+  assert.deepEqual((await op(c, "list")).body.entries.map((e) => e.entry), [KEY]);
+});

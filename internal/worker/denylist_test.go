@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/workertest"
@@ -22,6 +23,7 @@ func TestDenylistRepo_ReadsWhatTheOperatorAdded(t *testing.T) {
 	for _, body := range []string{
 		`{"entry":"` + key + `","reason":"abuse"}`,
 		`{"entry":"203.0.113.9/24","reason":""}`,
+		`{"entry":"198.51.100.0/24","reason":"","expiresAt":4102444800000}`,
 	} {
 		res, err := http.Post(base+"/denylist/add", "application/json", bytes.NewBufferString(body))
 		if err != nil || res.StatusCode != http.StatusOK {
@@ -33,8 +35,11 @@ func TestDenylistRepo_ReadsWhatTheOperatorAdded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[domain.DenyEntry]bool{{Entry: key, Reason: "abuse"}: true, {Entry: "203.0.113.0/24"}: true}
-	if len(got) != 2 || !want[got[0]] || !want[got[1]] {
+	want := map[domain.DenyEntry]bool{
+		{Entry: key, Reason: "abuse"}: true, {Entry: "203.0.113.0/24"}: true,
+		{Entry: "198.51.100.0/24", ExpiresAt: time.UnixMilli(4102444800000)}: true,
+	}
+	if len(got) != 3 || !want[got[0]] || !want[got[1]] || !want[got[2]] {
 		t.Fatalf("Denylist = %v, want %v", got, want)
 	}
 }
