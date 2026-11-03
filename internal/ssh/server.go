@@ -362,7 +362,8 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 				return
 			}
 			subnet := domain.SubnetOf(remoteIP(sess))
-			if err := s.KeyGate.Admit(owner, subnet); err != nil {
+			fresh, err := s.KeyGate.Admit(owner, subnet)
+			if err != nil {
 				if ref, ok := errors.AsType[*service.SybilRefusal](err); ok {
 					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")                                    //nolint:errcheck
 					fmt.Fprintf(sess.Stderr(), "  subnet %s used %d of %d in the last 24h\n", ref.Subnet, ref.FreshCountInWindow, ref.Cap) //nolint:errcheck
@@ -386,6 +387,9 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 				fmt.Fprintf(sess.Stderr(), "hostthis: key gate: %v\n", err)
 				_ = sess.Exit(ExitErr)
 				return
+			}
+			if fresh && s.Abuse != nil {
+				s.Abuse.Log(domain.AbuseCreated, "ssh", ExitOK, remoteIP(sess))
 			}
 			next(sess)
 		}
