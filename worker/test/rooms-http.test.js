@@ -828,3 +828,48 @@ test("a protected owner's apps skip the default room rules", async () => {
   const id = await w.room();
   assert.equal((await put(w, id, "bin", new Uint8Array([0xff, 0xfe, 0x00, 0x01]))).status, 204);
 });
+
+function abuseLines(run) {
+  const lines = [];
+  const original = console.log;
+  console.log = (...args) => lines.push(args.join(" "));
+  return run().then(
+    (value) => { console.log = original; return { value, lines }; },
+    (err) => { console.log = original; throw err; },
+  );
+}
+
+test("a refused creation logs one abuse line carrying the subnet and nothing else of the client", async () => {
+  const w = world({ HOSTTHIS_CLIENT_IP_SOURCE: "cf-connecting-ip" });
+  w.app();
+  seedLedger(w, Array.from({ length: 60 }, (_, n) => ({ id: `s${n}`, subnet: "203.0.113.0/24", at: Date.now() })));
+  const { value: res, lines } = await abuseLines(() => w.fetch(url("/api/rooms"), {
+    method: "POST",
+    headers: { "CF-Connecting-IP": "203.0.113.77", "User-Agent": "secret-agent" },
+  }));
+  assert.equal(res.status, 429);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), {
+    event: "rate-limited", route: "collection", status: 429, subnet: "203.0.113.0/24", country: null, asn: null,
+  });
+  assert.doesNotMatch(lines[0], /203\.0\.113\.77|secret-agent/);
+});
+
+test("a created room logs one line, and ordinary traffic logs none", async () => {
+  const w = world({ HOSTTHIS_CLIENT_IP_SOURCE: "cf-connecting-ip" });
+  w.app();
+  const from = { "CF-Connecting-IP": "2001:db8:abcd:1234::1" };
+  const created = await abuseLines(() => w.fetch(url("/api/rooms"), { method: "POST", headers: from }));
+  assert.equal(created.value.status, 201);
+  assert.equal(created.lines.length, 1);
+  assert.deepEqual(JSON.parse(created.lines[0]), {
+    event: "created", route: "collection", status: 201, subnet: "2001:db8:ab00::/40", country: null, asn: null,
+  });
+  const { id } = await created.value.json();
+  const traffic = await abuseLines(async () => {
+    assert.equal((await put(w, id, "k", "v")).status, 204);
+    assert.equal((await w.fetch(url(`/api/rooms/${id}/k`), { headers: from })).status, 200);
+    assert.equal((await w.fetch(url(`/api/rooms/${id}/missing`), { headers: from })).status, 404);
+  });
+  assert.deepEqual(traffic.lines, []);
+});
