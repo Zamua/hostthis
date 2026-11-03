@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/cache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -51,6 +52,7 @@ func main() {
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "hostthis ", log.LstdFlags|log.LUTC)
+	abuse := abuselog.New(logger.Printf)
 
 	// Deliberately a file, not a /debug/pprof endpoint: a profiling handler on
 	// a public daemon is a disclosure and denial-of-service surface, and this
@@ -198,6 +200,7 @@ func main() {
 		KeyGate:     keyGate,
 		Denylist:    denyGate,
 		Allow:       sshAllow,
+		Abuse:       abuse,
 		Uploads:     uploadGate,
 		BuildURL:    build,
 		Pods:        pods,
@@ -246,6 +249,7 @@ func main() {
 		Solid:       metadata.Solid,
 		ClientIP:    clientIP,
 		RoomsAccess: roomsAccess,
+		Abuse:       abuse,
 	}
 	var relayDrain relayShutdowner = idleRelay{}
 	if metadata.RoomRelay != nil {
@@ -276,6 +280,7 @@ func main() {
 		// execution trace legitimately holds the response open far longer than
 		// any public request may.
 		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          httpapi.ServerErrorLog(logger.Printf),
 	}
 
 	httpSrv := &http.Server{
@@ -289,6 +294,7 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10, // 8 KiB
+		ErrorLog:          httpapi.ServerErrorLog(logger.Printf),
 	}
 
 	// The servers run concurrently; the first signalling event wins and tears

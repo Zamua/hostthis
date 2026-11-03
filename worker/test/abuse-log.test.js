@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { abuseEventOf, abuseLog, logSubnet } from "../src/abuse-log.js";
@@ -122,5 +123,14 @@ test("only abuse statuses are events, and a created room is one only on the coll
   assert.equal(abuseEventOf("value", 201), null);
   for (const status of [200, 101, 204, 304, 400, 404, 405, 500]) {
     assert.equal(abuseEventOf("collection", status), null, String(status));
+  }
+});
+
+// hostthisd holds its own truncation to this file, so the two cannot drift.
+test("the shared vectors give the same subnets as hostthisd", () => {
+  const vectors = JSON.parse(readFileSync(new URL("../../testdata/abuse-subnet-vectors.json", import.meta.url), "utf8"));
+  assert.ok(vectors.length > 10);
+  for (const { ip, subnet } of vectors) {
+    assert.equal(logSubnet(ip), subnet, JSON.stringify(ip));
   }
 });

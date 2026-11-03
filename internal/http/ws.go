@@ -7,6 +7,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/roomwire"
 )
@@ -68,7 +69,9 @@ func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug do
 	// refused with a normal HTTP status and no socket is accepted for it.
 	connID, err := s.Relay.Admit(key)
 	if err != nil {
-		writeRelayAdmitError(w, err)
+		if writeRelayAdmitError(w, err) == http.StatusTooManyRequests {
+			s.abuse(r, abuselog.RateLimited, "ws", http.StatusTooManyRequests)
+		}
 		return
 	}
 
@@ -100,13 +103,15 @@ func wsAcceptOptions(apexDomain string) *websocket.AcceptOptions {
 	}
 }
 
-func writeRelayAdmitError(w http.ResponseWriter, err error) {
+// writeRelayAdmitError writes the refusal for a failed Admit and returns its status.
+func writeRelayAdmitError(w http.ResponseWriter, err error) int {
+	status, msg := http.StatusInternalServerError, "internal error\n"
 	switch {
 	case errors.Is(err, roomwire.ErrRelayDraining):
-		http.Error(w, "service restarting\n", http.StatusServiceUnavailable)
+		status, msg = http.StatusServiceUnavailable, "service restarting\n"
 	case errors.Is(err, roomwire.ErrRoomFull), errors.Is(err, roomwire.ErrAppFull):
-		http.Error(w, "room connection limit reached\n", http.StatusTooManyRequests)
-	default:
-		http.Error(w, "internal error\n", http.StatusInternalServerError)
+		status, msg = http.StatusTooManyRequests, "room connection limit reached\n"
 	}
+	http.Error(w, msg, status)
+	return status
 }

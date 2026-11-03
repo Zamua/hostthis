@@ -4422,11 +4422,31 @@ or key reaches the line.
 The only network identity in the line is `subnet`: the client address
 truncated to its IPv4 /24 or IPv6 /40 (`203.0.113.0/24`, `2001:db8:ab00::/40`)
 before anything is built, an IPv4-mapped IPv6 address counting as IPv4, and
-`unknown` for an address that does not parse. The address, headers and bodies
-are not parameters of the logging function, so a caller cannot add them.
-`country` and `asn` are the edge's classification of a direct request (null on
+`unknown` for an address that does not parse. The logging function takes the
+address only to truncate it; headers and bodies are not parameters, so a caller
+cannot add them. `country` and `asn` are the edge's classification of a direct request (null on
 a forwarded one). The platform's own per-request invocation log, which would
 record the full address, user agent and URL, is disabled in the Worker config.
+
+### Abuse log on hostthisd
+
+`hostthisd` writes the same line for the abuse events it answers itself, and
+nothing for normal traffic: `{"event","route","status","subnet"}`, with no
+`country` or `asn`. The truncation is the Worker's (IPv4 /24, IPv6 /40,
+IPv4-mapped IPv6 as IPv4, `unknown` for anything that does not parse), held to
+the same vectors (`testdata/abuse-subnet-vectors.json`). The events are a
+created room (201 on the collection), a rate or connection limit (429, a room
+socket over its cap, an SSH session refused by the fresh-key cap), a
+capacity refusal (507), an oversize write (413), a rejected write (a value
+refused or not text, an upload refused by screening) and an authentication
+refusal (the rooms API private to its allow-list, an SSH session refused by the
+allow-list or the denylist, or without a usable key). `route` is the room route
+kind (`collection`, `room`, `value`, `ws`), `rooms` for the private-API
+refusal, or `ssh`, and `status` is the HTTP status or the SSH exit code.
+
+`hostthisd`'s HTTP server error log never prints a peer address: every
+address-shaped token in a line the server writes ("http: panic serving <addr>")
+is replaced by `<peer>`.
 
 ### Command log on the SSH surface
 

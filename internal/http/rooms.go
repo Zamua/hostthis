@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 )
@@ -71,6 +72,7 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 		return true
 	}
 	if !s.RoomsAccess.admits(r, s.ClientIP) {
+		s.abuse(r, abuselog.AuthFailure, "rooms", http.StatusForbidden)
 		http.Error(w, "the rooms API is private on this instance\n", http.StatusForbidden)
 		return true
 	}
@@ -153,9 +155,10 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 	subnet := clientSubnet(r, s.ClientIP)
 	room, err := s.Rooms.Create(appSlug, subnet)
 	if err != nil {
-		s.writeRoomError(w, r, err)
+		s.writeRoomError(w, r, "collection", err)
 		return
 	}
+	s.abuse(r, abuselog.Created, "collection", http.StatusCreated)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(struct {
@@ -183,7 +186,7 @@ func (s *Server) appExists(appSlug domain.Slug) bool {
 func (s *Server) scanRoom(w http.ResponseWriter, r *http.Request, appSlug domain.Slug, id domain.RoomID) {
 	kv, err := s.Rooms.Scan(appSlug, id)
 	if err != nil {
-		s.writeRoomError(w, r, err)
+		s.writeRoomError(w, r, "room", err)
 		return
 	}
 	// One JSON object, keys sorted as json.Encoder sorts a map's, each value
@@ -210,7 +213,7 @@ func (s *Server) getRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 	}
 	val, err := s.Rooms.Get(appSlug, id, key)
 	if err != nil {
-		s.writeRoomError(w, r, err)
+		s.writeRoomError(w, r, "value", err)
 		return
 	}
 	// application/json only when the stored bytes are recognizably JSON, else
@@ -239,7 +242,7 @@ func (s *Server) putRoomValue(w http.ResponseWriter, r *http.Request, appSlug do
 	// from this pod would deliver every frame twice.
 	_, err = s.Rooms.Put(appSlug, id, key, body)
 	if err != nil {
-		s.writeRoomError(w, r, err)
+		s.writeRoomError(w, r, "value", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -254,7 +257,7 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 	var err error
 	_, err = s.Rooms.Delete(appSlug, id, key)
 	if err != nil {
-		s.writeRoomError(w, r, err)
+		s.writeRoomError(w, r, "value", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -262,12 +265,15 @@ func (s *Server) deleteRoomValue(w http.ResponseWriter, r *http.Request, appSlug
 
 // writeRoomError maps the service-layer room sentinels to status codes: a
 // not-found (room OR key) is the existence-not-leaked 404, a rate limit is 429
-// with Retry-After, a per-room cap is 413, a per-app aggregate is 507.
-func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err error) {
+// with Retry-After, a per-room cap is 413, a per-app aggregate is 507. Refusals
+// that are abuse signals are logged under route.
+func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, route string, err error) {
 	switch {
 	case errors.Is(err, domain.ErrRoomValueNotText):
+		s.abuse(r, abuselog.Rejected, route, http.StatusUnsupportedMediaType)
 		http.Error(w, domain.ErrRoomValueNotText.Error()+"\n", http.StatusUnsupportedMediaType)
 	case errors.As(err, new(*service.RoomValueRefused)):
+		s.abuse(r, abuselog.Rejected, route, http.StatusForbidden)
 		http.Error(w, err.Error()+"\n", http.StatusForbidden)
 	case errors.Is(err, service.ErrRoomNotFound):
 		http.NotFound(w, r)
@@ -275,10 +281,13 @@ func (s *Server) writeRoomError(w http.ResponseWriter, r *http.Request, err erro
 		if rl, ok := errors.AsType[*service.RoomRateLimit](err); ok {
 			w.Header().Set("Retry-After", strconv.Itoa(int(rl.Window.Seconds())))
 		}
+		s.abuse(r, abuselog.RateLimited, route, http.StatusTooManyRequests)
 		http.Error(w, "room creation rate limit reached\n", http.StatusTooManyRequests)
 	case errors.Is(err, service.ErrRoomDataCap):
+		s.abuse(r, abuselog.Oversize, route, http.StatusRequestEntityTooLarge)
 		http.Error(w, "room is at its data cap\n", http.StatusRequestEntityTooLarge)
 	case errors.Is(err, service.ErrAppRoomsCap):
+		s.abuse(r, abuselog.Capacity, route, http.StatusInsufficientStorage)
 		http.Error(w, "app room storage is at capacity\n", http.StatusInsufficientStorage)
 	default:
 		http.Error(w, "internal error\n", http.StatusInternalServerError)

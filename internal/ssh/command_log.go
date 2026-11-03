@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
 	gossh "github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -22,8 +23,27 @@ func (s *Server) commandLogMiddleware() wish.Middleware {
 			verb, slug := commandFields(sess.Command())
 			s.Logger.Printf("ssh: command verb=%s slug=%s outcome=%s ms=%d",
 				verb, slug, outcomeLabel(rec), time.Since(start).Milliseconds())
+			if rec.set {
+				if event, ok := abuseEvent(rec.code); ok {
+					s.Abuse.Log(event, "ssh", rec.code, remoteIP(sess))
+				}
+			}
 		}
 	}
+}
+
+// abuseEvent classifies the exit codes that are refusals of the client:
+// every other code is a normal outcome and logs nothing.
+func abuseEvent(code int) (abuselog.Event, bool) {
+	switch code {
+	case ExitSybilRefuse:
+		return abuselog.RateLimited, true
+	case ExitAuth, ExitBanned:
+		return abuselog.AuthFailure, true
+	case ExitRefused:
+		return abuselog.Rejected, true
+	}
+	return "", false
 }
 
 // commandFields names the verb and the slug a command targets, "-" when it

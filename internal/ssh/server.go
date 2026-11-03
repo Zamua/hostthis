@@ -30,6 +30,7 @@ import (
 	proxyproto "github.com/pires/go-proxyproto"
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/drain"
 	"github.com/Zamua/hostthis/internal/service"
@@ -74,6 +75,9 @@ type Server struct {
 	Pods       *service.Pods
 	PodLinkURL func(id, secret string) string
 	Logger     *log.Logger
+	// Abuse, when set, receives one subnet-only line per refused session
+	// (docs/SPEC.md "Abuse log on hostthisd"). Nil disables.
+	Abuse *abuselog.Logger
 	// Metrics is optional; nil records nothing. Kept as a port so this package
 	// carries no Prometheus dependency and tests can assert on calls.
 	Metrics CommandRecorder

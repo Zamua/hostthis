@@ -1,0 +1,21 @@
+[
+  {"ip": "203.0.113.77", "subnet": "203.0.113.0/24"},
+  {"ip": "198.51.100.9", "subnet": "198.51.100.0/24"},
+  {"ip": "0.0.0.1", "subnet": "0.0.0.0/24"},
+  {"ip": "255.255.255.255", "subnet": "255.255.255.0/24"},
+  {"ip": "2001:db8:abcd:1234::1", "subnet": "2001:db8:ab00::/40"},
+  {"ip": "2001:0db8:ab12:ffff:ffff:ffff:ffff:ffff", "subnet": "2001:db8:ab00::/40"},
+  {"ip": "2001:DB8:ABFF::1", "subnet": "2001:db8:ab00::/40"},
+  {"ip": "fe80::1", "subnet": "fe80::/40"},
+  {"ip": "::1", "subnet": "::/40"},
+  {"ip": "::", "subnet": "::/40"},
+  {"ip": "::ffff:203.0.113.77", "subnet": "203.0.113.0/24"},
+  {"ip": "::ffff:cb00:714d", "subnet": "203.0.113.0/24"},
+  {"ip": "", "subnet": "unknown"},
+  {"ip": "garbage", "subnet": "unknown"},
+  {"ip": "1.2.3", "subnet": "unknown"},
+  {"ip": "256.1.1.1", "subnet": "unknown"},
+  {"ip": "1.2.3.4.5", "subnet": "unknown"},
+  {"ip": "fe80::1%eth0", "subnet": "unknown"},
+  {"ip": "2001:db8::g", "subnet": "unknown"}
+]
