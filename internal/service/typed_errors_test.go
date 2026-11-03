@@ -58,12 +58,13 @@ func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 type fakeKeyGateRepo struct {
 	KeyGateRepo
 	admitErr error
+	known    bool
 }
 
 var fakeOldest = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 
 func (f *fakeKeyGateRepo) AdmitNewKey(string, string, time.Time, int, time.Duration) (bool, error) {
-	return false, f.admitErr
+	return f.known, f.admitErr
 }
 func (f *fakeKeyGateRepo) SubnetSnapshot(string, time.Time, time.Duration) (int, time.Time, error) {
 	return 3, fakeOldest, nil
@@ -93,7 +94,7 @@ func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &fakeKeyGateRepo{admitErr: tc.admitErr}
 			g := NewKeyGate(repo)
-			err := g.Admit(ownerOf("key:fp"), "1.2.3.0/24")
+			_, err := g.Admit(ownerOf("key:fp"), "1.2.3.0/24")
 			if err == nil {
 				t.Fatalf("Admit = nil, want an error")
 			}
@@ -112,5 +113,27 @@ func TestKeyGateAdmit_RateLimitClassification(t *testing.T) {
 				t.Fatalf("Admit = %v, want the repo error surfaced verbatim", err)
 			}
 		})
+	}
+}
+
+// Admit reports whether the (key, subnet) pair was new, and never for a
+// refusal.
+func TestKeyGateAdmit_ReportsAFreshKey(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		known bool
+		fresh bool
+	}{{"new pair", false, true}, {"known pair", true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewKeyGate(&fakeKeyGateRepo{known: tc.known})
+			fresh, err := g.Admit(ownerOf("key:fp"), "1.2.3.0/24")
+			if err != nil || fresh != tc.fresh {
+				t.Fatalf("Admit = %v, %v; want %v, nil", fresh, err, tc.fresh)
+			}
+		})
+	}
+	g := NewKeyGate(&fakeKeyGateRepo{admitErr: storage.ErrTooManyNewKeys})
+	if fresh, err := g.Admit(ownerOf("key:fp"), "1.2.3.0/24"); err == nil || fresh {
+		t.Fatalf("refusal: fresh=%v err=%v", fresh, err)
 	}
 }

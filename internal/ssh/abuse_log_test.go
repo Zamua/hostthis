@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	xssh "golang.org/x/crypto/ssh"
+
 	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/service"
 )
@@ -69,7 +71,11 @@ func TestAbuseLog_SybilRefusalIsRateLimited(t *testing.T) {
 	if _, _, e := g.runOn(c3, "whoami", nil); e != 6 {
 		t.Fatalf("third key: exit %d, want 6", e)
 	}
-	wantSSHLine(t, sink.await(t, 1), "rate-limited", 6)
+	lines := sink.await(t, 3)
+	if len(lines) != 3 {
+		t.Fatalf("want two creations then a refusal, got %q", lines)
+	}
+	wantSSHLine(t, lines[2:], "rate-limited", 6)
 }
 
 func TestAbuseLog_BannedNetworkIsAnAuthFailure(t *testing.T) {
@@ -118,7 +124,80 @@ func TestAbuseLog_NormalSessionsLogNothing(t *testing.T) {
 	for strings.Count(logged.String(), "ssh: command") < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := sink.await(t, 1); len(got) != 0 {
-		t.Fatalf("normal sessions logged %q", got)
+	// Only the key's first session, its creation, is logged.
+	wantSSHLine(t, sink.await(t, 2), "created", 0)
+}
+
+// A key new to its subnet is a creation event at admission, status 0: the
+// session has not exited yet. A returning key and a refused key are not.
+func TestAbuseLog_NewKeyOnASubnetIsACreation(t *testing.T) {
+	sink := &abuseSink{}
+	g := startStack(t, withKeyGate(2), withAbuse(abuselog.New(sink.printf)))
+	_, cfg := freshKeyConfig(t)
+	dial := func() *xssh.Client {
+		cli, err := xssh.Dial("tcp", g.sshAddr, cfg)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		t.Cleanup(func() { _ = cli.Close() })
+		return cli
+	}
+	if _, _, e := g.runOn(dial(), "whoami", nil); e != 0 {
+		t.Fatalf("first session: exit %d", e)
+	}
+	wantSSHLine(t, sink.await(t, 1), "created", 0)
+
+	// The same key again: no second line.
+	if _, _, e := g.runOn(dial(), "whoami", nil); e != 0 {
+		t.Fatalf("returning session: exit %d", e)
+	}
+	if got := sink.await(t, 2); len(got) != 1 {
+		t.Fatalf("returning key logged: %q", got)
+	}
+}
+
+func TestAbuseLog_RefusedKeyIsNotACreation(t *testing.T) {
+	sink := &abuseSink{}
+	g := startStack(t, withKeyGate(1), withAbuse(abuselog.New(sink.printf)))
+	c1, _ := newKeyClient(t, g.sshAddr)
+	g.runOn(c1, "whoami", nil)
+	c2, _ := newKeyClient(t, g.sshAddr)
+	if _, _, e := g.runOn(c2, "whoami", nil); e != 6 {
+		t.Fatalf("second key: exit %d, want 6", e)
+	}
+	lines := sink.await(t, 2)
+	if len(lines) != 2 || !strings.Contains(lines[0], `"event":"created"`) || !strings.Contains(lines[1], `"event":"rate-limited"`) {
+		t.Fatalf("lines %q, want created then rate-limited", lines)
+	}
+}
+
+// Property: behind the PROXY protocol, whatever the client address, no line
+// spells it and the subnet is the /24 or /40 of it.
+func TestAbuseLog_ProxiedAddressNeverReachesALine(t *testing.T) {
+	sink := &abuseSink{}
+	g := startStack(t, withProxyProto(), withKeyGate(100), withAbuse(abuselog.New(sink.printf)))
+	for _, tc := range []struct{ family, ip, subnet string }{
+		{"TCP4", "203.0.113.77", "203.0.113.0/24"},
+		{"TCP4", "198.51.100.200", "198.51.100.0/24"},
+		{"TCP6", "2001:db8:abcd:1234::77", "2001:db8:ab00::/40"},
+		{"TCP6", "2a0f:5707:ac12:34ab:cdef:1:2:3", "2a0f:5707:ac00::/40"},
+	} {
+		cli := dialWithProxy(t, g.sshAddr, tc.family, tc.ip, 40000)
+		if _, _, e := g.runOn(cli, "whoami", nil); e != 0 {
+			t.Fatalf("%s: exit %d", tc.ip, e)
+		}
+		lines := sink.await(t, 1)
+		line := lines[len(lines)-1]
+		if !strings.Contains(line, `"subnet":"`+tc.subnet+`"`) {
+			t.Fatalf("%s: line %q, want subnet %s", tc.ip, line, tc.subnet)
+		}
+		for _, l := range lines {
+			if strings.Contains(l, tc.ip) {
+				t.Fatalf("line %q carries the address %s", l, tc.ip)
+			}
+		}
+		sink.mu.Lock()
+		sink.lines = nil
+		sink.mu.Unlock()
 	}
 }

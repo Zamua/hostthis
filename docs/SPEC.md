@@ -4435,7 +4435,10 @@ nothing for normal traffic: `{"event","route","status","subnet"}`, with no
 `country` or `asn`. The truncation is the Worker's (IPv4 /24, IPv6 /40,
 IPv4-mapped IPv6 as IPv4, `unknown` for anything that does not parse), held to
 the same vectors (`testdata/abuse-subnet-vectors.json`). The events are a
-created room (201 on the collection), a rate or connection limit (429, a room
+created room (201 on the collection), an SSH key seen for the first time on its
+subnet (`created`, route `ssh`, status 0, only when the fresh-key cap is wired;
+a transport-failure replay can read a fresh key as known and skip the line),
+a rate or connection limit (429, a room
 socket over its cap, an SSH session refused by the fresh-key cap), a
 capacity refusal (507), an oversize write (413), a rejected write (a value
 refused or not text, an upload refused by screening) and an authentication

@@ -86,11 +86,13 @@ func (e *SybilRefusal) NextSlotFreesAt() time.Time {
 	return e.OldestEntryFirstSeen.Add(e.Window)
 }
 
-// Admit gates one session. ipSubnet must be non-empty.
+// Admit gates one session. ipSubnet must be non-empty. fresh reports a key
+// new to the subnet, which the caller may count as a new owner.
 // On refusal returns *SybilRefusal (which is also errors.Is(ErrSybilRateLimit)).
-func (g *KeyGate) Admit(owner domain.Owner, ipSubnet string) error {
+func (g *KeyGate) Admit(owner domain.Owner, ipSubnet string) (fresh bool, err error) {
 	now := g.Now().UTC()
-	if _, err := g.Repo.AdmitNewKey(owner.String(), ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window); err != nil {
+	known, err := g.Repo.AdmitNewKey(owner.String(), ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window)
+	if err != nil {
 		// The sentinel is matched by identity through any wrapping, never by
 		// message text.
 		if errors.Is(err, domain.ErrTooManyNewKeys) {
@@ -98,17 +100,17 @@ func (g *KeyGate) Admit(owner domain.Owner, ipSubnet string) error {
 			// bare sentinel rather than turning a refusal into an error.
 			count, oldest, sErr := g.Repo.SubnetSnapshot(ipSubnet, now, g.Window)
 			if sErr != nil {
-				return ErrSybilRateLimit
+				return false, ErrSybilRateLimit
 			}
-			return &SybilRefusal{
+			return false, &SybilRefusal{
 				Subnet: ipSubnet, Cap: g.MaxFreshKeysPerSubnet,
 				FreshCountInWindow: count, OldestEntryFirstSeen: oldest,
 				Window: g.Window,
 			}
 		}
-		return err
+		return false, err
 	}
-	return nil
+	return !known, nil
 }
 
 // SessionInfo is the per-session keygate state surfaced by `whoami`. Zero
