@@ -7,7 +7,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/roomwire"
 )
@@ -70,7 +69,7 @@ func (s *Server) handleRoomWS(w http.ResponseWriter, r *http.Request, appSlug do
 	connID, err := s.Relay.Admit(key)
 	if err != nil {
 		if writeRelayAdmitError(w, err) == http.StatusTooManyRequests {
-			s.abuse(r, abuselog.RateLimited, "ws", http.StatusTooManyRequests)
+			s.abuse(r, domain.AbuseRateLimited, "ws", http.StatusTooManyRequests)
 		}
 		return
 	}

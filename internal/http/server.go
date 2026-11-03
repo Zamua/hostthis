@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
+	"github.com/Zamua/hostthis/internal/service"
 )
 
 // PasteReader is the read side of the paste repo, narrowed to what serving
@@ -71,11 +71,11 @@ type Server struct {
 	Logf func(format string, args ...any)
 	// Abuse, when set, receives one subnet-only line per abuse event on the
 	// rooms surface (docs/SPEC.md "Abuse log on hostthisd"). Nil disables.
-	Abuse *abuselog.Logger
+	Abuse service.AbuseLog
 }
 
 // abuse logs one abuse event for the request's client, address-truncated.
-func (s *Server) abuse(r *http.Request, event abuselog.Event, route string, status int) {
+func (s *Server) abuse(r *http.Request, event domain.AbuseEvent, route string, status int) {
 	if s.Abuse == nil {
 		return
 	}

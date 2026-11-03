@@ -39,6 +39,8 @@ var layerPolicy = map[string][]string{
 	// satisfies it, so it must never reach the layers it observes.
 	"metrics": {},
 	"domain":  {},
+	// The abuse log adapter: the consumer declares the port (service.AbuseLog).
+	"abuselog": {"domain"},
 	// The shared room-realtime vocabulary. A leaf like domain: both relay
 	// implementations speak it, and it may never grow machinery.
 	"roomwire": {"domain"},
