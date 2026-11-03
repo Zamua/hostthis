@@ -20,6 +20,7 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
 	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
@@ -76,7 +77,11 @@ type stackOpts struct {
 	uploads    *hostssh.UploadAdmission
 	logOut     io.Writer
 	purger     service.CachePurger
+	abuse      *abuselog.Logger
 }
+
+// withAbuse wires the abuse-event logger.
+func withAbuse(l *abuselog.Logger) stackOpt { return func(o *stackOpts) { o.abuse = l } }
 
 // withPurger wraps the manage and deploy services in their cache-invalidating
 // decorators, as cmd/hostthisd does.
@@ -171,6 +176,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Logger:     log.New(io.Discard, "", 0),
 	}
 	sshSrv.ProxyProtocol = o.proxyProto
+	sshSrv.Abuse = o.abuse
 	if o.logOut != nil {
 		sshSrv.Logger = log.New(o.logOut, "", 0)
 	}

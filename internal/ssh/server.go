@@ -74,6 +74,9 @@ type Server struct {
 	Pods       *service.Pods
 	PodLinkURL func(id, secret string) string
 	Logger     *log.Logger
+	// Abuse, when set, receives one subnet-only line per refused session
+	// (docs/SPEC.md "Abuse log on hostthisd"). Nil disables.
+	Abuse service.AbuseLog
 	// Metrics is optional; nil records nothing. Kept as a port so this package
 	// carries no Prometheus dependency and tests can assert on calls.
 	Metrics CommandRecorder

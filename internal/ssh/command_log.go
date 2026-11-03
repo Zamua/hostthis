@@ -22,8 +22,27 @@ func (s *Server) commandLogMiddleware() wish.Middleware {
 			verb, slug := commandFields(sess.Command())
 			s.Logger.Printf("ssh: command verb=%s slug=%s outcome=%s ms=%d",
 				verb, slug, outcomeLabel(rec), time.Since(start).Milliseconds())
+			if rec.set && s.Abuse != nil {
+				if event, ok := abuseEvent(rec.code); ok {
+					s.Abuse.Log(event, "ssh", rec.code, remoteIP(sess))
+				}
+			}
 		}
 	}
+}
+
+// abuseEvent classifies the exit codes that are refusals of the client:
+// every other code is a normal outcome and logs nothing.
+func abuseEvent(code int) (domain.AbuseEvent, bool) {
+	switch code {
+	case ExitSybilRefuse:
+		return domain.AbuseRateLimited, true
+	case ExitAuth, ExitBanned:
+		return domain.AbuseAuthFailure, true
+	case ExitRefused:
+		return domain.AbuseRejected, true
+	}
+	return "", false
 }
 
 // commandFields names the verb and the slug a command targets, "-" when it
