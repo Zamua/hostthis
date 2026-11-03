@@ -175,7 +175,7 @@ export function parseIP(text) {
 
 // netip's IPv6 text: lowercase, leading zeros dropped, the first longest run
 // of two or more zero groups as "::".
-function formatIPv6(groups) {
+export function formatIPv6(groups) {
   let zeroStart = -1;
   let zeroEnd = -1;
   for (let i = 0; i < 8; i++) {
@@ -206,10 +206,18 @@ export function ipSubnet(groups) {
   if (!groups) {
     return "unknown";
   }
-  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
-    return `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.0/24`;
+  if (isIPv4Mapped(groups)) {
+    return ipv4Subnet(groups);
   }
   return `${formatIPv6([...groups.slice(0, 3), 0, 0, 0, 0, 0])}/48`;
+}
+
+export function isIPv4Mapped(groups) {
+  return groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff;
+}
+
+export function ipv4Subnet(groups) {
+  return `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.0/24`;
 }
 
 export function clientSubnet(address) {
