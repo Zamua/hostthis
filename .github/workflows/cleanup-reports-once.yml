@@ -69,11 +69,15 @@ jobs:
 
           who=$(hh hostthis.dev whoami -o json)
           id=$(jq -r '.key | sub("^SHA256:"; "")' <<<"$who")
-          [[ $id == "$OWNER"* ]] || { echo "key is not owner $OWNER; aborting"; exit 1; }
           echo "before: $(reading "$who")"
 
           list=$(hh hostthis.dev list -o json)
           jq -e 'type == "array"' <<<"$list" >/dev/null || { echo "unreadable listing"; exit 1; }
+          if [[ $id != "$OWNER"* ]]; then
+            echo "key is not owner $OWNER; aborting"
+            echo "this key's sites: $(jq -c '{total: length, reports: ([.[] | select((.name // "") | startswith("hostthis e2e PR #"))] | {count: length, bytes: (map(.size_bytes) | add // 0)})}' <<<"$list")"
+            exit 1
+          fi
 
           targets=()
           total=0
