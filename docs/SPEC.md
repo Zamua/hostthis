@@ -4409,6 +4409,25 @@ log line means the request never reached this process. The slug is the only
 request-derived value logged (slugs are public identifiers; no client
 IPs, no headers, no payload).
 
+### Abuse log on the Worker's public surface
+
+The Worker logs one JSON line per abuse event on the rooms surface, and
+nothing for normal traffic: `{"event","route","status","subnet","country","asn"}`
+via `console.log`. The events are a created room (201 on the collection), a
+rate or connection limit (429), a capacity refusal (507), an authentication or
+origin refusal (401, 403) and an oversize write (413). `route` is the room
+route kind (`collection`, `ws`, `push`, ...), never a path, so no slug, room id
+or key reaches the line.
+
+The only network identity in the line is `subnet`: the client address
+truncated to its IPv4 /24 or IPv6 /40 (`203.0.113.0/24`, `2001:db8:ab00::/40`)
+before anything is built, an IPv4-mapped IPv6 address counting as IPv4, and
+`unknown` for an address that does not parse. The address, headers and bodies
+are not parameters of the logging function, so a caller cannot add them.
+`country` and `asn` are the edge's classification of a direct request (null on
+a forwarded one). The platform's own per-request invocation log, which would
+record the full address, user agent and URL, is disabled in the Worker config.
+
 ### Command log on the SSH surface
 
 Every SSH session logs one line when it ends: the verb, the slug it targets

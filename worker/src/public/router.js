@@ -2,6 +2,7 @@
 // "The public surface"). It never passes a client request to a cell or the
 // payload bucket: any call it makes is built from values it parsed.
 
+import { noteRoomResponse } from "../abuse-log.js";
 import { serveRooms } from "../rooms/routes.js";
 import { serveSolid } from "../solid/link.js";
 import { byteStringBytes, goText } from "../rooms/wire.js";
@@ -111,6 +112,7 @@ async function route(request, env, host, forwarded, surface) {
   const rawHost = forwarded ? request.headers.get(FORWARDED_HOST).trim() : url.host;
   const rooms = await serveRooms(request, env, app.slug, app.path, { forwarded, host: rawHost });
   if (rooms) {
+    noteRoomResponse(request, env, forwarded, app.path, rooms.status);
     return rooms;
   }
   if (!surface.reads) {
