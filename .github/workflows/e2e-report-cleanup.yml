@@ -1,0 +1,49 @@
+name: e2e report cleanup (PR)
+
+# Deletes the hostthis site a pull request published (see e2e-pr.yml) once the
+# PR is closed or merged, so published reports never outlive their PR. A PR
+# that never published has no site, and nothing is deleted.
+on:
+  pull_request:
+    types: [closed]
+
+# Shares e2e-pr.yml's group so a report still being built for the closed PR is
+# cancelled before it can publish after this delete.
+concurrency:
+  group: e2e-report-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      HOSTTHIS_SSH_KEY: ${{ secrets.HOSTTHIS_SSH_KEY }}
+    steps:
+      # Forks never receive secrets, so they skip.
+      - name: Delete the published report
+        if: env.HOSTTHIS_SSH_KEY != ''
+        env:
+          REPORT_NAME: "hostthis e2e PR #${{ github.event.pull_request.number }}"
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$HOSTTHIS_SSH_KEY" > ~/.ssh/hostthis
+          chmod 600 ~/.ssh/hostthis
+          hh() { ssh -T -i ~/.ssh/hostthis -o IdentitiesOnly=yes \
+                     -o StrictHostKeyChecking=accept-new -o ConnectTimeout=40 "$@"; }
+
+          # An unreadable listing fails the job: an empty one would look like
+          # "nothing to delete".
+          list=$(hh hostthis.dev list -o json)
+          slugs=$(jq -r --arg n "$REPORT_NAME" '.[] | select(.name==$n) | .slug' <<<"$list")
+          if [ -z "$slugs" ]; then
+            echo "no site named '$REPORT_NAME'"
+            exit 0
+          fi
+          for slug in $slugs; do
+            echo "deleting $slug ('$REPORT_NAME')"
+            hh hostthis.dev delete "$slug"
+          done
