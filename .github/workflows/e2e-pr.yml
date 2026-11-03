@@ -1,12 +1,14 @@
 name: e2e report (PR)
 
-# Publishes Playwright's HTML report for every pull request at one URL a
-# reviewer can open on a phone: results per browser, the screenshots the tests
-# attach, and traces for failures. Runs the `e2e-ci` make target twice: reading
-# from hostthisd, and with E2E_READS=worker from the Worker's public
-# surface, whose report is published under /worker/.
+# Runs the e2e suite for every pull request and keeps Playwright's HTML report
+# as a build artifact. A PR labelled `e2e-report` also publishes it to hostthis
+# at one fixed URL a reviewer can open on a phone: results per browser, the
+# screenshots the tests attach, and traces for failures. Runs the `e2e-ci` make
+# target twice: reading from hostthisd, and with E2E_READS=worker from the
+# Worker's public surface, whose report is published under /worker/.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
 
 concurrency:
   group: e2e-report-${{ github.event.pull_request.number }}
@@ -18,6 +20,8 @@ permissions:
 
 jobs:
   report:
+    # Adding the label runs the suite and publishes; any other label is ignored.
+    if: github.event.action != 'labeled' || github.event.label.name == 'e2e-report'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
@@ -25,6 +29,7 @@ jobs:
       # `if`, and a step's own env block is not visible to its own condition.
       # Runner logs mask the value.
       HOSTTHIS_SSH_KEY: ${{ secrets.HOSTTHIS_SSH_KEY }}
+      PUBLISH: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-report') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -71,15 +76,16 @@ jobs:
           retention-days: 30
 
       # hostthis identifies an uploader by ssh key and refuses a keyless client,
-      # so publishing needs HOSTTHIS_SSH_KEY. Without it this is skipped, not
-      # failed, and the report still ships as a build artifact. Pull requests
-      # from forks never receive secrets, so they skip too.
+      # so publishing needs HOSTTHIS_SSH_KEY. Without it, or without the
+      # `e2e-report` label, this is skipped, not failed, and the report still
+      # ships as a build artifact. Pull requests from forks never receive
+      # secrets, so they skip too.
       - name: Publish report
         id: publish
-        if: always() && env.HOSTTHIS_SSH_KEY != ''
+        if: always() && env.PUBLISH == 'true' && env.HOSTTHIS_SSH_KEY != ''
         continue-on-error: true
         env:
-          REPORT_NAME: "hostthis e2e PR #${{ github.event.pull_request.number }}"
+          REPORT_NAME: "hostthis e2e report"
         run: |
           install -m 700 -d ~/.ssh
           printf '%s\n' "$HOSTTHIS_SSH_KEY" > ~/.ssh/hostthis
@@ -87,10 +93,9 @@ jobs:
           hh() { ssh -T -i ~/.ssh/hostthis -o IdentitiesOnly=yes \
                      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=40 "$@"; }
 
-          # One slug per pull request, redeployed in place: the URL in the PR
-          # comment stays correct for the life of the branch, each run becomes a
-          # new version rather than a new paste, and stored bytes grow with the
-          # number of PRs instead of the number of pushes.
+          # One slug for every labelled pull request, redeployed in place: each
+          # run becomes a new version rather than a new paste, so stored bytes
+          # stay at one report however many PRs or pushes publish.
           slug=$(hh hostthis.dev list -o json 2>/dev/null \
                  | jq -r --arg n "$REPORT_NAME" 'map(select(.name==$n))[0].slug // ""' 2>/dev/null || true)
           echo "existing slug for '$REPORT_NAME': ${slug:-<none>}"
@@ -132,7 +137,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr comment "${{ github.event.pull_request.number }}" --body \
-            "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }}, Worker reads ${{ steps.tests-worker.outcome }}: ${{ steps.publish.outputs.url }}/worker/ (commit \`${GITHUB_SHA:0:8}\`)"
+            "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }}, Worker reads ${{ steps.tests-worker.outcome }}: ${{ steps.publish.outputs.url }}/worker/ (commit \`${GITHUB_SHA:0:8}\`; the next labelled run replaces this report)"
 
       - name: Summary
         if: always()
@@ -142,7 +147,7 @@ jobs:
             echo ""
             echo "| field | value |"
             echo "| --- | --- |"
-            echo "| report | ${{ steps.publish.outputs.url || 'not published; see the report artifact' }} |"
+            echo "| report | ${{ steps.publish.outputs.url || 'not published; label the PR e2e-report, or see the report artifact' }} |"
             echo "| commit | \`${GITHUB_SHA:0:8}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 

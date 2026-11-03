@@ -267,9 +267,10 @@ screenshots through `shot(label)` for a human to review. Pixel diffing and
 `toHaveScreenshot` are excluded on purpose: font rasterization differs between
 a CI runner and a laptop, and that flake ends with the suite being ignored.
 
-Every pull request publishes Playwright's HTML report to hostthis (one site per
-PR, redeployed in place) and comments the link. Traces are kept for failures
-only, which keeps each report small.
+Every pull request keeps Playwright's HTML report as a build artifact. A PR
+labelled `e2e-report` also publishes it to hostthis, redeployed in place to one
+fixed site, and comments the link. Traces are kept for failures only, which
+keeps each report small.
 
 A test adds no product behavior, so the spec-first rule has nothing to bite on
 here: extending this suite does not edit `docs/SPEC.md`.
