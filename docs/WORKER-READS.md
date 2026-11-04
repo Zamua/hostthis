@@ -257,7 +257,7 @@ action: html | shell | raw | file | kbshell | kbraw | files | notfound
   megabyte of JSON that today crosses to hostthisd and is parsed on every file
   request. `resolve` returns a few hundred bytes. One cell call per request
   (today one, two on not-found).
-- An undecodable manifest reads as none, so the answer is `notfound` (CLAUDE.md
+- An undecodable manifest reads as none, so the answer is `notfound` (AGENTS.md
   principle 3).
 - Room routes use a separate `exists` read op (row present), so they never load
   a manifest.

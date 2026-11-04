@@ -197,7 +197,7 @@ function utf8Rank(unit) {
 // Go's folds of U+017F to S and U+212A to K), a later duplicate overwrites, a
 // null field leaves the value as it was, a repeated Files merges into the map,
 // unknown fields are ignored, and a value of the wrong type fails the whole
-// manifest, which then reads as none (CLAUDE.md principle 3). The result maps
+// manifest, which then reads as none (AGENTS.md principle 3). The result maps
 // each path to { key, contentType, decodedSize }.
 
 class Undecodable extends Error {}

@@ -134,7 +134,7 @@ web/shells/          render shells, their assets and shells.json; read by Go
 docs/SPEC.md         product spec; source of truth for behavior
 Dockerfile           multi-stage build; distroless static image
 Makefile             build / test / run / docker-up / smoke targets
-CLAUDE.md            contributor workflow conventions
+AGENTS.md            contributor workflow conventions
 README.md            user-facing manpage
 ```
 
