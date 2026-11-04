@@ -161,3 +161,41 @@ test("an operator room delete reaches the room by app and id and is audited", as
   assert.ok(!entry.target.includes(room), "the audit log keeps the room id hashed");
   assert.equal((await call(w.abuse, "roomdelete", { app: "abcd2345", room: "nope", actor: "operator", now: NOW })).status, 400);
 });
+
+test("refused lists rate-capped bans newest first, short targets, and marks later bans", async () => {
+  const w = abuseWorld();
+  for (let i = 1; i <= 5; i++) {
+    const fp = "SHA256:" + String(i).repeat(64);
+    assert.equal((await call(w.abuse, "bankey", { identity: fp, reason: "x", actor: "watcher", now: NOW + i })).status, 200);
+  }
+  const k6 = "SHA256:" + "6".repeat(64);
+  const k7 = "SHA256:" + "7".repeat(64);
+  assert.equal((await call(w.abuse, "bankey", { identity: k6, reason: "first", actor: "watcher", now: NOW + 10 })).status, 429);
+  assert.equal((await call(w.abuse, "bankey", { identity: k7, reason: "second", actor: "watcher", now: NOW + 11 })).status, 429);
+  // The operator bans k6 later; k7 stays open.
+  assert.equal((await call(w.abuse, "bankey", { identity: k6, reason: "op", actor: "operator", now: NOW + 20 })).status, 200);
+  const res = await call(w.abuse, "refused", undefined, `?since=${NOW}&limit=50`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.entries.map((e) => [e.at, e.action, e.target, e.reason, e.already_banned]), [
+    [NOW + 11, "ban-key", "7".repeat(10), "second", false],
+    [NOW + 10, "ban-key", "6".repeat(10), "first", true],
+  ]);
+  const raw = JSON.stringify(res.body);
+  assert.ok(!raw.includes("SHA256"), "no raw key in the answer");
+});
+
+test("refused honors since and limit, and ignores accepted entries", async () => {
+  const w = abuseWorld();
+  for (let i = 1; i <= 5; i++) {
+    await call(w.abuse, "bankey", { identity: "SHA256:" + String(i).repeat(64), reason: "x", actor: "watcher", now: NOW + i });
+  }
+  for (let i = 0; i < 3; i++) {
+    await call(w.abuse, "bankey", { identity: "SHA256:" + String(8 + i % 2).repeat(64), reason: `r${i}`, actor: "watcher", now: NOW + 10 + i });
+  }
+  const all = await call(w.abuse, "refused", undefined, `?since=0&limit=200`);
+  assert.equal(all.body.entries.length, 3);
+  const one = await call(w.abuse, "refused", undefined, `?since=0&limit=1`);
+  assert.deepEqual(one.body.entries.map((e) => e.at), [NOW + 12]);
+  const later = await call(w.abuse, "refused", undefined, `?since=${NOW + 12}&limit=50`);
+  assert.deepEqual(later.body.entries.map((e) => e.at), [NOW + 12]);
+});

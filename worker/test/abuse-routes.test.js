@@ -101,3 +101,35 @@ test("without a purge credential the answer says so", async () => {
     new URL(ORIGIN + "/abuse/quarantine"), "operator");
   assert.equal((await res.json()).purged, false);
 });
+
+test("GET /watcher/refused-bans validates its query and answers ISO times, GET only", async () => {
+  const seen = [];
+  const cell = { async fetch(request) {
+    seen.push(new URL(request.url).pathname + new URL(request.url).search);
+    return Response.json({ entries: [{ at: 1_800_000_000_000, action: "ban-key", target: "abcdef0123", reason: "r", already_banned: false }] });
+  } };
+  const ns = { idFromName: (id) => id, get: () => cell };
+  const e = { HOSTTHIS_WORKER_TOKEN: FULL, HOSTTHIS_WATCHER_TOKEN: WATCHER, ABUSE: ns, DENYLIST: ns };
+  const clock = () => Date.parse("2027-01-15T08:00:00Z");
+  const res = await abuseRoute(req("/watcher/refused-bans?since=2027-01-14T00:00:00Z&limit=10", WATCHER), e, undefined,
+    new URL(ORIGIN + "/watcher/refused-bans?since=2027-01-14T00:00:00Z&limit=10"), "watcher", { now: clock });
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.now, "2027-01-15T08:00:00.000Z");
+  assert.deepEqual(body.entries, [{ at: "2027-01-15T08:00:00.000Z", action: "ban-key", target: "abcdef0123", reason: "r", already_banned: false }]);
+  assert.equal(seen[0], `/abuse/refused?since=${Date.parse("2027-01-14T00:00:00Z")}&limit=10`);
+  // Defaults: the last 24 hours, 50 entries.
+  await abuseRoute(req("/watcher/refused-bans", WATCHER), e, undefined, new URL(ORIGIN + "/watcher/refused-bans"), "watcher", { now: clock });
+  assert.equal(seen[1], `/abuse/refused?since=${clock() - 86_400_000}&limit=50`);
+  for (const q of ["?since=yesterday", "?limit=0", "?limit=201", "?limit=x"]) {
+    const bad = await abuseRoute(req("/watcher/refused-bans" + q, WATCHER), e, undefined, new URL(ORIGIN + "/watcher/refused-bans" + q), "watcher", { now: clock });
+    assert.equal(bad.status, 400, q);
+  }
+  const post = await abuseRoute(new Request(ORIGIN + "/watcher/refused-bans", { method: "POST", headers: { Authorization: `Bearer ${WATCHER}` }, body: "{}" }), e, undefined, new URL(ORIGIN + "/watcher/refused-bans"), "watcher", { now: clock });
+  assert.equal(post.status, 405);
+  assert.equal(seen.length, 2, "bad requests never reach the cell");
+  const viaWorker = await worker.fetch(req("/watcher/refused-bans", WATCHER), e);
+  assert.equal(viaWorker.status, 200);
+  const operator = await worker.fetch(req("/abuse/refused-bans", FULL), e);
+  assert.equal(operator.status, 404);
+});
