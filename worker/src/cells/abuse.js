@@ -411,6 +411,16 @@ export class Abuse {
     return Response.json({ groups: groups.slice(0, limit) });
   }
 
+  // The fingerprints on the live denylist, whoever added them.
+  async denylisted() {
+    const dl = this.env.DENYLIST;
+    if (!dl) {
+      return new Set();
+    }
+    const res = await dl.get(dl.idFromName("denylist")).fetch(new Request("https://cell/denylist/list"));
+    return new Set(res.ok ? (await res.json()).entries.map((e) => e.entry) : []);
+  }
+
   // Watcher bans the hourly cap refused since a time, newest first, for the
   // watcher to escalate. Targets are short forms (no raw key); a later accepted
   // ban of the same key, or of its owner, marks the entry already banned.
@@ -419,6 +429,7 @@ export class Abuse {
     const limit = Math.min(Math.max(Number(params.get("limit") ?? 50), 1), 200);
     const log = (await this.state.storage.get("audit")) ?? [];
     const banned = log.filter((e) => e.outcome === "ok" && (e.action === ACTIONS.bankey || e.action === ACTIONS.banowner));
+    const listed = await this.denylisted();
     const entries = [];
     for (let i = log.length - 1; i >= 0 && entries.length < limit; i--) {
       const e = log[i];
@@ -426,7 +437,7 @@ export class Abuse {
         continue;
       }
       const owner = e.action === ACTIONS.bankey ? await ownerHash(`key:${e.target}`) : e.target;
-      const covered = banned.some((b) => b.at > e.at && (b.target === e.target || b.target === owner));
+      const covered = listed.has(e.target) || banned.some((b) => b.at > e.at && (b.target === e.target || b.target === owner));
       entries.push({
         at: e.at, action: e.action, reason: e.reason ?? "", already_banned: covered,
         target: e.action === ACTIONS.bankey ? String(e.target).replace(/^SHA256:/, "").slice(0, 10) : e.target,
