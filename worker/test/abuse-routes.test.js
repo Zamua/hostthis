@@ -133,3 +133,33 @@ test("GET /watcher/refused-bans validates its query and answers ISO times, GET o
   const operator = await worker.fetch(req("/abuse/refused-bans", FULL), e);
   assert.equal(operator.status, 404);
 });
+
+test("GET /watcher/key-subnets validates its query, answers ISO times, GET only", async () => {
+  const seen = [];
+  const cell = { async fetch(request) {
+    seen.push(new URL(request.url).pathname + new URL(request.url).search);
+    return Response.json({ groups: [{ subnet: "203.0.113.0/24", first: 1_800_000_000_000, last: 1_800_000_060_000,
+      keys: [{ key: "abcdef0123", owner: "01234567", at: 1_800_000_000_000, banned: false }] }] });
+  } };
+  const ns = { idFromName: (id) => id, get: () => cell };
+  const e = { HOSTTHIS_WORKER_TOKEN: FULL, HOSTTHIS_WATCHER_TOKEN: WATCHER, ABUSE: ns, DENYLIST: ns };
+  const now = Date.parse("2027-01-15T08:00:00Z");
+  const call = (q, method = "GET") => abuseRoute(new Request(ORIGIN + "/watcher/key-subnets" + q, { method, headers: { Authorization: `Bearer ${WATCHER}` } }),
+    e, undefined, new URL(ORIGIN + "/watcher/key-subnets" + q), "watcher", { now: () => now });
+  const ok = await call("");
+  assert.equal(ok.status, 200);
+  const body = await ok.json();
+  assert.equal(body.now, "2027-01-15T08:00:00.000Z");
+  assert.deepEqual(body.groups[0], { subnet: "203.0.113.0/24", first: new Date(1_800_000_000_000).toISOString(),
+    last: new Date(1_800_000_060_000).toISOString(),
+    keys: [{ key: "abcdef0123", owner: "01234567", at: new Date(1_800_000_000_000).toISOString(), banned: false }] });
+  assert.equal(seen[0], `/abuse/keysubnets?now=${now}&window_min=60&min_keys=3&limit=50`);
+  await call("?window_min=1440&min_keys=2&limit=10");
+  assert.equal(seen[1], `/abuse/keysubnets?now=${now}&window_min=1440&min_keys=2&limit=10`);
+  for (const q of ["?window_min=0", "?window_min=1441", "?min_keys=0", "?min_keys=x", "?limit=0", "?limit=201"]) {
+    assert.equal((await call(q)).status, 400, q);
+  }
+  assert.equal((await call("", "POST")).status, 405);
+  assert.equal(seen.length, 2);
+  assert.equal((await worker.fetch(req("/watcher/key-subnets", WATCHER), e)).status, 200);
+});
