@@ -20,6 +20,7 @@ const ROUTES = {
     "/watcher/quarantine": { op: "quarantine", fields: ["slug", "reason"], purge: true },
     "/watcher/ban-key": { op: "bankey", fields: ["identity", "slug", "reason"] },
     "/watcher/ban-owner": { op: "banowner", fields: ["identity", "slug", "reason"] },
+    "/watcher/refused-bans": { op: "refused", refused: true },
   },
 };
 
@@ -62,12 +63,42 @@ export async function purgeSlugs(env, slugs, fetcher = fetch) {
   return ok;
 }
 
+const DAY_MS = 86_400_000;
+const REFUSED_LIMIT_MAX = 200;
+
+// GET /watcher/refused-bans?since=<ISO>&limit=<n>: the bans the hourly cap
+// refused, as ISO times. Read-only.
+async function refusedBans(request, cell, url, nowMs) {
+  if (request.method !== "GET") {
+    return new Response("method not allowed\n", { status: 405 });
+  }
+  const sinceParam = url.searchParams.get("since");
+  const limitParam = url.searchParams.get("limit");
+  const since = sinceParam === null ? nowMs - DAY_MS : Date.parse(sinceParam);
+  const limit = limitParam === null ? 50 : Number(limitParam);
+  if (!Number.isFinite(since) || !Number.isInteger(limit) || limit < 1 || limit > REFUSED_LIMIT_MAX) {
+    return Response.json({ error: "invalid-request" }, { status: 400 });
+  }
+  const res = await cell.fetch(new Request(`https://cell/abuse/refused?since=${since}&limit=${limit}`));
+  if (!res.ok) {
+    return res;
+  }
+  const { entries } = await res.json();
+  return Response.json({
+    now: new Date(nowMs).toISOString(),
+    entries: entries.map((e) => ({ ...e, at: new Date(e.at).toISOString() })),
+  });
+}
+
 export async function abuseRoute(request, env, ctx, url, actor, { now = Date.now, fetcher = fetch, sleep } = {}) {
   const route = ROUTES[actor][url.pathname];
   if (!route) {
     return new Response("not found\n", { status: 404 });
   }
   const cell = env.ABUSE.get(env.ABUSE.idFromName("abuse"));
+  if (route.refused) {
+    return refusedBans(request, cell, url, now());
+  }
   if (!route.fields) {
     if (request.method !== "GET") {
       return new Response("method not allowed\n", { status: 405 });

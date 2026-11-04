@@ -41,6 +41,7 @@ const ABUSE_OPS = {
   bans: read((self) => self.bans()),
   list: read((self) => self.list()),
   audit: read((self) => self.auditLog()),
+  refused: read((self, _body, url) => self.refused(url.searchParams)),
 };
 
 export class Abuse {
@@ -345,6 +346,30 @@ export class Abuse {
     const quarantined = [...rows].map(([key, row]) => ({ slug: key.slice(INDEX.length), ...row }));
     quarantined.sort((a, b) => a.at - b.at);
     return Response.json({ quarantined });
+  }
+
+  // Watcher bans the hourly cap refused since a time, newest first, for the
+  // watcher to escalate. Targets are short forms (no raw key); a later accepted
+  // ban of the same key, or of its owner, marks the entry already banned.
+  async refused(params) {
+    const since = Number(params.get("since") ?? 0);
+    const limit = Math.min(Math.max(Number(params.get("limit") ?? 50), 1), 200);
+    const log = (await this.state.storage.get("audit")) ?? [];
+    const banned = log.filter((e) => e.outcome === "ok" && (e.action === ACTIONS.bankey || e.action === ACTIONS.banowner));
+    const entries = [];
+    for (let i = log.length - 1; i >= 0 && entries.length < limit; i--) {
+      const e = log[i];
+      if (e.outcome !== "rate-capped" || e.at < since) {
+        continue;
+      }
+      const owner = e.action === ACTIONS.bankey ? await ownerHash(`key:${e.target}`) : e.target;
+      const covered = banned.some((b) => b.at > e.at && (b.target === e.target || b.target === owner));
+      entries.push({
+        at: e.at, action: e.action, reason: e.reason ?? "", already_banned: covered,
+        target: e.action === ACTIONS.bankey ? String(e.target).replace(/^SHA256:/, "").slice(0, 10) : e.target,
+      });
+    }
+    return Response.json({ entries });
   }
 
   async auditLog() {
