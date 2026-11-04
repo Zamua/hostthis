@@ -1,7 +1,7 @@
 // Decodes the at-rest blob format, the magic HZ\0\x01 then one zstd stream,
 // with libzstd's decompressor compiled to WASM (vendor/zstd). Pull-based: a
 // call decodes only when the consumer reads and yields at most one output
-// buffer, so memory stays flat however far the bytes expand (CLAUDE.md
+// buffer, so memory stays flat however far the bytes expand (AGENTS.md
 // principle 1).
 import zdModule from "../../vendor/zstd/zd.wasm";
 

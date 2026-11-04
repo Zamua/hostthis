@@ -210,7 +210,7 @@ func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {
 
 // storedManifest decodes a stored manifest. One of the wrong shape reads as no
 // manifest, so reads, version listings and deletes of a damaged record keep
-// working (CLAUDE.md engineering principle 3). ver is 0 for the row's manifest.
+// working (AGENTS.md engineering principle 3). ver is 0 for the row's manifest.
 func (r *PasteRepo) storedManifest(raw json.RawMessage, slug domain.Slug, ver int) domain.Manifest {
 	var m domain.Manifest
 	if len(raw) == 0 {
@@ -291,7 +291,7 @@ func (r *PasteRepo) SumActiveBytesByOwner(owner string, _ time.Time) (int, error
 // All four answer from the identity cell's maintained summary rather than by
 // visiting each paste cell. Fetching N paste cells to build one listing would
 // be N cross-cell reads on a request path, which is the scan the architecture
-// forbids wearing a different hat (CLAUDE.md engineering principle 2).
+// forbids wearing a different hat (AGENTS.md engineering principle 2).
 
 type ownerEntry struct {
 	Slug        string `json:"slug"`

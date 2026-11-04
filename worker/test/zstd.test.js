@@ -98,7 +98,7 @@ test("every corpus blob decodes to its bytes, whatever the input chunking", asyn
   }
 });
 
-// CLAUDE.md principle 1: the decoder holds one output buffer at a time, so
+// AGENTS.md principle 1: the decoder holds one output buffer at a time, so
 // 100 MiB of output costs no more memory than 100 KiB.
 test("a 100 MiB decode stays under a few MiB of live memory", async () => {
   // Warm the pooled instance to a 1 MiB window, so its heap is in the baseline.
