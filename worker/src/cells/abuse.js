@@ -11,6 +11,8 @@ import { dispatch, mutation, read } from "./ops.js";
 const WATCHER_BANS_PER_HOUR = 5;
 const HOUR_MS = 3_600_000;
 const AUDIT_MAX = 1000;
+const FRESH_MAX = 2000;
+const FRESH_KEEP_MS = 24 * HOUR_MS;
 const REASON_MAX = 200;
 const INDEX = "q:";
 const KEY = /^SHA256:[0-9a-f]{64}$/;
@@ -41,6 +43,8 @@ const ABUSE_OPS = {
   bans: read((self) => self.bans()),
   list: read((self) => self.list()),
   audit: read((self) => self.auditLog()),
+  fresh: mutation((self, body) => self.fresh(body)),
+  keysubnets: read((self, _body, url) => self.keySubnets(url.searchParams)),
   refused: read((self, _body, url) => self.refused(url.searchParams)),
 };
 
@@ -346,6 +350,65 @@ export class Abuse {
     const quarantined = [...rows].map(([key, row]) => ({ slug: key.slice(INDEX.length), ...row }));
     quarantined.sort((a, b) => a.at - b.at);
     return Response.json({ quarantined });
+  }
+
+  // A key first seen on a subnet, reported by the Subnet cell. The ring holds
+  // the last day and at most FRESH_MAX events, so it never grows with history.
+  async fresh(body) {
+    if (typeof body.subnet !== "string" || typeof body.identity !== "string" || !Number.isSafeInteger(body.at)) {
+      return fail(400, "invalid-request");
+    }
+    const ring = (await this.state.storage.get("fresh")) ?? [];
+    ring.push({ subnet: body.subnet, fp: body.identity.replace(/^key:/, ""), at: body.at });
+    const kept = ring.filter((e) => body.at - e.at < FRESH_KEEP_MS).slice(-FRESH_MAX);
+    await this.state.storage.put("fresh", kept);
+    return Response.json({ ok: true });
+  }
+
+  // Subnets where at least min_keys distinct keys were first seen within
+  // window_min minutes before now, largest group first. Short ids only.
+  async keySubnets(params) {
+    const now = Number(params.get("now"));
+    const windowMs = Number(params.get("window_min")) * 60_000;
+    const minKeys = Number(params.get("min_keys"));
+    const limit = Number(params.get("limit"));
+    const ring = (await this.state.storage.get("fresh")) ?? [];
+    const bySubnet = new Map();
+    for (const e of ring) {
+      if (now - e.at >= windowMs) {
+        continue;
+      }
+      const keys = bySubnet.get(e.subnet) ?? new Map();
+      if (!keys.has(e.fp)) {
+        keys.set(e.fp, e.at);
+      }
+      bySubnet.set(e.subnet, keys);
+    }
+    const dl = this.env.DENYLIST;
+    const banned = new Set();
+    if (dl && [...bySubnet.values()].some((keys) => keys.size >= minKeys)) {
+      const res = await dl.get(dl.idFromName("denylist")).fetch(new Request("https://cell/denylist/list"));
+      if (res.ok) {
+        for (const { entry } of (await res.json()).entries) {
+          banned.add(entry);
+        }
+      }
+    }
+    const groups = [];
+    for (const [subnet, keys] of bySubnet) {
+      if (keys.size < minKeys) {
+        continue;
+      }
+      const rows = [];
+      for (const [fp, at] of [...keys].sort((a, b) => a[1] - b[1])) {
+        rows.push({
+          key: fp.replace(/^SHA256:/, "").slice(0, 10), owner: (await ownerHash(`key:${fp}`)).slice(0, 8), at, banned: banned.has(fp),
+        });
+      }
+      groups.push({ subnet, first: rows[0].at, last: rows[rows.length - 1].at, keys: rows });
+    }
+    groups.sort((a, b) => b.keys.length - a.keys.length || b.last - a.last);
+    return Response.json({ groups: groups.slice(0, limit) });
   }
 
   // Watcher bans the hourly cap refused since a time, newest first, for the

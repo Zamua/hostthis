@@ -4867,7 +4867,7 @@ including the operator routes:
 | `POST /abuse/unban-owner` | `{banId}` | 200 `{banId, released}`, 404 `no-such-ban`, 409 `already-deleted` |
 | `GET /abuse/bans` | | `{bans: [{banId, owner, reason, at, deleteAfter, state, slugs, quarantined, deleted, failed}]}` |
 
-A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly four routes
+A second secret, `HOSTTHIS_WATCHER_TOKEN`, is accepted on exactly five routes
 and nowhere else, for an automated abuse watcher:
 
 | route | body |
@@ -4876,6 +4876,7 @@ and nowhere else, for an automated abuse watcher:
 | `POST /watcher/ban-key` | `{identity, reason}` (a `SHA256:` fingerprint, `key:` prefix optional), or `{slug, reason}` to ban that slug's owner without the caller ever holding the fingerprint |
 | `POST /watcher/ban-owner` | the same body as `ban-key`; runs the operator's owner ban ("Owner ban") at the default 7-day retention, which the watcher cannot change |
 | `GET /watcher/refused-bans?since=<ISO>&limit=<n>` | read-only; `since` defaults to 24 hours ago, `limit` to 50 (1 to 200); 400 `invalid-request` otherwise. 200 `{now, entries: [{at, action, target, reason, already_banned}]}`, newest first: the key and owner bans the rate cap refused. `target` is the first 10 hex digits of a key's fingerprint or the 16-hex owner hash, never a full key; `already_banned` is true once a later accepted ban covers the key or its owner. It changes no storage and does not touch the cap |
+| `GET /watcher/key-subnets?window_min=<n>&min_keys=<n>&limit=<n>` | read-only; `window_min` defaults to 60 (1 to 1440), `min_keys` to 3, `limit` to 50 (1 to 200); 400 `invalid-request` otherwise. 200 `{now, groups: [{subnet, first, last, keys: [{key, owner, at, banned}]}]}`: the subnets (`/24`, `/48`) where at least `min_keys` distinct keys were first seen within the last `window_min` minutes, largest group first. `key` is the first 10 hex digits of the fingerprint, `owner` the first 8 of the owner hash, `banned` whether the key is on the denylist now. The data is a ring the Subnet cell feeds when it admits a fresh key: the last 24 hours and at most 2000 events, so it never grows with history; a failed feed costs the ring an event and never the admission |
 
 It cannot release, delete directly, lift a ban, or ban a network. Its actions pass two guards the
 operator routes skip:
