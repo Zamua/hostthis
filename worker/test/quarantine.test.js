@@ -240,3 +240,16 @@ test("the fresh ring is bounded and drops events older than a day", async () => 
   const res = await call(w.abuse, "keysubnets", undefined, `?now=${NOW + DAY + 2}&window_min=1440&min_keys=1&limit=50`);
   assert.deepEqual(res.body.groups[0].keys.map((k) => k.key), ["2".repeat(10)]);
 });
+
+test("refused marks a key already banned when it is on the live denylist, even without an audit ban", async () => {
+  const w = abuseWorld();
+  for (let i = 1; i <= 5; i++) {
+    await call(w.abuse, "bankey", { identity: "SHA256:" + String(i).repeat(64), reason: "x", actor: "watcher", now: NOW + i });
+  }
+  const k6 = "SHA256:" + "6".repeat(64);
+  await call(w.abuse, "bankey", { identity: k6, reason: "capped", actor: "watcher", now: NOW + 10 });
+  assert.equal((await call(w.abuse, "refused", undefined, "?since=0&limit=50")).body.entries[0].already_banned, false);
+  // A direct denylist add (the operator CLI) leaves no audit entry.
+  await call(w.denylist, "add", { entry: k6, reason: "direct" });
+  assert.equal((await call(w.abuse, "refused", undefined, "?since=0&limit=50")).body.entries[0].already_banned, true);
+});
