@@ -7,13 +7,14 @@ import { dispatch, mutation } from "./ops.js";
 // decisions run under blockConcurrencyWhile because v0.4 may serve several
 // fetches concurrently.
 const SUBNET_OPS = {
-  admit: mutation((self, body) => self.admit(body)),
+  admit: mutation((self, body, url) => self.admit(body, url)),
   snapshot: mutation((self, _body, url) => self.snapshot(url), { body: false }),
 };
 
 export class Subnet {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
   }
 
   async fetch(request) {
@@ -40,7 +41,22 @@ export class Subnet {
     return rows;
   }
 
-  async admit(body) {
+  // Tells the abuse cell a key is fresh on this subnet, for its recent-keys
+  // ring. Best effort: a failure costs the ring an event, never the admission.
+  async reportFresh(subnet, identity, at) {
+    if (!this.env?.ABUSE || !subnet) {
+      return;
+    }
+    try {
+      await this.env.ABUSE.get(this.env.ABUSE.idFromName("abuse")).fetch(new Request("https://cell/abuse/fresh", {
+        method: "POST", body: JSON.stringify({ subnet, identity, at }),
+      }));
+    } catch (error) {
+      console.warn(`warn: fresh report: ${error?.message ?? error}`);
+    }
+  }
+
+  async admit(body, url) {
     const rows = await this.live(body.now, body.window);
     if (Object.hasOwn(rows, body.identity)) {
       // Already on file: no rate-limit accounting, and the first-seen stamp
@@ -52,6 +68,7 @@ export class Subnet {
     }
     rows[body.identity] = body.now;
     await this.state.storage.put("rows", rows);
+    await this.reportFresh(url?.searchParams.get("subnet"), body.identity, body.now);
     return Response.json({ knownAlready: false, admitted: true });
   }
 

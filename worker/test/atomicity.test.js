@@ -1822,3 +1822,24 @@ test("Paste head answers the latest live version and its manifest", async () => 
   assert.equal(head.body.ver, 2);
   assert.deepStrictEqual(head.body.manifest, siteManifest({ "a.m4a": ["uploads/u2/0", 100] }));
 });
+
+test("Subnet reports a fresh admission to the abuse cell, once, and never fails the admission", async () => {
+  const seen = [];
+  let fail = false;
+  const env = { ABUSE: { idFromName: (n) => n, get: () => ({ fetch: async (req) => {
+    if (fail) { throw new Error("down"); }
+    seen.push([new URL(req.url).pathname, await req.json()]);
+    return Response.json({});
+  } }) } };
+  const subnet = new Subnet(state(new FakeStorage()), env);
+  const admit = async (identity, limit = 5) => (await subnet.fetch(new Request("https://cell/subnet/admit?subnet=203.0.113.0%2F24", {
+    method: "POST", body: JSON.stringify({ identity, now: 5, window: 1000, limit }),
+  }))).json();
+  assert.equal((await admit("key:SHA256:a")).admitted, true);
+  assert.equal((await admit("key:SHA256:a")).knownAlready, true);
+  assert.deepEqual(seen, [["/abuse/fresh", { subnet: "203.0.113.0/24", identity: "key:SHA256:a", at: 5 }]]);
+  assert.equal((await admit("key:SHA256:b", 1)).admitted, false);
+  assert.equal(seen.length, 1, "a refusal is not a fresh key");
+  fail = true;
+  assert.equal((await admit("key:SHA256:c")).admitted, true, "a failing report does not fail the admission");
+});

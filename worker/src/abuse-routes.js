@@ -21,6 +21,7 @@ const ROUTES = {
     "/watcher/ban-key": { op: "bankey", fields: ["identity", "slug", "reason"] },
     "/watcher/ban-owner": { op: "banowner", fields: ["identity", "slug", "reason"] },
     "/watcher/refused-bans": { op: "refused", refused: true },
+    "/watcher/key-subnets": { op: "keysubnets", keySubnets: true },
   },
 };
 
@@ -90,12 +91,42 @@ async function refusedBans(request, cell, url, nowMs) {
   });
 }
 
+// GET /watcher/key-subnets?window_min=&min_keys=&limit=: subnets where keys
+// were first seen close together. Read-only.
+async function keySubnets(request, cell, url, nowMs) {
+  if (request.method !== "GET") {
+    return new Response("method not allowed\n", { status: 405 });
+  }
+  const num = (name, fallback) => (url.searchParams.get(name) === null ? fallback : Number(url.searchParams.get(name)));
+  const windowMin = num("window_min", 60);
+  const minKeys = num("min_keys", 3);
+  const limit = num("limit", 50);
+  const within = (n, max) => Number.isInteger(n) && n >= 1 && n <= max;
+  if (!within(windowMin, 1440) || !within(minKeys, 1000) || !within(limit, REFUSED_LIMIT_MAX)) {
+    return Response.json({ error: "invalid-request" }, { status: 400 });
+  }
+  const res = await cell.fetch(new Request(
+    `https://cell/abuse/keysubnets?now=${nowMs}&window_min=${windowMin}&min_keys=${minKeys}&limit=${limit}`));
+  if (!res.ok) {
+    return res;
+  }
+  const iso = (ms) => new Date(ms).toISOString();
+  const { groups } = await res.json();
+  return Response.json({
+    now: iso(nowMs),
+    groups: groups.map((g) => ({ ...g, first: iso(g.first), last: iso(g.last), keys: g.keys.map((k) => ({ ...k, at: iso(k.at) })) })),
+  });
+}
+
 export async function abuseRoute(request, env, ctx, url, actor, { now = Date.now, fetcher = fetch, sleep } = {}) {
   const route = ROUTES[actor][url.pathname];
   if (!route) {
     return new Response("not found\n", { status: 404 });
   }
   const cell = env.ABUSE.get(env.ABUSE.idFromName("abuse"));
+  if (route.keySubnets) {
+    return keySubnets(request, cell, url, now());
+  }
   if (route.refused) {
     return refusedBans(request, cell, url, now());
   }

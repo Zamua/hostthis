@@ -199,3 +199,44 @@ test("refused honors since and limit, and ignores accepted entries", async () =>
   const later = await call(w.abuse, "refused", undefined, `?since=${NOW + 12}&limit=50`);
   assert.deepEqual(later.body.entries.map((e) => e.at), [NOW + 12]);
 });
+
+const fresh = (cell, subnet, fp, at) => call(cell, "fresh", { subnet, identity: `key:${fp}`, at });
+const FPS = Array.from({ length: 6 }, (_, i) => "SHA256:" + String(i + 1).repeat(64));
+
+test("keysubnets groups keys first seen on one subnet within the window, largest first, with short ids", async () => {
+  const w = abuseWorld();
+  const MIN = 60_000;
+  for (let i = 0; i < 4; i++) {
+    await fresh(w.abuse, "203.0.113.0/24", FPS[i], NOW + i * MIN);
+  }
+  for (let i = 3; i < 6; i++) {
+    await fresh(w.abuse, "198.51.100.0/24", FPS[i], NOW + i * MIN);
+  }
+  await fresh(w.abuse, "192.0.2.0/24", FPS[0], NOW);
+  await fresh(w.abuse, "203.0.113.0/24", FPS[0], NOW + 9 * MIN); // the same key again is one key
+  await call(w.abuse, "bankey", { identity: FPS[1], reason: "x", actor: "operator", now: NOW + 10 * MIN });
+  const res = await call(w.abuse, "keysubnets", undefined, `?now=${NOW + 20 * MIN}&window_min=60&min_keys=3&limit=50`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.groups.map((g) => [g.subnet, g.keys.length]), [["203.0.113.0/24", 4], ["198.51.100.0/24", 3]]);
+  const g = res.body.groups[0];
+  assert.deepEqual([g.first, g.last], [NOW, NOW + 3 * MIN]);
+  assert.deepEqual(g.keys.map((k) => [k.key, k.at, k.banned]), [
+    ["1".repeat(10), NOW, false], ["2".repeat(10), NOW + MIN, true], ["3".repeat(10), NOW + 2 * MIN, false], ["4".repeat(10), NOW + 3 * MIN, false],
+  ]);
+  assert.match(g.keys[0].owner, /^[0-9a-f]{8}$/);
+  assert.ok(!JSON.stringify(res.body).includes("SHA256"), "no full key");
+  // A narrower window drops the older events; min_keys and limit apply.
+  const narrow = await call(w.abuse, "keysubnets", undefined, `?now=${NOW + 20 * MIN}&window_min=18&min_keys=3&limit=50`);
+  assert.deepEqual(narrow.body.groups.map((x) => x.subnet), ["198.51.100.0/24"]);
+  const limited = await call(w.abuse, "keysubnets", undefined, `?now=${NOW + 20 * MIN}&window_min=60&min_keys=1&limit=1`);
+  assert.equal(limited.body.groups.length, 1);
+});
+
+test("the fresh ring is bounded and drops events older than a day", async () => {
+  const w = abuseWorld();
+  const DAY = 86_400_000;
+  await fresh(w.abuse, "203.0.113.0/24", FPS[0], NOW);
+  await fresh(w.abuse, "203.0.113.0/24", FPS[1], NOW + DAY + 1);
+  const res = await call(w.abuse, "keysubnets", undefined, `?now=${NOW + DAY + 2}&window_min=1440&min_keys=1&limit=50`);
+  assert.deepEqual(res.body.groups[0].keys.map((k) => k.key), ["2".repeat(10)]);
+});
