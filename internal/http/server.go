@@ -47,6 +47,7 @@ type Server struct {
 	Rooms    RoomService     // optional; nil disables the /api/rooms surface
 	RoomPush RoomPushService // optional; nil disables the push routes
 	Relay    RoomRelay       // optional; nil disables the /api/rooms/<uuid>/ws relay
+	RoomICE  RoomICEService  // optional; nil makes /api/rooms/<uuid>/ice a 404
 	Blobs    BlobReader
 	// Solid answers the apex /_solid/ paths (docs/SPEC.md "Pod storage");
 	// nil leaves them 404.
