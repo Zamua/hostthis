@@ -67,8 +67,11 @@ func TestUploadAndServe(t *testing.T) {
 	if rp := resp.Header.Get("Referrer-Policy"); rp != "no-referrer" {
 		t.Fatalf("Referrer-Policy: got %q, want no-referrer", rp)
 	}
-	if pp := resp.Header.Get("Permissions-Policy"); !strings.Contains(pp, "camera=()") {
-		t.Fatalf("Permissions-Policy: got %q, want camera=() at minimum", pp)
+	// Stored HTML may capture on its own origin, for WebRTC, and nothing else
+	// that needs a grant (docs/SPEC.md "WebRTC").
+	const wantPP = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()"
+	if pp := resp.Header.Get("Permissions-Policy"); pp != wantPP {
+		t.Fatalf("Permissions-Policy: got %q, want %q", pp, wantPP)
 	}
 }
 

@@ -900,7 +900,7 @@ renders its own bytes).
 
 Site reads carry the **same sandbox headers** as HTML paste reads
 (`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
-`Permissions-Policy: ...`) and the same cache posture. Files are served
+`Permissions-Policy` with capture for WebRTC) and the same cache posture. Files are served
 **raw**: the site's own HTML/CSS/JS runs exactly as uploaded, secured
 by per-subdomain origin isolation, not by sanitizing the bytes.
 
@@ -1738,6 +1738,56 @@ The live Worker harness is the acceptance gate: multiple clients receive durable
 frames in sequence; a late join receives an exact snapshot splice; ephemeral
 text and binary frames reach peers only; room and app isolation hold; deletes
 mirror correctly; reconnect works; and admission slots are reclaimed.
+
+## WebRTC (peer-to-peer data, audio and video)
+
+A deployed app can connect its visitors' browsers to each other directly
+with WebRTC: data channels, audio, video and screen sharing. hostthis carries
+no media and terminates no WebRTC connection itself. It supplies the two
+things a static page cannot supply alone, and the browsers do the rest.
+
+**Signaling rides the room relay.** Peers exchange session descriptions and
+ICE candidates as ephemeral frames on the room's WebSocket (see "Real-time
+room relay (WebSocket)"). The relay copies a frame to every OTHER socket in
+the room and interprets nothing, so the app addresses its own messages, for
+example with a random per-tab id in `from` and `to` fields, and each peer
+drops frames not meant for it. An offer or answer, video included, fits well
+inside the 32 KiB ephemeral frame limit, and candidates go one per frame
+(trickle ICE). Signaling frames are never stored, never reach another room,
+and the `snapshot`, `put` and `delete` types stay reserved, so an app picks
+other `type` names. The room UUID remains the whole capability: anyone in the
+room can make an offer to anyone else in it, and an app that wants to vet a
+peer does so in its own protocol. The 64-socket room cap bounds a full mesh.
+
+**Capture is allowed on the app's own origin.** Stored bytes (an HTML paste,
+a site or knowledge-base file, any `?raw` body), and the 304 that revalidates
+them, carry
+
+```
+Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()
+```
+
+so the page, and any same-origin frame within it, may call `getUserMedia` and
+`getDisplayMedia`. The browser still prompts the visitor before any capture;
+the policy only stops hostthis from refusing on the visitor's behalf. A
+cross-origin frame gets nothing (`self`), and origin isolation (see "HTML
+sandboxing") keeps a grant on one app's origin from reaching another's. Every
+other response that carries a Permissions-Policy, a render shell or a
+knowledge base's file list, keeps the strict one,
+`camera=(), microphone=(), geolocation=(), usb=(), payment=()`: hostthis's own
+renderers never capture.
+
+**Connectivity is the app's.** ICE runs between the browsers, not through
+hostthis, and the page's `connect-src` does not govern it. The app names its
+ICE servers in `RTCPeerConnection`'s configuration: a public STUN server
+connects most peers, and peers behind symmetric NATs need a TURN relay the
+app brings. hostthis runs no STUN or TURN server and mints no TURN
+credentials. Capture needs a secure context, which a subdomain-mode
+deployment over https (and `localhost` in development) is.
+
+Out of scope: a media server (SFU or MCU), recording, and server-side
+participant identity. WebRTC adds no stored state and no new route; it is the
+room relay and one response header.
 
 ## Persistence
 
@@ -4697,8 +4747,11 @@ Response headers on paste reads:
   who sent it
 - `Content-Security-Policy` (https/wss only, forms same-origin) on stored
   bytes, as above
-- `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
-  - deny everything that needs explicit user grant
+- `Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()`
+  on stored bytes and their 304s, so a page can capture for WebRTC (see
+  "WebRTC (peer-to-peer data, audio and video)"), and
+  `camera=(), microphone=(), geolocation=(), usb=(), payment=()` everywhere
+  else; both deny the rest outright
 
 ### What this means for the visitor
 
@@ -4707,21 +4760,24 @@ A paste's HTML can:
 - Load JS, CSS, fonts, images from any CDN
 - Fetch any HTTPS API
 - Render WebGL, Canvas, Web Audio, anything browsers support
+- Open WebRTC connections to other visitors, and capture the camera,
+  microphone or screen once the visitor accepts the browser's prompt
 - Inline `<script>`, `<style>`, modules
 - Run user-supplied JS that does anything that JS can do
 
 A paste's HTML cannot:
 
 - Read cookies from `hostthis.dev` apex or other paste subdomains
-- Touch the visitor's filesystem, camera, mic, or geolocation without
-  the explicit prompt the browser shows (and Permissions-Policy denies
-  some categories outright)
+- Touch the visitor's filesystem, camera, mic, or screen without the
+  explicit prompt the browser shows, nor geolocation, USB or payment at
+  all (Permissions-Policy denies those outright)
 - Be embedded in another site's iframe (X-Frame-Options: DENY)
 - Tell other sites where the visitor came from (Referrer-Policy)
 - Submit a form to another origin, from the page or a `srcdoc` iframe
   (`form-action 'self'`)
 - Load or connect to anything over plain `http:` or `ws:`, including the
-  visitor's localhost and LAN
+  visitor's localhost and LAN (WebRTC's ICE checks are the browser's own,
+  outside CSP, and reach only peers that answer them)
 
 Treat any URL on hostthis.dev as untrusted user content - same as you'd
 treat a codepen, a gist, or a github.io page.

@@ -20,7 +20,15 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'chromium', use: { browserName: 'chromium' } },
+    {
+      name: 'chromium',
+      use: {
+        browserName: 'chromium',
+        // Fake camera and microphone for the WebRTC capture tests; a page that
+        // never asks for them is unaffected.
+        launchOptions: { args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] },
+      },
+    },
     { name: 'webkit', use: { browserName: 'webkit' } },
   ],
 });

@@ -14,7 +14,10 @@ import { rawContentType, renderShell } from "./shells.js";
 // Every content response's: stored by any cache, revalidated before each reuse.
 export const CONTENT_CACHE_CONTROL = "public, no-cache";
 
+// A shell, and everything else hostthis writes itself, never captures.
 const PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=(), usb=(), payment=()";
+// Stored bytes may capture on their own origin, for WebRTC (SPEC "WebRTC").
+const STORED_PERMISSIONS_POLICY = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()";
 const HTML = "text/html; charset=utf-8";
 
 // Page code may load and connect over https/wss only (no localhost, LAN or
@@ -101,9 +104,9 @@ export function readPath(openBlob) {
 
     const { kind, updatedAt, entry } = answer;
     // The validators and the cache posture, on a 200 and a 304 alike.
-    const content = (etag) => ({
+    const content = (etag, permissions = PERMISSIONS_POLICY) => ({
       ...sandbox(),
-      "Permissions-Policy": PERMISSIONS_POLICY,
+      "Permissions-Policy": permissions,
       "Cache-Control": CONTENT_CACHE_CONTROL,
       "ETag": etag,
       "Last-Modified": formatHTTPDate(updatedAt),
@@ -111,7 +114,7 @@ export function readPath(openBlob) {
     const unchanged = (headers) => notModified(request.headers, headers.ETag, updatedAt);
 
     const stored = async (contentType, what) => {
-      const headers = content(storedETag(entryValidator(entry)));
+      const headers = content(storedETag(entryValidator(entry)), STORED_PERMISSIONS_POLICY);
       if (unchanged(headers)) {
         return new Response(null, { status: 304, headers });
       }
