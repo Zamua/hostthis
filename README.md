@@ -119,6 +119,14 @@ close 4001                   dropped for a newcomer after 2 min without
 
 64 sockets per room; frames up to 32 KiB.
 
+## WEBRTC
+
+Peers connect browser to browser: data channels, audio, video, screen share.
+Signal over the room socket: send offers, answers and ICE candidates as your own
+frames, addressed with a per-tab id since every peer receives every frame. Pages
+you upload may call getUserMedia and getDisplayMedia; the browser still asks the
+visitor. Bring your own STUN/TURN servers; hostthis relays no media.
+
 ## PUSH
 
 ```

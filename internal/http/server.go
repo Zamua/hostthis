@@ -276,18 +276,22 @@ func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.
 		return
 	}
 
-	h := w.Header()
-	setSandboxHeaders(h)
-	h.Set("Permissions-Policy", permissionsPolicy)
-
-	h.Set("Cache-Control", contentCacheControl)
-
 	// A client-rendered kind serves the raw bytes only under an explicit ?raw,
 	// else the fixed shell. No Accept negotiation, so each URL is a SINGLE
 	// representation and safe to edge-cache (docs/SPEC.md "The bare URL always
 	// serves the shell").
 	shell := shellFor(p.Kind)
 	rawWanted := shell != nil && wantsRaw(r)
+
+	h := w.Header()
+	setSandboxHeaders(h)
+	if shell != nil && !rawWanted {
+		h.Set("Permissions-Policy", permissionsPolicy)
+	} else {
+		h.Set("Permissions-Policy", storedPermissionsPolicy)
+	}
+
+	h.Set("Cache-Control", contentCacheControl)
 
 	// ETag is the stored file's object key for HTML and for any raw body: a key
 	// never names different bytes. The shell is content-INDEPENDENT, so it
@@ -459,7 +463,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	// headers as an HTML paste.
 	h := w.Header()
 	setSandboxHeaders(h)
-	h.Set("Permissions-Policy", permissionsPolicy)
+	h.Set("Permissions-Policy", storedPermissionsPolicy)
 	h.Set("Cache-Control", contentCacheControl)
 	if notModified(w, r, storedETag(entry.Validator()), updatedAt) {
 		return
@@ -593,8 +597,14 @@ func (s *Server) warnShort(err error, slug domain.Slug, surface, what string, si
 }
 
 // permissionsPolicy denies the powerful browser features a served page could
-// otherwise request.
+// otherwise request. A render shell and every other response hostthis writes
+// itself carry it: hostthis's own pages never capture.
 const permissionsPolicy = "camera=(), microphone=(), geolocation=(), usb=(), payment=()"
+
+// storedPermissionsPolicy is what stored bytes carry: the page may capture the
+// camera, microphone and screen on its own origin, for WebRTC, once the
+// visitor accepts the browser's prompt (docs/SPEC.md "WebRTC").
+const storedPermissionsPolicy = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()"
 
 // contentCacheControl is every content response's: any cache may store it but
 // must revalidate before each reuse, so an update, pin or delete shows on the

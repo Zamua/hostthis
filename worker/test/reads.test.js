@@ -13,7 +13,7 @@ import { rawContentType, renderShell } from "../src/public/shells.js";
 import { publicReads } from "../src/public/surface.js";
 import { INPUT_BATCH } from "../src/public/zstd.js";
 import {
-  APEX, assertGolden, at, documentRow, FORWARDED, GOLDEN, headersOf, hiRow, sha256, SLUG, TOKEN, UPDATED, world,
+  APEX, assertGolden, at, documentRow, FORWARDED, GOLDEN, headersOf, HI, hiRow, sha256, SLUG, TOKEN, UPDATED, world,
 } from "./public-world.js";
 import { stored } from "./stored.js";
 
@@ -201,6 +201,32 @@ for (const v of vectors.vectors) {
     }
   });
 }
+
+// SPEC "WebRTC": stored bytes and their 304 may capture on their own origin; a
+// shell, hostthis's own page, never does.
+test("stored bytes allow capture for WebRTC, shells and file lists deny it", async () => {
+  const capture = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()";
+  const strict = "camera=(), microphone=(), geolocation=(), usb=(), payment=()";
+  const html = world();
+  html.row(SLUG, hiRow());
+  html.blob("uploads/a/0", HI);
+  assert.equal((await html.fetch(at("/"))).headers.get("Permissions-Policy"), capture);
+  const revalidated = await html.fetch(at("/"), { headers: { "If-None-Match": storedETag("uploads/a/0") } });
+  assert.equal(revalidated.status, 304);
+  assert.equal(revalidated.headers.get("Permissions-Policy"), capture);
+
+  const md = world();
+  md.row(SLUG, documentRow("markdown"));
+  md.blob("uploads/a/0", RAW_SOURCE);
+  assert.equal((await md.fetch(at("/"))).headers.get("Permissions-Policy"), strict);
+  assert.equal((await md.fetch(at("/?raw"))).headers.get("Permissions-Policy"), capture);
+
+  const kb = world();
+  kbWorld(kb);
+  for (const [path, want] of [["/", strict], ["/?files=1", strict], ["/report.html", capture], ["/guide/setup.md?raw=1", capture]]) {
+    assert.equal((await kb.fetch(at(path))).headers.get("Permissions-Policy"), want, path);
+  }
+});
 
 test("a conditional request is answered before any payload is read, comparing weakly", async () => {
   const w = world();

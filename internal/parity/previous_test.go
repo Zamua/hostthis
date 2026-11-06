@@ -112,6 +112,20 @@ var previousRelease = []allowance{
 			return c.takeWorkerHeaders("Cache-Control")
 		},
 	},
+	{
+		// The previous release denied capture everywhere; stored bytes now
+		// allow it on their own origin, for WebRTC.
+		name: "stored-bytes-capture",
+		spec: `"WebRTC (peer-to-peer data, audio and video)" ("Capture is allowed on the app's own origin")`,
+		apply: func(c *comparison) bool {
+			const was = "camera=(), microphone=(), geolocation=(), usb=(), payment=()"
+			const now = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()"
+			if c.h.header.Get("Permissions-Policy") != was || c.got.header.Get("Permissions-Policy") != now {
+				return false
+			}
+			return c.takeWorkerHeaders("Permissions-Policy")
+		},
+	},
 }
 
 // contentHeaders are what a content response carries and a bare 5xx does not;
