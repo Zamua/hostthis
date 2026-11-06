@@ -7,7 +7,7 @@ import worker, * as cells from "../dist/index.js";
 
 // NUL cannot occur in a name the Go adapters build.
 const NS_MARK = "\0ns:";
-const NAMESPACES = ["IDENTITY", "PASTES", "ROOMS", "SUBNETS", "DENYLIST", "ABUSE", "FEED"];
+const NAMESPACES = ["IDENTITY", "PASTES", "ROOMS", "SUBNETS", "DENYLIST", "ABUSE", "FEED", "TURN"];
 
 function namespacedEnv(env, ns) {
   if (!ns) return env;
@@ -45,6 +45,7 @@ export const Identity = cell(cells.Identity);
 export const Paste = cell(cells.Paste);
 export const Room = cell(cells.Room);
 export const Subnet = cell(cells.Subnet);
+export const Turn = cell(cells.Turn);
 export const IntentLog = cells.IntentLog;
 
 const NS_PATH = /^\/ns\/([A-Za-z0-9_-]+)(\/.*)$/;

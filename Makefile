@@ -98,9 +98,12 @@ e2e: e2e/node_modules bundle worker/localrt/node_modules
 
 # CI installs the browsers with their system libraries first. The HTML report
 # lands in e2e/playwright-report, and a failing suite still writes it before
-# make fails.
+# make fails. PLAYWRIGHT_DEPS= skips the system libraries (apt) where they are
+# already installed, as in the Playwright image the PR workflow runs in; the
+# install is then a no-op for browsers the image already holds.
+PLAYWRIGHT_DEPS ?= --with-deps
 e2e-ci: e2e/node_modules bundle worker/localrt/node_modules
-	cd e2e && npx playwright install --with-deps chromium webkit
+	cd e2e && npx playwright install $(PLAYWRIGHT_DEPS) chromium webkit
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
 e2e/node_modules: e2e/package-lock.json

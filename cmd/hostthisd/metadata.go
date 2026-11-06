@@ -53,6 +53,7 @@ type siteStore interface {
 type roomStore interface {
 	service.RoomRepo
 	service.RoomPushRepo
+	service.RoomICERepo
 }
 
 // buildMetadata wires the worker adapters. apex names the deployment in the

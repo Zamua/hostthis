@@ -67,7 +67,7 @@ func (s *Server) streamDocument(w http.ResponseWriter, r *http.Request, slug dom
 ) {
 	h := w.Header()
 	setSandboxHeaders(h)
-	h.Set("Permissions-Policy", permissionsPolicy)
+	h.Set("Permissions-Policy", storedPermissionsPolicy)
 	h.Set("Cache-Control", contentCacheControl)
 	if notModified(w, r, storedETag(entry.Validator()), updatedAt) {
 		return

@@ -900,7 +900,7 @@ renders its own bytes).
 
 Site reads carry the **same sandbox headers** as HTML paste reads
 (`X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
-`Permissions-Policy: ...`) and the same cache posture. Files are served
+`Permissions-Policy` with capture for WebRTC) and the same cache posture. Files are served
 **raw**: the site's own HTML/CSS/JS runs exactly as uploaded, secured
 by per-subdomain origin isolation, not by sanitizing the bytes.
 
@@ -1738,6 +1738,122 @@ The live Worker harness is the acceptance gate: multiple clients receive durable
 frames in sequence; a late join receives an exact snapshot splice; ephemeral
 text and binary frames reach peers only; room and app isolation hold; deletes
 mirror correctly; reconnect works; and admission slots are reclaimed.
+
+## WebRTC (peer-to-peer data, audio and video)
+
+A deployed app can connect its visitors' browsers to each other directly
+with WebRTC: data channels, audio, video and screen sharing. hostthis carries
+no media and terminates no WebRTC connection itself. It supplies the two
+things a static page cannot supply alone, and the browsers do the rest.
+
+**Signaling rides the room relay.** Peers exchange session descriptions and
+ICE candidates as ephemeral frames on the room's WebSocket (see "Real-time
+room relay (WebSocket)"). The relay copies a frame to every OTHER socket in
+the room and interprets nothing, so the app addresses its own messages, for
+example with a random per-tab id in `from` and `to` fields, and each peer
+drops frames not meant for it. An offer or answer, video included, fits well
+inside the 32 KiB ephemeral frame limit, and candidates go one per frame
+(trickle ICE). Signaling frames are never stored, never reach another room,
+and the `snapshot`, `put` and `delete` types stay reserved, so an app picks
+other `type` names. The room UUID remains the whole capability: anyone in the
+room can make an offer to anyone else in it, and an app that wants to vet a
+peer does so in its own protocol. The 64-socket room cap bounds a full mesh.
+
+**Capture is allowed on the app's own origin.** Stored bytes (an HTML paste,
+a site or knowledge-base file, any `?raw` body), and the 304 that revalidates
+them, carry
+
+```
+Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()
+```
+
+so the page, and any same-origin frame within it, may call `getUserMedia` and
+`getDisplayMedia`. The browser still prompts the visitor before any capture;
+the policy only stops hostthis from refusing on the visitor's behalf. A
+cross-origin frame gets nothing (`self`), and origin isolation (see "HTML
+sandboxing") keeps a grant on one app's origin from reaching another's. Every
+other response that carries a Permissions-Policy, a render shell or a
+knowledge base's file list, keeps the strict one,
+`camera=(), microphone=(), geolocation=(), usb=(), payment=()`: hostthis's own
+renderers never capture.
+
+**Connectivity.** ICE runs between the browsers, not through hostthis, and
+the page's `connect-src` does not govern it. The app names its ICE servers in
+`RTCPeerConnection`'s configuration. STUN connects most peers; peers behind
+symmetric NATs or UDP-blocking networks need a TURN relay, which hostthis
+issues per room (below) when the operator configures one. An app may also
+bring its own. Capture needs a secure context, which a subdomain-mode
+deployment over https (and `localhost` in development) is.
+
+Out of scope: a media server (SFU or MCU), recording, and server-side
+participant identity. hostthis relays media only through the operator's TURN
+provider, never through its own servers.
+
+### TURN relay credentials
+
+```text
+GET /api/rooms/<uuid>/ice   -> 200 { "iceServers": [ ... ], "ttl": 3600 }
+```
+
+The answer is an `RTCConfiguration.iceServers` list an app passes straight to
+`new RTCPeerConnection({ iceServers })`. It always holds the free STUN server
+`{ "urls": ["stun:stun.cloudflare.com:3478"] }`. When a TURN credential is
+issued it also holds one Cloudflare Realtime TURN entry (`urls`, `username`,
+`credential`) and the body carries `"ttl": 3600`, the credential's lifetime in
+seconds; without one there is no `ttl` field. The TURN `urls` are Cloudflare's
+list minus any on port 53, which browsers block. A call longer than the
+lifetime fetches the route again and hands the new list to
+`RTCPeerConnection.setConfiguration`.
+
+`ice` is a reserved path segment of the room API, carved out before the KV
+verbs exactly as `ws` is, so no value can be stored under the key `ice` (a
+push `bodyKey` naming it is refused as reserved, too); `ice/x` and `ice:x` are
+ordinary keys. The route answers GET only (405 with `Allow: GET` otherwise). A malformed UUID is 400, then an unknown
+app 404, a method other than GET 405 and an unknown room 404, in that order;
+every answer carries `Cache-Control: no-store`, and the body is the TURN
+cell's JSON followed by a newline, from either server.
+
+**Issuing is best effort.** Every way TURN can be unavailable answers the same
+200 with STUN only, so an app has one code path and the route never leaks why:
+
+- the operator has not set all four of `HOSTTHIS_TURN_KEY_ID`,
+  `HOSTTHIS_TURN_KEY_TOKEN`, `HOSTTHIS_TURN_ACCOUNT_ID` and
+  `HOSTTHIS_TURN_ANALYTICS_TOKEN` on the Worker;
+- the monthly budget is spent, or the TURN cell has no fresh reading of it
+  (below);
+- an issuing cap is reached. Per fixed UTC hour: 64 credentials per room (a
+  room's socket cap, so each participant can fetch once an hour), 512 per app
+  and 4096 in total;
+- Cloudflare refuses or does not answer the credential request within 10
+  seconds.
+
+**The budget.** `HOSTTHIS_TURN_BUDGET_GB` (decimal gigabytes, default 500,
+half of Cloudflare's 1,000 GB monthly free allowance; any non-negative number
+overrides it, and an unset or invalid value means the default) bounds the TURN
+key's egress per UTC calendar month, which is what Cloudflare bills. One TURN
+cell reads the key's month-to-date `egressBytes` from Cloudflare's GraphQL
+Analytics API (`callsTurnUsageAdaptiveGroups`, filtered by `keyId` and by
+`date_geq` the month's first day and `date_leq` today). It reads at most once
+every 30 seconds: in the issuing request when the last reading is 30 seconds
+old or older, and from its alarm every 30 seconds while any credential it
+issued is unexpired. Once none is, the alarm stops and nothing is polled. A
+reading 5 minutes old or older, or from an earlier month, is not fresh, and
+nothing is issued until a read succeeds; the alarm keeps polling meanwhile.
+When a reading reaches the budget, the cell stops issuing and revokes every
+unexpired credential it issued, so relayed calls end rather than run on
+through the month.
+
+Cloudflare does not cap spend, so the budget is approximate: usage can pass
+it by what relayed calls send between two readings plus the analytics
+pipeline's delay. The default leaves 500 GB of headroom under the free
+allowance for that. The budget covers this key only; an account that also
+uses Cloudflare's SFU shares the free allowance with it.
+
+The TURN cell holds the reading, the hour's counters and, for revocation
+only, each unexpired credential's username and expiry. Nothing records which
+room or visitor holds which credential. Both servers ask the same cell
+(`hostthisd` checks the app and room, then calls the cell's `issue` op), so
+the two answer alike by construction.
 
 ## Persistence
 
@@ -3858,6 +3974,9 @@ identity:
 - **Subnet**, one per source network: Sybil-admission rows.
 - **Feed**, one cell named `changes`: which apps changed and when (see "Change
   feed and room index").
+- **Turn**, one cell named `turn`: the TURN key's egress reading, the hour's
+  issuing counters and each unexpired credential's username and expiry (see
+  "TURN relay credentials").
 
 The deprecated `IntentLog` class remains only so the original migration stays
 resolvable. No request routes to it, but it keeps a binding (`INTENT_LOGS`):
@@ -4143,8 +4262,9 @@ path, the read flags from the parsed query, and a body it decoded, checked and
 encoded again. Neither the client's URL nor its query, headers or body reaches
 a cell, so no request can choose a cell op. Its other Worker settings are
 `HOSTTHIS_PUBLIC_SCHEME` (the push `sub`) and `HOSTTHIS_CLIENT_IP_SOURCE`
-(the room creation limit's client address, see "Quota and abuse"). With it
-unset, or naming neither `cf-connecting-ip` nor `xff-rightmost`, every direct
+(the room creation limit's client address, see "Quota and abuse"), and the
+`HOSTTHIS_TURN_*` settings (see "TURN relay credentials"). With
+`HOSTTHIS_CLIENT_IP_SOURCE` unset, or naming neither `cf-connecting-ip` nor `xff-rightmost`, every direct
 client shares one room creation bucket: requests are still served, and the
 first direct public request an isolate sees logs one warning naming the
 variable. A forwarded request carries its own client address, so it never
@@ -4697,8 +4817,11 @@ Response headers on paste reads:
   who sent it
 - `Content-Security-Policy` (https/wss only, forms same-origin) on stored
   bytes, as above
-- `Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=(), payment=()`
-  - deny everything that needs explicit user grant
+- `Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()`
+  on stored bytes and their 304s, so a page can capture for WebRTC (see
+  "WebRTC (peer-to-peer data, audio and video)"), and
+  `camera=(), microphone=(), geolocation=(), usb=(), payment=()` everywhere
+  else; both deny the rest outright
 
 ### What this means for the visitor
 
@@ -4707,21 +4830,24 @@ A paste's HTML can:
 - Load JS, CSS, fonts, images from any CDN
 - Fetch any HTTPS API
 - Render WebGL, Canvas, Web Audio, anything browsers support
+- Open WebRTC connections to other visitors, and capture the camera,
+  microphone or screen once the visitor accepts the browser's prompt
 - Inline `<script>`, `<style>`, modules
 - Run user-supplied JS that does anything that JS can do
 
 A paste's HTML cannot:
 
 - Read cookies from `hostthis.dev` apex or other paste subdomains
-- Touch the visitor's filesystem, camera, mic, or geolocation without
-  the explicit prompt the browser shows (and Permissions-Policy denies
-  some categories outright)
+- Touch the visitor's filesystem, camera, mic, or screen without the
+  explicit prompt the browser shows, nor geolocation, USB or payment at
+  all (Permissions-Policy denies those outright)
 - Be embedded in another site's iframe (X-Frame-Options: DENY)
 - Tell other sites where the visitor came from (Referrer-Policy)
 - Submit a form to another origin, from the page or a `srcdoc` iframe
   (`form-action 'self'`)
 - Load or connect to anything over plain `http:` or `ws:`, including the
-  visitor's localhost and LAN
+  visitor's localhost and LAN (WebRTC's ICE checks are the browser's own,
+  outside CSP, and reach only peers that answer them)
 
 Treat any URL on hostthis.dev as untrusted user content - same as you'd
 treat a codepen, a gist, or a github.io page.

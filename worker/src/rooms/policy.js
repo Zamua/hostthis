@@ -72,6 +72,9 @@ export function roomsRoute(path) {
   if (key === "ws") {
     return { kind: "ws", id };
   }
+  if (key === "ice") {
+    return { kind: "ice", id };
+  }
   if (key === "push") {
     return { kind: "push", id, sub: "" };
   }
@@ -82,7 +85,7 @@ export function roomsRoute(path) {
 }
 
 function isReservedRoomKey(key) {
-  return key === "ws" || key === "push" || key.startsWith("push/");
+  return key === "ws" || key === "ice" || key === "push" || key.startsWith("push/");
 }
 
 // domain.ValidateRoomKey's message, or null for a valid key.
