@@ -243,6 +243,7 @@ suite.
 ```
 make e2e        # run it (installs e2e/node_modules on first use)
 make e2e-ci     # same, after installing the browsers and their system libraries
+                # (PLAYWRIGHT_DEPS= skips the libraries, as CI's Playwright image has them)
 make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'   # one file, one engine
 E2E_READS=worker make e2e   # read every paste from the Worker's public surface
 ```

@@ -26,6 +26,14 @@ jobs:
     # Adding the label runs the suite and publishes; any other label is ignored.
     if: github.event.action != 'labeled' || github.event.label.name == 'e2e-report'
     runs-on: ubuntu-latest
+    # Playwright's own image holds the browsers and every system library they
+    # need, so no run downloads them: `playwright install --with-deps` fetched
+    # ~139 MB through apt on every run, and a slow Ubuntu mirror could take the
+    # whole timeout. Its tag must match e2e/package.json's @playwright/test
+    # (checked below). --ipc=host is what Playwright's docs ask for Chromium.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --ipc=host
     timeout-minutes: 35
     env:
       # Job level, not step level: the secrets context is rejected in a step's
@@ -36,6 +44,24 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # A @playwright/test bump without the image would download browsers the
+      # image lacks the libraries for; fail here, by name, instead.
+      - name: Check the image matches @playwright/test
+        run: |
+          want=$(node -p "require('./e2e/package.json').devDependencies['@playwright/test']")
+          grep -q "image: mcr.microsoft.com/playwright:v$want-" .github/workflows/e2e-pr.yml \
+            || { echo "e2e/package.json pins @playwright/test $want; set the job's container image to playwright:v$want-noble"; exit 1; }
+
+      # The image has no make, and the publish step reads JSON with jq. Only
+      # noble's main index is fetched (~2 MB, both are in it), not every list
+      # the image configures.
+      - name: Install make and jq
+        run: |
+          echo "deb http://archive.ubuntu.com/ubuntu noble main" > /tmp/noble-main.list
+          apt() { apt-get -o Dir::Etc::SourceList=/tmp/noble-main.list -o Dir::Etc::SourceParts=/dev/null "$@"; }
+          apt update -qq
+          apt install -y -qq --no-install-recommends make jq
 
       - uses: actions/setup-go@v5
         with:
@@ -56,14 +82,14 @@ jobs:
       - name: Run e2e
         id: tests
         continue-on-error: true
-        run: make e2e-ci
+        run: make e2e-ci PLAYWRIGHT_DEPS=
 
       - name: Run e2e, Worker reads
         id: tests-worker
         continue-on-error: true
         env:
           E2E_READS: worker
-        run: make e2e-ci
+        run: make e2e-ci PLAYWRIGHT_DEPS=
 
       - name: Upload artifacts
         if: always()
@@ -138,9 +164,13 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+        # The image has no gh, so this posts through the REST API.
         run: |
-          gh pr comment "${{ github.event.pull_request.number }}" --body \
-            "e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }}, Worker reads ${{ steps.tests-worker.outcome }}: ${{ steps.publish.outputs.url }}/worker/ (commit \`${GITHUB_SHA:0:8}\`)"
+          body="e2e ${{ steps.tests.outcome }}: ${{ steps.publish.outputs.url }}, Worker reads ${{ steps.tests-worker.outcome }}: ${{ steps.publish.outputs.url }}/worker/ (commit \`${GITHUB_SHA:0:8}\`)"
+          jq -n --arg body "$body" '{body: $body}' | curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/issues/${{ github.event.pull_request.number }}/comments" \
+            --data @- > /dev/null
 
       - name: Summary
         if: always()
