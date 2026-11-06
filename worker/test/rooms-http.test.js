@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import worker, { Identity, Paste, Room } from "../src/index.js";
+import worker, { Identity, Paste, Room, Turn } from "../src/index.js";
 import { FakeStorage, state } from "./harness.js";
 
 const APEX = "example.com";
@@ -14,7 +14,7 @@ const TOKEN = "t0ken";
 const FORWARDED = "X-Hostthis-Forwarded-Host";
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MISSING_ROOM = "22222222-2222-4222-8222-222222222222";
-const CLASSES = { IDENTITY: Identity, PASTES: Paste, ROOMS: Room };
+const CLASSES = { IDENTITY: Identity, PASTES: Paste, ROOMS: Room, TURN: Turn };
 
 // The public Worker over real Paste and Room cells in memory. Every cell
 // request is recorded with who made it, the router or a cell; a join is
@@ -265,7 +265,7 @@ test("an empty room scans to {} and a missing one to 404", async () => {
 test("a malformed room id is a 400 on every room path", async () => {
   const w = world();
   w.app();
-  for (const path of ["/api/rooms/nope", "/api/rooms/nope/key", "/api/rooms/nope/ws", "/api/rooms/nope/push/test",
+  for (const path of ["/api/rooms/nope", "/api/rooms/nope/key", "/api/rooms/nope/ws", "/api/rooms/nope/ice", "/api/rooms/nope/push/test",
     "/api/rooms/11111111-1111-3111-8111-111111111111"]) {
     for (const method of ["GET", "PUT", "POST", "DELETE"]) {
       await goError(await w.fetch(url(path), { method }), 400, "malformed room id\n\n");
@@ -872,4 +872,81 @@ test("a created room logs one line, and ordinary traffic logs none", async () =>
     assert.equal((await w.fetch(url(`/api/rooms/${id}/missing`), { headers: from })).status, 404);
   });
   assert.deepEqual(traffic.lines, []);
+});
+
+// docs/SPEC.md "TURN relay credentials".
+const STUN_ONLY = "{\"iceServers\":[{\"urls\":[\"stun:stun.cloudflare.com:3478\"]}]}\n";
+const TURN_SETTINGS = {
+  HOSTTHIS_TURN_KEY_ID: "key1",
+  HOSTTHIS_TURN_KEY_TOKEN: "key-token",
+  HOSTTHIS_TURN_ACCOUNT_ID: "acct",
+  HOSTTHIS_TURN_ANALYTICS_TOKEN: "analytics-token",
+};
+
+test("ice answers the TURN cell's document: STUN only without TURN settings", async () => {
+  const w = world();
+  w.app();
+  const id = await w.room();
+  const res = await w.fetch(url(`/api/rooms/${id}/ice`));
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("Content-Type"), "application/json; charset=utf-8");
+  assert.equal(res.headers.get("Cache-Control"), "no-store");
+  assert.equal(await res.text(), STUN_ONLY);
+  assert.deepEqual(w.calls.filter((c) => c.ns === "TURN").map((c) => [c.by, c.name, c.path]), [["router", "turn", "/turn/issue"]]);
+});
+
+test("ice carries a TURN credential and its ttl when the cell issues one", async () => {
+  const cloudflare = [];
+  const w = world({
+    ...TURN_SETTINGS,
+    TURN_FETCH: async (target, init) => {
+      cloudflare.push(target);
+      if (target.endsWith("/graphql")) {
+        return Response.json({ data: { viewer: { accounts: [{ callsTurnUsageAdaptiveGroups: [] }] } } });
+      }
+      return Response.json({
+        iceServers: [{ urls: ["turn:turn.cloudflare.com:3478?transport=udp", "turn:turn.cloudflare.com:53"], username: "u1", credential: "c1" }],
+      }, { status: 201 });
+    },
+  });
+  w.app();
+  const id = await w.room();
+  const res = await w.fetch(url(`/api/rooms/${id}/ice`));
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), {
+    iceServers: [
+      { urls: ["stun:stun.cloudflare.com:3478"] },
+      { urls: ["turn:turn.cloudflare.com:3478?transport=udp"], username: "u1", credential: "c1" },
+    ],
+    ttl: 3600,
+  });
+  assert.equal(cloudflare.length, 2);
+  const window = w.storageOf("TURN", "turn").data.get("window");
+  assert.deepEqual(window.rooms, { [`${APP}|${id}`]: 1 });
+});
+
+test("ice: an unknown app 404s, then a method other than GET is 405, then a missing room 404s", async () => {
+  const w = world();
+  await notFound(await w.fetch(url(`/api/rooms/${MISSING_ROOM}/ice`)));
+  await notFound(await w.fetch(url(`/api/rooms/${MISSING_ROOM}/ice`), { method: "POST" }));
+  w.app();
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    const res = await w.fetch(url(`/api/rooms/${MISSING_ROOM}/ice`), { method });
+    assert.equal(res.status, 405, method);
+    assert.equal(res.headers.get("Allow"), "GET");
+    assert.equal(res.headers.get("Cache-Control"), "no-store");
+  }
+  await notFound(await w.fetch(url(`/api/rooms/${MISSING_ROOM}/ice`)));
+  assert.deepEqual(w.calls.filter((c) => c.ns === "TURN"), []);
+});
+
+test("ice is not a value key, but ice/x and ice:x are", async () => {
+  const w = world();
+  w.app();
+  const id = await w.room();
+  for (const key of ["ice/x", "ice:x"]) {
+    assert.equal((await w.fetch(url(`/api/rooms/${id}/${key}`), { method: "PUT", body: "v" })).status, 204, key);
+  }
+  const scan = await (await w.fetch(url(`/api/rooms/${id}`))).json();
+  assert.deepEqual(Object.keys(scan).sort(), ["ice/x", "ice:x"]);
 });

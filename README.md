@@ -125,7 +125,15 @@ Peers connect browser to browser: data channels, audio, video, screen share.
 Signal over the room socket: send offers, answers and ICE candidates as your own
 frames, addressed with a per-tab id since every peer receives every frame. Pages
 you upload may call getUserMedia and getDisplayMedia; the browser still asks the
-visitor. Bring your own STUN/TURN servers; hostthis relays no media.
+visitor.
+
+```
+GET /api/rooms/<id>/ice      {"iceServers": [...], "ttl": 3600}
+                             pass iceServers to new RTCPeerConnection; STUN
+                             always, a TURN credential when the operator set
+                             one up and its monthly budget allows; ttl only
+                             with TURN: fetch again before it runs out
+```
 
 ## PUSH
 

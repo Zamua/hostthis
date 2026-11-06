@@ -1777,17 +1777,83 @@ knowledge base's file list, keeps the strict one,
 `camera=(), microphone=(), geolocation=(), usb=(), payment=()`: hostthis's own
 renderers never capture.
 
-**Connectivity is the app's.** ICE runs between the browsers, not through
-hostthis, and the page's `connect-src` does not govern it. The app names its
-ICE servers in `RTCPeerConnection`'s configuration: a public STUN server
-connects most peers, and peers behind symmetric NATs need a TURN relay the
-app brings. hostthis runs no STUN or TURN server and mints no TURN
-credentials. Capture needs a secure context, which a subdomain-mode
+**Connectivity.** ICE runs between the browsers, not through hostthis, and
+the page's `connect-src` does not govern it. The app names its ICE servers in
+`RTCPeerConnection`'s configuration. STUN connects most peers; peers behind
+symmetric NATs or UDP-blocking networks need a TURN relay, which hostthis
+issues per room (below) when the operator configures one. An app may also
+bring its own. Capture needs a secure context, which a subdomain-mode
 deployment over https (and `localhost` in development) is.
 
 Out of scope: a media server (SFU or MCU), recording, and server-side
-participant identity. WebRTC adds no stored state and no new route; it is the
-room relay and one response header.
+participant identity. hostthis relays media only through the operator's TURN
+provider, never through its own servers.
+
+### TURN relay credentials
+
+```text
+GET /api/rooms/<uuid>/ice   -> 200 { "iceServers": [ ... ], "ttl": 3600 }
+```
+
+The answer is an `RTCConfiguration.iceServers` list an app passes straight to
+`new RTCPeerConnection({ iceServers })`. It always holds the free STUN server
+`{ "urls": ["stun:stun.cloudflare.com:3478"] }`. When a TURN credential is
+issued it also holds one Cloudflare Realtime TURN entry (`urls`, `username`,
+`credential`) and the body carries `"ttl": 3600`, the credential's lifetime in
+seconds; without one there is no `ttl` field. The TURN `urls` are Cloudflare's
+list minus any on port 53, which browsers block. A call longer than the
+lifetime fetches the route again and hands the new list to
+`RTCPeerConnection.setConfiguration`.
+
+`ice` is a reserved path segment of the room API, carved out before the KV
+verbs exactly as `ws` is, so no value can be stored under the key `ice` (a
+push `bodyKey` naming it is refused as reserved, too); `ice/x` and `ice:x` are
+ordinary keys. The route answers GET only (405 with `Allow: GET` otherwise). A malformed UUID is 400, then an unknown
+app 404, a method other than GET 405 and an unknown room 404, in that order;
+every answer carries `Cache-Control: no-store`, and the body is the TURN
+cell's JSON followed by a newline, from either server.
+
+**Issuing is best effort.** Every way TURN can be unavailable answers the same
+200 with STUN only, so an app has one code path and the route never leaks why:
+
+- the operator has not set all four of `HOSTTHIS_TURN_KEY_ID`,
+  `HOSTTHIS_TURN_KEY_TOKEN`, `HOSTTHIS_TURN_ACCOUNT_ID` and
+  `HOSTTHIS_TURN_ANALYTICS_TOKEN` on the Worker;
+- the monthly budget is spent, or the TURN cell has no fresh reading of it
+  (below);
+- an issuing cap is reached. Per fixed UTC hour: 64 credentials per room (a
+  room's socket cap, so each participant can fetch once an hour), 512 per app
+  and 4096 in total;
+- Cloudflare refuses or does not answer the credential request within 10
+  seconds.
+
+**The budget.** `HOSTTHIS_TURN_BUDGET_GB` (decimal gigabytes, default 500,
+half of Cloudflare's 1,000 GB monthly free allowance; any non-negative number
+overrides it, and an unset or invalid value means the default) bounds the TURN
+key's egress per UTC calendar month, which is what Cloudflare bills. One TURN
+cell reads the key's month-to-date `egressBytes` from Cloudflare's GraphQL
+Analytics API (`callsTurnUsageAdaptiveGroups`, filtered by `keyId` and by
+`date_geq` the month's first day and `date_leq` today). It reads at most once
+every 30 seconds: in the issuing request when the last reading is 30 seconds
+old or older, and from its alarm every 30 seconds while any credential it
+issued is unexpired. Once none is, the alarm stops and nothing is polled. A
+reading 5 minutes old or older, or from an earlier month, is not fresh, and
+nothing is issued until a read succeeds; the alarm keeps polling meanwhile.
+When a reading reaches the budget, the cell stops issuing and revokes every
+unexpired credential it issued, so relayed calls end rather than run on
+through the month.
+
+Cloudflare does not cap spend, so the budget is approximate: usage can pass
+it by what relayed calls send between two readings plus the analytics
+pipeline's delay. The default leaves 500 GB of headroom under the free
+allowance for that. The budget covers this key only; an account that also
+uses Cloudflare's SFU shares the free allowance with it.
+
+The TURN cell holds the reading, the hour's counters and, for revocation
+only, each unexpired credential's username and expiry. Nothing records which
+room or visitor holds which credential. Both servers ask the same cell
+(`hostthisd` checks the app and room, then calls the cell's `issue` op), so
+the two answer alike by construction.
 
 ## Persistence
 
@@ -3908,6 +3974,9 @@ identity:
 - **Subnet**, one per source network: Sybil-admission rows.
 - **Feed**, one cell named `changes`: which apps changed and when (see "Change
   feed and room index").
+- **Turn**, one cell named `turn`: the TURN key's egress reading, the hour's
+  issuing counters and each unexpired credential's username and expiry (see
+  "TURN relay credentials").
 
 The deprecated `IntentLog` class remains only so the original migration stays
 resolvable. No request routes to it, but it keeps a binding (`INTENT_LOGS`):
@@ -4193,8 +4262,9 @@ path, the read flags from the parsed query, and a body it decoded, checked and
 encoded again. Neither the client's URL nor its query, headers or body reaches
 a cell, so no request can choose a cell op. Its other Worker settings are
 `HOSTTHIS_PUBLIC_SCHEME` (the push `sub`) and `HOSTTHIS_CLIENT_IP_SOURCE`
-(the room creation limit's client address, see "Quota and abuse"). With it
-unset, or naming neither `cf-connecting-ip` nor `xff-rightmost`, every direct
+(the room creation limit's client address, see "Quota and abuse"), and the
+`HOSTTHIS_TURN_*` settings (see "TURN relay credentials"). With
+`HOSTTHIS_CLIENT_IP_SOURCE` unset, or naming neither `cf-connecting-ip` nor `xff-rightmost`, every direct
 client shares one room creation bucket: requests are still served, and the
 first direct public request an isolate sees logs one warning naming the
 variable. A forwarded request carries its own client address, so it never

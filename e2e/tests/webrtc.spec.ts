@@ -25,12 +25,14 @@ async function start({ room, media }) {
     room = (await res.json()).id;
   }
   rtc.room = room;
+  // The room's ICE servers: STUN always, TURN when the operator configured it.
+  rtc.ice = await (await fetch(base + '/api/rooms/' + room + '/ice')).json();
   const local = media ? await navigator.mediaDevices.getUserMedia({ audio: true, video: true }) : null;
   const ws = new WebSocket(location.origin.replace(/^http/, 'ws') + base + '/api/rooms/' + room + '/ws');
   let pc = null;
   const send = (to, body) => ws.send(JSON.stringify({ type: 'rtc', from: me, to, ...body }));
   const connect = (peer) => {
-    pc = new RTCPeerConnection({ iceServers: [] });
+    pc = new RTCPeerConnection({ iceServers: rtc.ice.iceServers });
     pc.onicecandidate = (e) => e.candidate && send(peer, { candidate: e.candidate.toJSON() });
     pc.onconnectionstatechange = () => { rtc.state = pc.connectionState; log('state ' + pc.connectionState); };
     pc.ontrack = (e) => {
@@ -108,6 +110,10 @@ const channelOpen = (p: Page) => p.evaluate(() => (window as any).rtc.channel?.r
 test('two visitors open a data channel signaled over the room relay', async ({ server, browser }) => {
   const context = await browser.newContext();
   const { a, b, connected } = await call(server, context, false);
+  // The suite's Worker has no TURN settings: STUN only, and no ttl.
+  expect(await a.page.evaluate(() => (window as any).rtc.ice)).toEqual({
+    iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }],
+  });
   if (connected) {
     for (const tab of [a, b]) await expect.poll(() => channelOpen(tab.page)).toBe('open');
     await a.page.evaluate(() => (window as any).rtc.channel.send('hello from a'));

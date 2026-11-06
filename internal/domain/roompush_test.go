@@ -233,12 +233,12 @@ func TestPushItemIsRecurringAndWhenTime(t *testing.T) {
 }
 
 func TestValidateRoomKey_ReservedKeys(t *testing.T) {
-	for _, key := range []string{"ws", "push", "push/", "push/subscriptions", "push/x/y"} {
+	for _, key := range []string{"ws", "ice", "push", "push/", "push/subscriptions", "push/x/y"} {
 		if err := ValidateRoomKey(key); !errors.Is(err, ErrRoomKeyReserved) {
 			t.Errorf("%q: err = %v, want ErrRoomKeyReserved", key, err)
 		}
 	}
-	for _, key := range []string{"push:2026-09-06", "pushy", "wsx", "ws/", "x/push", "PUSH"} {
+	for _, key := range []string{"push:2026-09-06", "pushy", "wsx", "ws/", "x/push", "PUSH", "ice/x", "ice:x", "ICE"} {
 		if err := ValidateRoomKey(key); err != nil {
 			t.Errorf("%q: err = %v, want nil", key, err)
 		}
