@@ -35,6 +35,10 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.64.1-noble
       options: --ipc=host
     timeout-minutes: 35
+    # A container job's steps default to sh; the steps below use bash syntax.
+    defaults:
+      run:
+        shell: bash
     env:
       # Job level, not step level: the secrets context is rejected in a step's
       # `if`, and a step's own env block is not visible to its own condition.
@@ -44,6 +48,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The checkout belongs to the runner's user and the container runs as
+      # root, so git refuses the tree as dubiously owned unless told otherwise,
+      # and `go build` fails reading its VCS status.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       # A @playwright/test bump without the image would download browsers the
       # image lacks the libraries for; fail here, by name, instead.
