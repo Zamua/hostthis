@@ -246,6 +246,7 @@ func main() {
 		// /api/rooms.
 		Rooms:       rooms,
 		RoomPush:    service.NewRoomPush(roomRepo),
+		RoomICE:     service.NewRoomICE(roomRepo),
 		Solid:       metadata.Solid,
 		ClientIP:    clientIP,
 		RoomsAccess: roomsAccess,

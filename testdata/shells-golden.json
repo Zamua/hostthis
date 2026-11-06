@@ -501,7 +501,7 @@
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"key-setup-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -532,7 +532,7 @@
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -548,7 +548,7 @@
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -564,7 +564,7 @@
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -580,7 +580,7 @@
       "Content-Type": "application/json; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -596,7 +596,7 @@
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -612,7 +612,7 @@
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -628,7 +628,7 @@
       "Content-Type": "text/markdown; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -644,7 +644,7 @@
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -660,7 +660,7 @@
       "Content-Type": "application/pdf",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },
@@ -676,7 +676,7 @@
       "Content-Type": "text/plain; charset=utf-8",
       "Etag": "\"uploads/a/0-p895c9e9e\"",
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
-      "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
+      "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
       "X-Frame-Options": "DENY"
     },

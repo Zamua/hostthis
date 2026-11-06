@@ -2,6 +2,7 @@
 // binds by name (wrangler.jsonc durable_objects).
 import { abuseRoute } from "./abuse-routes.js";
 import { BLOB_PATH, handleBlob } from "./blobs.js";
+import { TURN_CELL } from "./cells/turn.js";
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
@@ -14,6 +15,7 @@ export { IntentLog } from "./cells/intentlog.js";
 export { Paste } from "./cells/paste.js";
 export { Room } from "./cells/room.js";
 export { Subnet } from "./cells/subnet.js";
+export { Turn } from "./cells/turn.js";
 
 const BEARER = /^bearer +/i;
 
@@ -99,6 +101,10 @@ const internalRouter = {
     }
     if (url.pathname.startsWith("/abuse/")) {
       return abuseRoute(request, env, ctx, url, "operator");
+    }
+    if (url.pathname.startsWith("/turn/")) {
+      // One cell issues every credential, so its caps and budget are global.
+      return env.TURN.get(env.TURN.idFromName(TURN_CELL)).fetch(request);
     }
     if (url.pathname.startsWith("/denylist/")) {
       // One cell holds the whole list.

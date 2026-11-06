@@ -65,6 +65,8 @@ test("rooms routes split as hostthisd's handler does", () => {
     [`/api/rooms/${UUID}/a/b/c`, { kind: "value", id: UUID, key: "a/b/c" }],
     [`/api/rooms/${UUID}/ws`, { kind: "ws", id: UUID }],
     [`/api/rooms/${UUID}/ws/x`, { kind: "value", id: UUID, key: "ws/x" }],
+    [`/api/rooms/${UUID}/ice`, { kind: "ice", id: UUID }],
+    [`/api/rooms/${UUID}/ice/x`, { kind: "value", id: UUID, key: "ice/x" }],
     [`/api/rooms/${UUID}/WS`, { kind: "value", id: UUID, key: "WS" }],
     [`/api/rooms/${UUID}/push`, { kind: "push", id: UUID, sub: "" }],
     [`/api/rooms/${UUID}/push/test`, { kind: "push", id: UUID, sub: "/test" }],
@@ -90,7 +92,7 @@ test("keys are 1 to 256 bytes and never a reserved segment", () => {
   // Bytes, not characters: 86 three-byte characters are 258 bytes.
   assert.equal(roomKeyProblem(byteString("€".repeat(86))), "room key is too long");
   assert.equal(roomKeyProblem(""), "room key is empty");
-  for (const key of ["ws", "push", "push/x"]) {
+  for (const key of ["ws", "ice", "push", "push/x"]) {
     assert.equal(roomKeyProblem(key), "room key is reserved", key);
   }
   for (const key of ["push:x", "pushy", "wss", "x/push"]) {
