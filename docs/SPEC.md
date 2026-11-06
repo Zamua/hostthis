@@ -1827,22 +1827,25 @@ cell's JSON followed by a newline, from either server.
 - Cloudflare refuses or does not answer the credential request within 10
   seconds.
 
-**The budget.** `HOSTTHIS_TURN_BUDGET_GB` (decimal gigabytes, default 900,
-inside Cloudflare's 1,000 GB monthly free allowance) bounds the TURN key's
-egress per UTC calendar month, which is what Cloudflare bills. One TURN cell
-reads the key's month-to-date `egressBytes` from Cloudflare's GraphQL
+**The budget.** `HOSTTHIS_TURN_BUDGET_GB` (decimal gigabytes, default 500,
+half of Cloudflare's 1,000 GB monthly free allowance; any non-negative number
+overrides it, and an unset or invalid value means the default) bounds the TURN
+key's egress per UTC calendar month, which is what Cloudflare bills. One TURN
+cell reads the key's month-to-date `egressBytes` from Cloudflare's GraphQL
 Analytics API (`callsTurnUsageAdaptiveGroups`, filtered by `keyId` and by
 `date_geq` the month's first day and `date_leq` today). It reads at most once
-every 5 minutes: in the issuing request when the last reading is older than
-that, and from its alarm every 5 minutes while any credential it issued is
-unexpired. A reading older than 30 minutes, or from an earlier month, is not
-fresh, and nothing is issued until a read succeeds. When a reading reaches the
-budget, the cell stops issuing and revokes every unexpired credential it
-issued, so relayed calls end rather than run on through the month.
+every 30 seconds: in the issuing request when the last reading is 30 seconds
+old or older, and from its alarm every 30 seconds while any credential it
+issued is unexpired. Once none is, the alarm stops and nothing is polled. A
+reading 5 minutes old or older, or from an earlier month, is not fresh, and
+nothing is issued until a read succeeds; the alarm keeps polling meanwhile.
+When a reading reaches the budget, the cell stops issuing and revokes every
+unexpired credential it issued, so relayed calls end rather than run on
+through the month.
 
 Cloudflare does not cap spend, so the budget is approximate: usage can pass
 it by what relayed calls send between two readings plus the analytics
-pipeline's delay. The default leaves 100 GB of headroom under the free
+pipeline's delay. The default leaves 500 GB of headroom under the free
 allowance for that. The budget covers this key only; an account that also
 uses Cloudflare's SFU shares the free allowance with it.
 

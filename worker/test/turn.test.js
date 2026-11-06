@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  issuedKey, monthOf, READ_EVERY_MS, STUN_SERVER, Turn, TURN_CAPS, TURN_TTL_S, turnConfig,
+  DEFAULT_BUDGET_GB, FRESH_FOR_MS, issuedKey, monthOf, READ_EVERY_MS, STUN_SERVER, Turn, TURN_CAPS, TURN_TTL_S, turnConfig,
 } from "../src/cells/turn.js";
 import { FakeStorage, state } from "./harness.js";
 
@@ -105,7 +105,8 @@ test("a configured cell under budget reads usage, mints, and answers STUN plus T
   assert.equal(h.storage.alarm, NOW + READ_EVERY_MS);
 });
 
-test("usage is read at most once every 5 minutes, and again in a new month", async () => {
+test("usage is read at most once every 30 seconds, and again in a new month", async () => {
+  assert.equal(READ_EVERY_MS, 30 * 1000);
   const h = harness();
   await h.issue();
   await h.issue({ now: NOW + READ_EVERY_MS - 1 });
@@ -140,20 +141,29 @@ test("at the budget nothing is issued and every unexpired credential is revoked"
   assert.equal(h.callsTo("/generate-ice-servers").length, 2);
 });
 
-test("the budget defaults to 900 GB and a zero budget issues nothing", async () => {
-  assert.equal(turnConfig(CONFIG).budgetBytes, 900e9);
-  assert.equal(turnConfig({ ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: "nope" }).budgetBytes, 900e9);
+test("the budget defaults to 500 GB, an operator may set another, and a zero budget issues nothing", async () => {
+  assert.equal(DEFAULT_BUDGET_GB, 500);
+  assert.equal(turnConfig(CONFIG).budgetBytes, 500e9);
+  for (const invalid of [undefined, "nope", "-1", "", "  ", "Infinity"]) {
+    assert.equal(turnConfig({ ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: invalid }).budgetBytes, 500e9, invalid);
+  }
   assert.equal(turnConfig({ ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: "2.5" }).budgetBytes, 2.5e9);
+  assert.equal(turnConfig({ ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: "900" }).budgetBytes, 900e9);
+  assert.equal(turnConfig({ ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: 250 }).budgetBytes, 250e9);
 
-  const under = harness({ egress: 899e9 });
+  const under = harness({ egress: 499e9 });
   assert.equal((await under.issue()).body.iceServers.length, 2);
-  const over = harness({ egress: 900e9 });
+  const over = harness({ egress: 500e9 });
   assert.deepStrictEqual((await over.issue()).body, { iceServers: [STUN_SERVER] });
   const zero = harness({ env: { ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: "0" } });
   assert.deepStrictEqual((await zero.issue()).body, { iceServers: [STUN_SERVER] });
+  // Configured above the default, 500 GB used is still under budget.
+  const raised = harness({ env: { ...CONFIG, HOSTTHIS_TURN_BUDGET_GB: "900" }, egress: 500e9 });
+  assert.equal((await raised.issue()).body.iceServers.length, 2);
 });
 
-test("without a reading, or with one older than 30 minutes, nothing is issued", async () => {
+test("without a reading, or with one 5 minutes old or older, nothing is issued", async () => {
+  assert.equal(FRESH_FOR_MS, 5 * 60 * 1000);
   const h = harness({ fail: new Set(["read"]) });
   assert.deepStrictEqual((await h.issue()).body, { iceServers: [STUN_SERVER] });
   assert.equal(h.callsTo("/generate-ice-servers").length, 0);
@@ -161,10 +171,47 @@ test("without a reading, or with one older than 30 minutes, nothing is issued", 
   h.cf.fail.delete("read");
   assert.equal((await h.issue()).body.iceServers.length, 2);
 
-  // Analytics goes down: the last reading serves until it is 30 minutes old.
+  // Analytics goes down: the last reading serves until it is 5 minutes old,
+  // each request trying a fresh read meanwhile.
   h.cf.fail.add("read");
-  assert.equal((await h.issue({ now: NOW + 29 * 60 * 1000 })).body.iceServers.length, 2);
-  assert.deepStrictEqual((await h.issue({ now: NOW + 30 * 60 * 1000 })).body, { iceServers: [STUN_SERVER] });
+  const reads = h.callsTo("/graphql").length;
+  assert.equal((await h.issue({ now: NOW + FRESH_FOR_MS - 1 })).body.iceServers.length, 2);
+  assert.equal(h.callsTo("/graphql").length, reads + 1);
+  assert.deepStrictEqual((await h.issue({ now: NOW + FRESH_FOR_MS })).body, { iceServers: [STUN_SERVER] });
+  assert.equal(h.callsTo("/graphql").length, reads + 2);
+
+  // A read that succeeds again makes it fresh.
+  h.cf.fail.delete("read");
+  assert.equal((await h.issue({ now: NOW + FRESH_FOR_MS + 1 })).body.iceServers.length, 2);
+});
+
+test("while credentials are live the alarm polls every 30 seconds, through a stale reading, until one is fresh", async () => {
+  const h = harness();
+  await h.issue();
+  const reads = () => h.callsTo("/graphql").length;
+  assert.equal(reads(), 1);
+  assert.equal(h.storage.alarm, NOW + 30 * 1000);
+
+  // Analytics goes down for 6 minutes: one read per 30-second alarm, the alarm
+  // re-armed each time, and nothing issued once the last reading is stale.
+  h.cf.fail.add("read");
+  let now = NOW;
+  for (let i = 1; i <= 12; i++) {
+    now = NOW + i * READ_EVERY_MS;
+    await h.cell.alarm({ now });
+    assert.equal(reads(), 1 + i, `read ${i}`);
+    assert.equal(h.storage.alarm, now + READ_EVERY_MS, `re-armed after read ${i}`);
+  }
+  assert.deepStrictEqual((await h.issue({ now })).body, { iceServers: [STUN_SERVER] });
+
+  // Analytics recovers: the next alarm's reading is fresh, and issuing resumes
+  // without another read.
+  h.cf.fail.delete("read");
+  now += READ_EVERY_MS;
+  await h.cell.alarm({ now });
+  const before = reads();
+  assert.equal((await h.issue({ now: now + READ_EVERY_MS - 1 })).body.iceServers.length, 2);
+  assert.equal(reads(), before);
 });
 
 test("a refused, unreachable or malformed credential request answers STUN only and counts nothing", async () => {

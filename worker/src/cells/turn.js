@@ -9,10 +9,10 @@ import { dispatch, mutation, requireShape } from "./ops.js";
 export const TURN_CELL = "turn";
 export const STUN_SERVER = Object.freeze({ urls: ["stun:stun.cloudflare.com:3478"] });
 export const TURN_TTL_S = 3600;
-export const READ_EVERY_MS = 5 * 60 * 1000;
-export const FRESH_FOR_MS = 30 * 60 * 1000;
+export const READ_EVERY_MS = 30 * 1000;
+export const FRESH_FOR_MS = 5 * 60 * 1000;
 export const TURN_CAPS = Object.freeze({ room: 64, app: 512, total: 4096 });
-export const DEFAULT_BUDGET_GB = 900;
+export const DEFAULT_BUDGET_GB = 500;
 export const CALL_TIMEOUT_MS = 10 * 1000;
 
 const HOUR_MS = 3600 * 1000;
@@ -34,8 +34,12 @@ export function turnConfig(env) {
   if (![keyId, keyToken, accountId, analyticsToken].every((v) => typeof v === "string" && v !== "")) {
     return null;
   }
-  const gb = Number(env.HOSTTHIS_TURN_BUDGET_GB);
-  const budgetGB = env.HOSTTHIS_TURN_BUDGET_GB !== undefined && Number.isFinite(gb) && gb >= 0 ? gb : DEFAULT_BUDGET_GB;
+  // A string or a number (wrangler vars may be either); unset, blank or not a
+  // non-negative number is the default. Number("") is 0, so a blank setting
+  // must not read as a zero budget.
+  const raw = env.HOSTTHIS_TURN_BUDGET_GB;
+  const gb = typeof raw === "number" || (typeof raw === "string" && raw.trim() !== "") ? Number(raw) : NaN;
+  const budgetGB = Number.isFinite(gb) && gb >= 0 ? gb : DEFAULT_BUDGET_GB;
   return { keyId, keyToken, accountId, analyticsToken, budgetBytes: budgetGB * 1e9 };
 }
 
@@ -274,7 +278,7 @@ export class Turn {
     }
   }
 
-  // Every 5 minutes while a credential it issued is unexpired: read the
+  // Every 30 seconds while a credential it issued is unexpired: read the
   // budget, revoke on overrun, and forget expired credentials.
   async alarm(info = {}) {
     const now = info.now ?? this.now();
