@@ -81,6 +81,7 @@ var (
 	opSubnetSnapshot = route{http.MethodGet, "/subnet/snapshot", bySubnet}
 
 	opDenylistList = route{http.MethodGet, "/denylist/list", singleton}
+	opTurnIssue    = route{http.MethodPost, "/turn/issue", singleton}
 
 	opRoomCreate          = route{http.MethodPost, "/room/create", byRoom}
 	opRoomMeta            = route{http.MethodGet, "/room/meta", byRoom}

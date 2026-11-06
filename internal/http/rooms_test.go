@@ -40,6 +40,7 @@ func buildRoomServer(t *testing.T) *Server {
 		ApexDomain: "hostthis.test",
 		Rooms:      service.NewRooms(repo),
 		RoomPush:   service.NewRoomPush(repo),
+		RoomICE:    service.NewRoomICE(repo),
 		Sites:      liveAppSiteReader{},
 	}
 }

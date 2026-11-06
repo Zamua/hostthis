@@ -4,6 +4,7 @@
 // built here from parsed values: nothing from the client's URL, query,
 // headers or body is passed on as it came.
 
+import { TURN_CELL } from "../cells/turn.js";
 import {
   APP_MAX_ROOM_BYTES,
   APP_MAX_ROOMS,
@@ -174,9 +175,39 @@ async function serveRoute(request, env, app, route, client) {
       return joinRoom(request, env, app, route.id, client);
     case "push":
       return roomPush(request, env, app, route);
+    case "ice":
+      return roomICE(method, env, app, route.id);
     default:
       return roomValue(request, env, app.room(route.id), route.key);
   }
+}
+
+// GET /api/rooms/<uuid>/ice: the TURN cell's iceServers for one participant
+// (docs/SPEC.md "TURN relay credentials"), its JSON passed on as it came.
+async function roomICE(method, env, app, id) {
+  if (!(await app.exists())) {
+    return notFound();
+  }
+  if (method !== "GET") {
+    return methodNotAllowed("GET");
+  }
+  const meta = await ask(app.room(id), "/room/meta");
+  if (meta.status === 404) {
+    return notFound();
+  }
+  if (meta.status !== 200) {
+    return internalError();
+  }
+  const res = await env.TURN.get(env.TURN.idFromName(TURN_CELL)).fetch(new Request("https://cell/turn/issue", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ app: app.slug, now: Date.now(), room: id }),
+  }));
+  if (res.status !== 200) {
+    await res.body?.cancel();
+    return internalError();
+  }
+  return goJSON(200, await res.text());
 }
 
 async function createRoom(request, env, app, client) {

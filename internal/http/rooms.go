@@ -121,6 +121,11 @@ func (s *Server) handleRoomsAPI(w http.ResponseWriter, r *http.Request, appSlug 
 		s.handleRoomWS(w, r, appSlug, id)
 		return true
 	}
+	// "ice" hands out the room's WebRTC ICE servers, carved out the same way.
+	if key == domain.RoomKeyICE {
+		s.handleRoomICE(w, r, appSlug, id)
+		return true
+	}
 	// "push" and everything under "push/" is the push surface, carved out the
 	// same way.
 	if sub, ok := roomPushSubpath(key); ok {

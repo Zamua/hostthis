@@ -160,13 +160,14 @@ var (
 // than data (the relay upgrade, the push surface), so no value may live there.
 const (
 	RoomKeyWS   = "ws"
+	RoomKeyICE  = "ice"
 	RoomKeyPush = "push"
 )
 
 // IsReservedRoomKey reports whether key is "ws", "push", or under "push/".
 // Keys of other shapes ("push:2026-09-06", "pushy") are ordinary data.
 func IsReservedRoomKey(key string) bool {
-	return key == RoomKeyWS || key == RoomKeyPush || strings.HasPrefix(key, RoomKeyPush+"/")
+	return key == RoomKeyWS || key == RoomKeyICE || key == RoomKeyPush || strings.HasPrefix(key, RoomKeyPush+"/")
 }
 
 // ValidateRoomKey checks a key against the empty, length, UTF-8 and reserved

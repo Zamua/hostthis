@@ -172,6 +172,7 @@ func testRooms(t *testing.T, w *world) {
 	})
 
 	t.Run("push", func(t *testing.T) { testPush(t, w, host, never, a) })
+	t.Run("ice", func(t *testing.T) { testICE(t, w, host, never, a) })
 
 	if w.cell == nil {
 		return
@@ -247,6 +248,23 @@ func subscription(endpoint string) string {
 	point := append([]byte{4}, bytes.Repeat([]byte{7}, 64)...)
 	return fmt.Sprintf(`{"endpoint":%q,"keys":{"p256dh":%q,"auth":%q}}`, endpoint,
 		base64.RawURLEncoding.EncodeToString(point), base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{9}, 16)))
+}
+
+// testICE holds both servers to one answer on the TURN route (docs/SPEC.md
+// "TURN relay credentials"). The runtime has no TURN settings, so a live room
+// answers the TURN cell's STUN-only document.
+func testICE(t *testing.T, w *world, host, never, room string) {
+	missing := domain.NewRoomID().String()
+	for _, target := range []string{"/api/rooms/" + room + "/ice", "/api/rooms/" + missing + "/ice", "/api/rooms/nope/ice"} {
+		for _, h := range []string{host, never} {
+			for _, m := range []string{"GET", "HEAD", "POST", "PUT", "DELETE"} {
+				w.check(t, request{method: m, host: h, target: target})
+			}
+		}
+	}
+	for _, key := range []string{"ice/x", "ice:x"} {
+		w.check(t, request{method: "PUT", host: host, target: "/api/rooms/" + room + "/" + key, body: []byte("v")})
+	}
 }
 
 func testPush(t *testing.T, w *world, host, never, room string) {
