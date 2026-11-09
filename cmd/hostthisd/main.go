@@ -178,6 +178,10 @@ func main() {
 	// verb and deploy services stay cache-unaware (SPEC "Active invalidation:
 	// CachePurger"). Noop unless a CDN is configured.
 	cachePurger, purgerShutdown := buildCachePurger(logger, *apexDomain, *urlMode)
+	cdnTTL, err := parseCDNTTL(os.Getenv("HOSTTHIS_CDN_TTL"), cachePurger)
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
 	siteDeployer := service.NewSiteCacheInvalidating(deploySvc, cachePurger)
 
@@ -239,6 +243,7 @@ func main() {
 		LandingHTML: landing,
 		AgentNotes:  notes,
 		ApexDomain:  *apexDomain,
+		CDNTTL:      cdnTTL,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 		Logf:        logger.Printf,
 		Sites:       siteRepo,
@@ -411,6 +416,23 @@ func buildCachePurger(logger *log.Logger, apex, mode string) (service.CachePurge
 		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
 		return nil, nil
 	}
+}
+
+// parseCDNTTL reads how long a CDN may keep a site file without asking. A CDN
+// entry is only recallable by a purge, so a TTL with no purging backend is
+// refused rather than left to serve stale files.
+func parseCDNTTL(raw string, purger service.CachePurger) (time.Duration, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil || ttl < 0 {
+		return 0, fmt.Errorf("HOSTTHIS_CDN_TTL=%q: want a non-negative duration", raw)
+	}
+	if _, noop := purger.(cache.Noop); noop && ttl > 0 {
+		return 0, errors.New("HOSTTHIS_CDN_TTL needs a purging HOSTTHIS_CACHE_BACKEND")
+	}
+	return ttl, nil
 }
 
 // buildURL returns the URL emitter for a scheme, mode and apex. Subdomain mode
