@@ -4494,6 +4494,23 @@ tags gets the full response whatever its `If-Modified-Since`. An empty header
 counts as absent. The pending and failed pages are `no-store` (see "Paste
 lifecycle status").
 
+A site file's name is never taken as proof that its bytes are fixed: a name
+that looks content-hashed can carry different bytes after a redeploy, and a
+browser's stored copy cannot be recalled.
+
+**CDN freshness.** `HOSTTHIS_CDN_TTL` (a duration, default off) adds
+`CDN-Cache-Control: public, max-age=<seconds>` (RFC 9213) to a site file's
+response, on a 200 and a 304 alike, when its decoded size is known and at most
+8 MiB. A CDN then answers that file, and its browsers' revalidations, without
+asking the origin; browsers keep `public, no-cache`. The entry stays
+recallable: every write that changes what a slug serves purges its host (see
+"Active invalidation"), and so does a quarantine, an owner ban and a delete, so
+a reader sees a change within the purge bound. The TTL bounds what a purge
+misses: a failed purge, or a fill still running after a write's second purge,
+15 seconds on, which the size limit makes unlikely. An error or a 416 never
+carries the header. `hostthisd` refuses to start with a TTL and no purging backend. The
+Worker's public surface has its own edge cache and does not set this header.
+
 The versioned renderer assets under `/_hostthis/` are
 `public, max-age=31536000, immutable`: their URLs carry the shell version.
 
@@ -5138,6 +5155,7 @@ file). Defaults in parens:
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
                          / HOSTTHIS_CF_PURGE_TOKEN          CF token (Cache:Purge scope only)       (required if cloudflare)
                          / HOSTTHIS_CF_ZONE_ID              CF zone id for the apex                 (required if cloudflare)
+                         / HOSTTHIS_CDN_TTL                 CDN-only freshness of small site files  (off; needs a purging backend)
 
 # Admission and screening
                          / HOSTTHIS_SSH_ALLOW               keys/CIDRs a private instance admits    (unset: public)
