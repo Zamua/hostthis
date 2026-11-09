@@ -56,6 +56,11 @@ type Server struct {
 	// AgentNotes is /llms.txt (and /AGENTS.md) beside the landing page; nil 404s.
 	AgentNotes []byte
 	ApexDomain string // e.g. "hostthis.dev"; used to peel slug subdomains
+	// CDNTTL, when positive, lets a CDN answer small site files for this long
+	// without asking this server (docs/SPEC.md "Cache-Control posture").
+	// Browsers still revalidate. Only a deployment whose writes purge that CDN
+	// may set it.
+	CDNTTL time.Duration
 	// Color labels the replica in blue/green deploys, echoed in the
 	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
@@ -466,6 +471,7 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 	setSandboxHeaders(h)
 	h.Set("Permissions-Policy", storedPermissionsPolicy)
 	h.Set("Cache-Control", contentCacheControl)
+	s.setCDNCacheControl(h, entry)
 	if notModified(w, r, storedETag(entry.Validator()), updatedAt) {
 		return
 	}
@@ -475,6 +481,20 @@ func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug 
 		ct = "application/octet-stream"
 	}
 	s.streamEntry(w, r, slug, entry, ct, "site", "file")
+}
+
+// cdnCacheMaxBytes is the largest site file a CDN may keep for CDNTTL. A fill
+// should end inside the 15 seconds between a write's two purges: one that ends
+// later can store the old bytes after both, until the TTL ends.
+const cdnCacheMaxBytes = 8 << 20
+
+// setCDNCacheControl gives a site file the CDN-only freshness of RFC 9213. A
+// file of unknown size gets none.
+func (s *Server) setCDNCacheControl(h http.Header, entry domain.ManifestEntry) {
+	if s.CDNTTL <= 0 || entry.DecodedSize <= 0 || entry.DecodedSize > cdnCacheMaxBytes {
+		return
+	}
+	h.Set("CDN-Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.CDNTTL.Seconds())))
 }
 
 // streamBufPool holds the copy buffers of streamEntry.
@@ -508,6 +528,7 @@ func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain
 		}
 		switch verdict {
 		case domain.RangeUnsatisfiable:
+			h.Del("CDN-Cache-Control")
 			h.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
 			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
 			return
@@ -641,6 +662,7 @@ func setSandboxHeaders(h http.Header) {
 // contentHeaders are the headers a content response sets before it can still
 // fail.
 var contentHeaders = []string{
+	"CDN-Cache-Control",
 	"Accept-Ranges", "Cache-Control", "Content-Length", "Content-Range", "Content-Security-Policy", "ETag",
 	"Last-Modified", "Permissions-Policy", "Referrer-Policy", "X-Frame-Options",
 }

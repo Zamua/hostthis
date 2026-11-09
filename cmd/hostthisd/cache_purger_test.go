@@ -10,8 +10,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/cache"
+	"github.com/Zamua/hostthis/internal/service"
 )
 
 type purgeRecorder struct {
@@ -62,5 +64,32 @@ func TestBuildCachePurgerSendsCloudflarePurges(t *testing.T) {
 	}
 	if err := purger.PurgePaste("abcd2345"); !errors.Is(err, cache.ErrClosed) {
 		t.Fatalf("purge after shutdown = %v, want ErrClosed", err)
+	}
+}
+
+func TestParseCDNTTL(t *testing.T) {
+	purging := cache.NewRepurging(cache.Noop{}, time.Hour)
+	t.Cleanup(func() { _ = purging.Shutdown(context.Background()) })
+	cases := []struct {
+		name    string
+		raw     string
+		purger  service.CachePurger
+		want    time.Duration
+		wantErr bool
+	}{
+		{"unset", "", cache.Noop{}, 0, false},
+		{"set with a purger", "1h", purging, time.Hour, false},
+		{"a TTL nothing can purge", "1h", cache.Noop{}, 0, true},
+		{"zero without a purger", "0s", cache.Noop{}, 0, false},
+		{"not a duration", "soon", purging, 0, true},
+		{"negative", "-1h", purging, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := parseCDNTTL(c.raw, c.purger)
+			if got != c.want || (err != nil) != c.wantErr {
+				t.Fatalf("got %v, %v; want %v, error %v", got, err, c.want, c.wantErr)
+			}
+		})
 	}
 }
