@@ -648,7 +648,7 @@ func storedETag(validator string) string {
 
 var sandboxTag = func() string {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(sandboxPolicy))
+	_, _ = h.Write([]byte(sandboxPolicy + "\n" + robotsTag))
 	return fmt.Sprintf("%08x", h.Sum32())
 }()
 

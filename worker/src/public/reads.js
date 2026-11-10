@@ -24,12 +24,14 @@ const HTML = "text/html; charset=utf-8";
 // metadata addresses), and forms stay on their own origin.
 const SANDBOX_POLICY = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'";
 
-// FNV-1a over the policy, as hostthisd computes it: a stored file's ETag
-// carries it, so a header change gives every cached copy a new validator
-// (a 304 never carries these headers, so it could not refresh them).
+const ROBOTS_TAG = "noindex, nofollow";
+
+// FNV-1a over the policy and the robots rule, as hostthisd computes it: a
+// stored file's ETag carries it, so a header change gives every cached copy a
+// new validator (a cache does not refresh a stored copy's headers from a 304).
 const SANDBOX_TAG = (() => {
   let h = 0x811c9dc5;
-  for (const b of new TextEncoder().encode(SANDBOX_POLICY)) {
+  for (const b of new TextEncoder().encode(`${SANDBOX_POLICY}\n${ROBOTS_TAG}`)) {
     h = Math.imul(h ^ b, 0x01000193) >>> 0;
   }
   return h.toString(16).padStart(8, "0");
@@ -41,7 +43,7 @@ export function storedETag(validator) {
 }
 
 function sandbox() {
-  return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow" };
+  return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "X-Robots-Tag": ROBOTS_TAG };
 }
 
 function warn(slug, cause) {
