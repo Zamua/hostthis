@@ -392,3 +392,36 @@ func TestPushHTTP_ReservedKeys(t *testing.T) {
 		t.Fatalf("scan = %v, want the 2 data keys only", scan)
 	}
 }
+
+// An oversize body is refused over a real HTTP/1 connection, and the server
+// keeps answering afterwards.
+func TestPushHTTP_OversizeBodyIs400(t *testing.T) {
+	srv := buildRoomServer(t)
+	const slug = "appz2345"
+	id := createRoomID(t, srv, slug)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	do := func(method string, body string) *http.Response {
+		t.Helper()
+		r, err := http.NewRequest(method, ts.URL+"/api/rooms/"+id+"/push/subscriptions", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Host = slug + ".hostthis.test"
+		resp, err := ts.Client().Do(r)
+		if err != nil {
+			t.Fatalf("%s: %v", method, err)
+		}
+		t.Cleanup(func() { _ = resp.Body.Close() })
+		return resp
+	}
+
+	big := `{"endpoint":"` + strings.Repeat("a", 4*pushMaxBodyBytes) + `"}`
+	if resp := do(http.MethodPut, big); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversize put: code %d, want 400", resp.StatusCode)
+	}
+	if resp := do(http.MethodGet, ""); resp.StatusCode != http.StatusOK {
+		t.Fatalf("list after oversize put: code %d, want 200", resp.StatusCode)
+	}
+}
