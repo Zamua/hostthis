@@ -4821,8 +4821,8 @@ stricter policy (`form-action 'none'`) must not be replaced by it.
 
 Because a 304 cannot refresh them, those headers are folded into the
 validator instead: a stored file's ETag is its object validator plus
-`-p<8 hex>`, an FNV-1a hash of the policy text, computed alike by both
-servers. When the policy changes, every cached copy's validator stops
+`-p<8 hex>`, an FNV-1a hash of the policy text, a newline and the
+`X-Robots-Tag` value, computed alike by both servers. When the policy changes, every cached copy's validator stops
 matching, so the next revalidation answers 200 with the new headers rather
 than a 304 that would keep the old ones.
 
