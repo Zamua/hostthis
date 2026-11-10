@@ -56,6 +56,7 @@ func benchServer(b *testing.B, blobs BlobReader, key string, updatedAt time.Time
 		UpdatedAt: updatedAt,
 	}
 	srv := &Server{
+		PathMode:   true,
 		Pastes:     stubPasteReader{p: paste},
 		Blobs:      blobs,
 		ApexDomain: "paste.test",

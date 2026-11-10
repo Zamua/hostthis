@@ -50,6 +50,7 @@ func buildSiteServer(t *testing.T) *Server {
 		UpdatedAt: now,
 	}
 	return &Server{
+		PathMode:   true,
 		ApexDomain: "paste.test",
 		Sites:      stubSiteReader{s: site},
 		Blobs: stubBlobMap{m: map[string][]byte{
@@ -201,6 +202,7 @@ func TestSite_FallsThroughToPasteWhenNoSite(t *testing.T) {
 		Slug: "abc23456", Identity: "key:test", Kind: domain.KindHTML,
 		Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "key-p"}), Size: 5, UpdatedAt: now}
 	srv := &Server{
+		PathMode:   true,
 		ApexDomain: "paste.test",
 		Pastes:     stubPasteReader{p: p},
 		Sites:      stubSiteReader{s: domain.Site{Slug: "zzzzzzzz"}}, // different slug
@@ -225,6 +227,7 @@ func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
 	m.Add("app.css", domain.ManifestEntry{Key: "key-css", Size: 3, ContentType: "text/css"})
 
 	srv := &Server{
+		PathMode:   true,
 		ApexDomain: "paste.test",
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abcd2345", Identity: "key:test",
@@ -258,6 +261,7 @@ func TestArtifact_DirectoryServesFromHeadManifest(t *testing.T) {
 // inside it.
 func TestArtifact_DocumentRejectsDeepPaths(t *testing.T) {
 	srv := &Server{
+		PathMode:   true,
 		ApexDomain: "paste.test",
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "wxyz6789", Identity: "key:test", Kind: domain.KindHTML,

@@ -18,6 +18,7 @@ func TestPermissionsPolicy_StoredBytesMayCapture(t *testing.T) {
 	pasteServer := func(kind domain.ContentKind, body string) *Server {
 		const key = "uploads/u1/0"
 		return &Server{
+			PathMode: true,
 			Pastes: stubPasteReader{p: domain.Paste{
 				Slug: "abc23456", Kind: kind, UpdatedAt: time.Now().UTC(),
 				Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key}),

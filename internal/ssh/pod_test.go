@@ -104,7 +104,7 @@ func startPodStack(t *testing.T, acp, register bool, storages ...string) *podSta
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpSrv := &httpapi.Server{Pastes: repo, Blobs: blobUnit, Sites: sites, ApexDomain: "localhost", Solid: solid}
+	httpSrv := &httpapi.Server{PathMode: true, Pastes: repo, Blobs: blobUnit, Sites: sites, ApexDomain: "localhost", Solid: solid}
 	hs := httptest.NewUnstartedServer(httpSrv.Handler())
 	_ = hs.Listener.Close()
 	hs.Listener = l

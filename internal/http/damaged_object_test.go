@@ -93,6 +93,7 @@ func (l *syncLog) String() string {
 func storedHTMLServer(stored []byte, size int) *Server {
 	const key = "uploads/u1/0"
 	return &Server{
+		PathMode:   true,
 		ApexDomain: "paste.test",
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML, UpdatedAt: time.Now().UTC(),
@@ -190,7 +191,7 @@ func TestRead_ContentLengthIsTheDecodedSize(t *testing.T) {
 	now := time.Now().UTC()
 	paste := func(kind domain.ContentKind, key string, e domain.ManifestEntry) *Server {
 		e.Key = key
-		return &Server{Blobs: storage.NewCompressedBlobStore(objects), Pastes: stubPasteReader{p: domain.Paste{
+		return &Server{PathMode: true, Blobs: storage.NewCompressedBlobStore(objects), Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: kind, UpdatedAt: now,
 			Manifest: domain.DocumentManifest(e),
 		}}}
@@ -201,12 +202,12 @@ func TestRead_ContentLengthIsTheDecodedSize(t *testing.T) {
 		Key: "uploads/s/0", Size: len(file), DecodedSize: len(file), ContentType: "text/css; charset=utf-8",
 	})
 	site.Add("legacy.bin", domain.ManifestEntry{Key: "uploads/b/0", Size: stored, ContentType: "application/octet-stream"})
-	sites := &Server{Blobs: storage.NewCompressedBlobStore(objects), Sites: stubSiteReader{s: domain.Site{
+	sites := &Server{PathMode: true, Blobs: storage.NewCompressedBlobStore(objects), Sites: stubSiteReader{s: domain.Site{
 		Slug: "abc23456", Kind: domain.KindSite, Manifest: site, UpdatedAt: now,
 	}}}
 	kbm := domain.NewManifest()
 	kbm.Add("README.md", domain.ManifestEntry{Key: "uploads/d/0", Size: len(doc), DecodedSize: len(doc)})
-	kb := &Server{Blobs: storage.NewCompressedBlobStore(objects), Pastes: stubPasteReader{p: domain.Paste{
+	kb := &Server{PathMode: true, Blobs: storage.NewCompressedBlobStore(objects), Pastes: stubPasteReader{p: domain.Paste{
 		Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindKnowledgeBase, UpdatedAt: now, Manifest: kbm,
 	}}}
 

@@ -41,7 +41,7 @@ func TestWriteRelayAdmitErrorMapsDrainingToUnavailable(t *testing.T) {
 }
 
 func TestSlugFromHost(t *testing.T) {
-	s := &Server{ApexDomain: "paste.test"}
+	s := &Server{PathMode: true, ApexDomain: "paste.test"}
 	cases := []struct {
 		host   string
 		want   string // empty when expected ok=false
@@ -78,7 +78,7 @@ func TestSlugFromHost(t *testing.T) {
 
 // An empty ApexDomain must never match a host: that deploy is path-mode only.
 func TestSlugFromHost_NoApexConfigured(t *testing.T) {
-	s := &Server{}
+	s := &Server{PathMode: true}
 	if _, ok := s.slugFromHost("abc23456.anything.com"); ok {
 		t.Fatalf("should not match without ApexDomain")
 	}
@@ -91,7 +91,7 @@ func TestSlugFromHost_NoApexConfigured(t *testing.T) {
 // "/" itself is not exercised here (no real PasteReader is wired); this covers
 // the path-rejection branch only.
 func TestSubdomain_OnlyServesRoot(t *testing.T) {
-	srv := &Server{ApexDomain: "paste.test"}
+	srv := &Server{PathMode: true, ApexDomain: "paste.test"}
 	mux := srv.Handler()
 
 	r := httptest.NewRequest("GET", "/favicon.ico", nil)
@@ -117,6 +117,7 @@ func TestSubdomain_OnlyServesRoot(t *testing.T) {
 // updated at updatedAt.
 func readyHTMLServer(body []byte, updatedAt time.Time) *Server {
 	return &Server{
+		PathMode: true,
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML,
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: keyA}), UpdatedAt: updatedAt,
@@ -173,7 +174,7 @@ func TestPasteRead_Conditional304(t *testing.T) {
 
 // The cleaned-path redirect keeps an escaped path escaped exactly once.
 func TestCleanPathRedirectKeepsEscapes(t *testing.T) {
-	srv := &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{}}
+	srv := &Server{PathMode: true, ApexDomain: "paste.test", Pastes: stubPasteReader{}}
 	r := httptest.NewRequest("GET", "/a//b%20c", nil)
 	r.Host = "abc23456.paste.test"
 	w := httptest.NewRecorder()
@@ -200,7 +201,7 @@ func TestPasteRead_IfNoneMatchOverridesIfModifiedSince(t *testing.T) {
 // when one is configured.
 func TestHealthz(t *testing.T) {
 	for _, color := range []string{"blue", ""} {
-		srv := &Server{ApexDomain: "paste.test", Color: color}
+		srv := &Server{PathMode: true, ApexDomain: "paste.test", Color: color}
 		r := httptest.NewRequest("GET", "/healthz", nil)
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, r)
@@ -287,10 +288,11 @@ func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 	t.Run("blob read failure", func(t *testing.T) {
 		var logged strings.Builder
 		srv := &Server{
-			Pastes: stubPasteReader{p: paste},
-			Blobs:  failingBlobReader{err: context.DeadlineExceeded},
-			Logf:   func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
-			Now:    func() time.Time { return now },
+			PathMode: true,
+			Pastes:   stubPasteReader{p: paste},
+			Blobs:    failingBlobReader{err: context.DeadlineExceeded},
+			Logf:     func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
+			Now:      func() time.Time { return now },
 		}
 		r := httptest.NewRequest("GET", "/p/abc23456?raw=1", nil)
 		w := httptest.NewRecorder()
@@ -309,10 +311,11 @@ func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 	t.Run("metadata read failure", func(t *testing.T) {
 		var logged strings.Builder
 		srv := &Server{
-			Pastes: failingPasteReader{err: context.DeadlineExceeded},
-			Blobs:  stubBlobReader{},
-			Logf:   func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
-			Now:    func() time.Time { return now },
+			PathMode: true,
+			Pastes:   failingPasteReader{err: context.DeadlineExceeded},
+			Blobs:    stubBlobReader{},
+			Logf:     func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
+			Now:      func() time.Time { return now },
 		}
 		r := httptest.NewRequest("GET", "/p/abc23456", nil)
 		w := httptest.NewRecorder()
@@ -327,9 +330,10 @@ func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
 
 	t.Run("nil Logf does not panic", func(t *testing.T) {
 		srv := &Server{
-			Pastes: stubPasteReader{p: paste},
-			Blobs:  failingBlobReader{err: context.DeadlineExceeded},
-			Now:    func() time.Time { return now },
+			PathMode: true,
+			Pastes:   stubPasteReader{p: paste},
+			Blobs:    failingBlobReader{err: context.DeadlineExceeded},
+			Now:      func() time.Time { return now },
 		}
 		r := httptest.NewRequest("GET", "/p/abc23456?raw=1", nil)
 		w := httptest.NewRecorder()
@@ -361,14 +365,14 @@ func TestRead5xxCarriesNoContentHeaders(t *testing.T) {
 		name, target string
 		srv          *Server
 	}{
-		{"metadata", "/p/abc23456", &Server{Pastes: failingPasteReader{err: context.DeadlineExceeded}, Blobs: broken}},
-		{"html blob", "/p/abc23456", &Server{Pastes: doc(domain.KindHTML), Blobs: broken}},
-		{"raw blob", "/p/abc23456?raw=1", &Server{Pastes: doc(domain.KindMarkdown), Blobs: broken}},
-		{"unsupported kind", "/p/abc23456", &Server{Pastes: doc(domain.ContentKind("nope")), Blobs: broken}},
-		{"site file blob", "/p/abc23456/", &Server{Sites: stubSiteReader{s: domain.Site{
+		{"metadata", "/p/abc23456", &Server{PathMode: true, Pastes: failingPasteReader{err: context.DeadlineExceeded}, Blobs: broken}},
+		{"html blob", "/p/abc23456", &Server{PathMode: true, Pastes: doc(domain.KindHTML), Blobs: broken}},
+		{"raw blob", "/p/abc23456?raw=1", &Server{PathMode: true, Pastes: doc(domain.KindMarkdown), Blobs: broken}},
+		{"unsupported kind", "/p/abc23456", &Server{PathMode: true, Pastes: doc(domain.ContentKind("nope")), Blobs: broken}},
+		{"site file blob", "/p/abc23456/", &Server{PathMode: true, Sites: stubSiteReader{s: domain.Site{
 			Slug: "abc23456", Kind: domain.KindSite, Manifest: site, UpdatedAt: now,
 		}}, Blobs: broken}},
-		{"knowledge base document blob", "/p/abc23456/README.md?raw=1", &Server{Pastes: stubPasteReader{p: domain.Paste{
+		{"knowledge base document blob", "/p/abc23456/README.md?raw=1", &Server{PathMode: true, Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Kind: domain.KindKnowledgeBase, Status: domain.PasteStatusReady, UpdatedAt: now, Manifest: kb,
 		}}, Blobs: broken}},
 	}
@@ -403,5 +407,35 @@ func TestStoredETag_ChangesWithTheSandboxHeaders(t *testing.T) {
 	_, _ = h.Write([]byte(sandboxPolicy))
 	if fmt.Sprintf("%08x", h.Sum32()) == sandboxTag {
 		t.Fatal("the tag does not cover X-Robots-Tag")
+	}
+}
+
+// Outside path mode a slug is served on its own host only: the apex answers
+// 404 for every /p/ path, so no paste runs on the apex origin.
+func TestPathURLs_ServedOnlyInPathMode(t *testing.T) {
+	srv := readyHTMLServer([]byte("<p>hi</p>"), time.Unix(1700000000, 0))
+	get := func(host, path string) int {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Host = host
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, r)
+		return w.Code
+	}
+
+	srv.PathMode = false
+	for _, path := range []string{"/p/abc23456", "/p/abc23456/", "/p/abc23456/x", "/p/abc23456/api/rooms", "/p/", "/p/nope"} {
+		for _, host := range []string{"paste.test", "www.elsewhere.test"} {
+			if code := get(host, path); code != 404 {
+				t.Errorf("subdomain mode: %s%s = %d, want 404", host, path, code)
+			}
+		}
+	}
+	if code := get("abc23456.paste.test", "/"); code != 200 {
+		t.Fatalf("subdomain mode: the slug's own host = %d, want 200", code)
+	}
+
+	srv.PathMode = true
+	if code := get("paste.test", "/p/abc23456"); code != 200 {
+		t.Fatalf("path mode: /p/abc23456 = %d, want 200", code)
 	}
 }
