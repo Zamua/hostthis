@@ -393,9 +393,13 @@ sends a random challenge, client signs with the private key, server
 verifies the signature against the public key. So a leaked `id_*.pub` is
 harmless. Same model as `git push` or ssh-ing into a Linux box.
 
-Implementation must use `golang.org/x/crypto/ssh`'s `PublicKeyCallback`,
-which is invoked AFTER the lib has already cryptographically verified the
-signature. Never trust a self-asserted username or fingerprint.
+A client may offer a public key before signing with it, and may then
+authenticate another way, so the public-key callback runs for keys nobody
+has proven they hold. The implementation takes a session's identity only
+from the key whose signature authenticated the connection, read once
+authentication has finished; the callback itself records nothing. A session
+that authenticated without a key has no identity. Never trust a
+self-asserted username or fingerprint.
 
 ### SSH session hardening
 

@@ -180,10 +180,9 @@ func (s *Server) ListenAndServe() error {
 	srv, err := wish.NewServer(
 		wish.WithAddress(s.Addr),
 		withHostSigner(signer),
-		wish.WithPublicKeyAuth(func(ctx gossh.Context, key gossh.PublicKey) bool {
-			ctx.SetValue("ownerHash", fingerprintKey(key))
-			return true
-		}),
+		// The callbacks only admit. A client may offer a key it cannot sign
+		// for, so identity is read after authentication (sessionKeyFingerprint).
+		wish.WithPublicKeyAuth(func(gossh.Context, gossh.PublicKey) bool { return true }),
 		wish.WithPasswordAuth(func(_ gossh.Context, _ string) bool { return true }),
 		wish.WithKeyboardInteractiveAuth(func(_ gossh.Context, _ xssh.KeyboardInteractiveChallenge) bool {
 			return true
@@ -282,14 +281,13 @@ func withHostSigner(signer xssh.Signer) gossh.Option {
 	}
 }
 
-// keyRequiredMiddleware refuses sessions that authenticated without presenting
-// a public key. Every session needs a key to attribute content to an identity
+// keyRequiredMiddleware refuses sessions that did not authenticate with a
+// public key. Every session needs a key to attribute content to an identity
 // and enforce the per-identity quota; keyless sessions exit ExitAuth.
 func (s *Server) keyRequiredMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
 		return func(sess gossh.Session) {
-			keyedFP, _ := sess.Context().Value("ownerHash").(string)
-			if keyedFP == "" {
+			if sessionKeyFingerprint(sess) == "" {
 				fmt.Fprintln(sess.Stderr(), "hostthis: ssh key required.")                                              //nolint:errcheck
 				fmt.Fprintln(sess.Stderr(), "  generate one (ssh-keygen -t ed25519) and add it to ssh-agent,")          //nolint:errcheck
 				fmt.Fprintf(sess.Stderr(), "  or pass it on the command line: ssh -i ~/.ssh/id_ed25519 %s\n", s.apex()) //nolint:errcheck
@@ -301,11 +299,21 @@ func (s *Server) keyRequiredMiddleware() wish.Middleware {
 	}
 }
 
+// sessionKeyFingerprint is the fingerprint of the key whose signature
+// authenticated the session, or "" when no key did (password or
+// keyboard-interactive). It is the only source of a session's identity.
+func sessionKeyFingerprint(sess gossh.Session) string {
+	key := sess.PublicKey()
+	if key == nil {
+		return ""
+	}
+	return fingerprintKey(key)
+}
+
 // sessionOwner parses the session's key fingerprint into its owner. On failure
 // it answers on stderr, exits ExitAuth and reports false.
 func sessionOwner(sess gossh.Session) (domain.Owner, bool) {
-	keyedFP, _ := sess.Context().Value("ownerHash").(string)
-	owner, err := domain.OwnerFromKeyFingerprint(keyedFP)
+	owner, err := domain.OwnerFromKeyFingerprint(sessionKeyFingerprint(sess))
 	if err != nil {
 		fmt.Fprintln(sess.Stderr(), "hostthis: add an ssh key. this command needs an identity") //nolint:errcheck
 		_ = sess.Exit(ExitAuth)
