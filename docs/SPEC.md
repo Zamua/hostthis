@@ -360,8 +360,11 @@ where wildcard DNS + certs are friction, the binary also supports a
 
 - Pastes live at `<apex>/p/<slug>` instead of `<slug>.<apex>`.
 - The SSH server emits the path-shape URL after upload.
-- The HTTP router accepts BOTH forms at runtime - same handler - so
-  changing modes is just changing what URL gets emitted.
+- In path mode the HTTP router accepts both forms. In subdomain mode it
+  serves a slug only on the slug's own host: `/p/<slug>` on the apex (or any
+  other host) is a 404, never a redirect, so no paste content is ever served
+  from the apex origin. Nothing emits a path URL in subdomain mode, so there
+  is nothing to redirect for.
 
 **Path mode is dev-only and breaks the origin-isolation property** -
 all pastes share the apex origin, so user-uploaded JS could read apex
@@ -4415,7 +4418,8 @@ stricter or the runtime decides:
 - `If-None-Match` compares weakly (RFC 9110): an edge that compresses a
   response turns its ETag into `W/"..."`, which must still match.
 - A stored kind with no shell is a 500 even to a conditional request.
-- Hosts compare lowercased, and `/p/` is served only on the apex host.
+- Hosts compare lowercased, and in path mode `/p/` is served only on the apex
+  host (`hostthisd` serves it on any host that is not a slug's).
 - `.` and `..` segments are resolved by the URL parser rather than redirected
   (or, escaped, looked up as written).
 - An asset the static assets layer answers carries that layer's `ETag`, and

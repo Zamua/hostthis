@@ -37,6 +37,7 @@ func buildRoomServer(t *testing.T) *Server {
 	t.Helper()
 	repo := newRoomRepo(t)
 	return &Server{
+		PathMode:   true,
 		ApexDomain: "hostthis.test",
 		Rooms:      service.NewRooms(repo),
 		RoomPush:   service.NewRoomPush(repo),

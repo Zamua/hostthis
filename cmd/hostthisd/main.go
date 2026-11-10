@@ -250,6 +250,7 @@ func main() {
 		LandingHTML: landing,
 		AgentNotes:  notes,
 		ApexDomain:  *apexDomain,
+		PathMode:    *urlMode == "path",
 		CDNTTL:      cdnTTL,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 		Logf:        logger.Printf,

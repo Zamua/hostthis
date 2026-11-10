@@ -61,7 +61,7 @@ func shellResponses(t *testing.T) map[string]goldenResponse {
 	}
 	got["kb/files-escapes"] = recordResponse(kbGet(t, escapingKBServer().Handler(), "/?files=1"))
 	for name, status := range map[string]domain.PasteStatus{"status/pending": domain.PasteStatusPending, "status/failed": domain.PasteStatusFailed} {
-		srv := &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{p: domain.Paste{
+		srv := &Server{PathMode: true, ApexDomain: "paste.test", Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Status: status, Kind: domain.KindMarkdown,
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: keyA}),
 		}}}
@@ -76,14 +76,14 @@ func shellResponses(t *testing.T) map[string]goldenResponse {
 		"health/readyz":   {"GET", "/readyz"},
 		"health/redirect": {"GET", "//healthz"},
 	} {
-		srv := &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{}}
+		srv := &Server{PathMode: true, ApexDomain: "paste.test", Pastes: stubPasteReader{}}
 		r := httptest.NewRequest(req[0], req[1], nil)
 		r.Host = "abc23456.paste.test"
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, r)
 		got[name] = recordResponse(w)
 	}
-	mux := (&Server{ApexDomain: "paste.test"}).Handler()
+	mux := (&Server{PathMode: true, ApexDomain: "paste.test"}).Handler()
 	names := []string{"shell.html", "shells.json", "evil.js", "mdshell/md.js", "common/deeplink.js"}
 	for name := range assetSource {
 		names = append(names, name)
@@ -110,7 +110,7 @@ func escapingKBServer() *Server {
 	for i, p := range escapingKBPaths {
 		m.Add(p, domain.ManifestEntry{Key: fmt.Sprintf("key-%d", i), Size: 1})
 	}
-	return &Server{ApexDomain: "paste.test", Pastes: stubPasteReader{p: domain.Paste{
+	return &Server{PathMode: true, ApexDomain: "paste.test", Pastes: stubPasteReader{p: domain.Paste{
 		Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindKnowledgeBase,
 		UploadID: "up-escapes", UpdatedAt: kbUpdated, Manifest: m,
 	}}}

@@ -172,7 +172,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	upload.Screen = o.screen
 	manage.Screen = o.screen
 
-	httpSrv := &httpapi.Server{Pastes: repo, Blobs: blobUnit}
+	httpSrv := &httpapi.Server{PathMode: true, Pastes: repo, Blobs: blobUnit}
 	sshSrv := &hostssh.Server{
 		ApexDomain: "paste.test",
 		Upload:     upload,

@@ -56,6 +56,9 @@ type Server struct {
 	// AgentNotes is /llms.txt (and /AGENTS.md) beside the landing page; nil 404s.
 	AgentNotes []byte
 	ApexDomain string // e.g. "hostthis.dev"; used to peel slug subdomains
+	// PathMode serves slugs at /p/<slug> on the apex as well as on their own
+	// hosts. Dev only: every paste then shares the apex origin.
+	PathMode bool
 	// CDNTTL, when positive, lets a CDN answer small site files for this long
 	// without asking this server (docs/SPEC.md "Cache-Control posture").
 	// Browsers still revalidate. Only a deployment whose writes purge that CDN
@@ -126,9 +129,10 @@ func (s *Server) Handler() http.Handler {
 			s.route(w, r, slug, r.URL.Path)
 			return
 		}
-		// Path mode: /p/<slug> (paste) or /p/<slug>/<path...> (site) on the
-		// apex.
-		if after, ok := strings.CutPrefix(r.URL.Path, "/p/"); ok {
+		// Path mode only: /p/<slug> (paste) or /p/<slug>/<path...> (site) on
+		// the apex. Otherwise the apex serves no paste content, so a paste
+		// never runs on the apex origin or shares one with another paste.
+		if after, ok := strings.CutPrefix(r.URL.Path, "/p/"); ok && s.PathMode {
 			slugStr, rest, _ := strings.Cut(after, "/")
 			slug, err := domain.ParseSlug(slugStr)
 			if err != nil {
