@@ -22,6 +22,7 @@ var comparedHeaders = []string{
 	"Last-Modified",
 	"X-Frame-Options",
 	"Referrer-Policy",
+	"X-Robots-Tag",
 	"Permissions-Policy",
 	"Content-Security-Policy",
 	"Retry-After",

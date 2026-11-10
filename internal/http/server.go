@@ -653,18 +653,23 @@ var sandboxTag = func() string {
 }()
 
 // setSandboxHeaders applies the framing and referrer lockdown every response
-// from a paste origin carries (docs/SPEC.md HTML-sandboxing section).
+// from a paste origin carries (docs/SPEC.md HTML-sandboxing section), and
+// keeps it out of search indexes (docs/SPEC.md "Search engines").
 func setSandboxHeaders(h http.Header) {
 	h.Set("X-Frame-Options", "DENY")
 	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("X-Robots-Tag", robotsTag)
 }
+
+// robotsTag is every paste-origin response's X-Robots-Tag.
+const robotsTag = "noindex, nofollow"
 
 // contentHeaders are the headers a content response sets before it can still
 // fail.
 var contentHeaders = []string{
 	"CDN-Cache-Control",
 	"Accept-Ranges", "Cache-Control", "Content-Length", "Content-Range", "Content-Security-Policy", "ETag",
-	"Last-Modified", "Permissions-Policy", "Referrer-Policy", "X-Frame-Options",
+	"Last-Modified", "Permissions-Policy", "Referrer-Policy", "X-Frame-Options", "X-Robots-Tag",
 }
 
 // serveReadError answers a read-path 5xx with its text alone. Validators or a

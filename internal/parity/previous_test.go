@@ -131,7 +131,7 @@ var previousRelease = []allowance{
 // contentHeaders are what a content response carries and a bare 5xx does not;
 // a bare 5xx's Cache-Control is no-store.
 var contentHeaders = []string{
-	"Cache-Control", "ETag", "Last-Modified", "X-Frame-Options", "Referrer-Policy", "Permissions-Policy",
+	"Cache-Control", "ETag", "Last-Modified", "X-Frame-Options", "Referrer-Policy", "X-Robots-Tag", "Permissions-Policy",
 	"Content-Security-Policy",
 }
 

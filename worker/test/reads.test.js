@@ -186,6 +186,7 @@ for (const v of vectors.vectors) {
       if (want.status === 200) {
         assert.equal(res.headers.get("x-frame-options"), "DENY");
         assert.equal(res.headers.get("referrer-policy"), "no-referrer");
+        assert.equal(res.headers.get("x-robots-tag"), "noindex, nofollow");
       }
       const body = await res.text();
       if (method === "HEAD") {
