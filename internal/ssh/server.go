@@ -83,6 +83,11 @@ type Server struct {
 	// ProxyProtocol requires a PROXY v1/v2 header on every connection and takes
 	// the client address from it; set only behind a TCP forwarder that sends one.
 	ProxyProtocol bool
+	// IdleTimeout closes a connection that carries no bytes either way for
+	// this long, and MaxSession closes one this long after it was accepted,
+	// handshake included. Zero disables the bound.
+	IdleTimeout time.Duration
+	MaxSession  time.Duration
 
 	// lifecycleMu orders Shutdown/Close against ListenAndServe installing the
 	// server, so a server installed after stop is closed instead of served.
@@ -202,6 +207,7 @@ func (s *Server) ListenAndServe() error {
 			// Outermost: shutdown fences new handlers and waits for every active one.
 			s.sessionLifecycleMiddleware(),
 		),
+		withConnectionBounds(s.IdleTimeout, s.MaxSession),
 		// Refuse port-forwarding, agent-forwarding, X11 and subsystem
 		// (sftp/scp) channels: sessions are single-command exchanges that need
 		// none of them. Rationale in hardening.go.
@@ -277,6 +283,15 @@ func withHostSigner(signer xssh.Signer) gossh.Option {
 			return nil
 		}
 		srv.AddHostKey(signer)
+		return nil
+	}
+}
+
+// withConnectionBounds sets the idle and total-lifetime limits of every
+// connection; a zero limit is left unset.
+func withConnectionBounds(idle, max time.Duration) gossh.Option {
+	return func(srv *gossh.Server) error {
+		srv.IdleTimeout, srv.MaxTimeout = idle, max
 		return nil
 	}
 }
@@ -504,8 +519,19 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 		emitUsageErr(sess, err)
 		return
 	}
-	// Admission precedes the first read of the body, so a queued upload holds
-	// no encoder and SSH flow control stalls its client.
+	// The live session reader goes straight to the service layer's streaming
+	// pipeline; buffering the body here would peak memory at HardRawByteCap
+	// per concurrent upload. The peek is non-destructive: the gzip magic
+	// decides site-vs-paste, and only a paste takes the paste input cap (a
+	// site archive is capped by the deploy service).
+	//
+	// The peek also waits for the body to start (or end) before admission, so
+	// a session that sends nothing holds no upload slot.
+	peeked := bufio.NewReaderSize(sess, 512)
+	head, _ := peeked.Peek(2)
+	isArchive := s.Deploy != nil && args.Type == "" && domain.HasGzipMagic(head)
+	// Admission precedes every read past that small buffer, so a queued upload
+	// holds no encoder and SSH flow control stalls its client.
 	if s.Uploads != nil {
 		release, err := s.Uploads.Acquire(sess.Context())
 		if err != nil {
@@ -515,17 +541,6 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 			return
 		}
 		defer release()
-	}
-	// The live session reader goes straight to the service layer's streaming
-	// pipeline; buffering the body here would peak memory at HardRawByteCap
-	// per concurrent upload. The peek is non-destructive: the gzip magic
-	// decides site-vs-paste, and only a paste takes the paste input cap (a
-	// site archive is capped by the deploy service).
-	peeked := bufio.NewReaderSize(sess, 512)
-	isArchive := false
-	if s.Deploy != nil && args.Type == "" {
-		head, _ := peeked.Peek(2)
-		isArchive = domain.HasGzipMagic(head)
 	}
 	limited := io.LimitReader(peeked, int64(domain.HardRawByteCap)+1)
 
