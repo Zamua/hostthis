@@ -155,20 +155,6 @@ var allowances = []allowance{
 		},
 	},
 	{
-		// hostthisd serves /p/<slug> on every host that is not a slug's, in
-		// every URL mode; the Worker only on the apex host in path mode, which
-		// the suite's Worker does not run.
-		name: "path-mode-on-the-apex-only",
-		spec: `"Public and internal hosts" (/p/<slug>/ only with HOSTTHIS_URL_MODE=path on the apex host); "The public surface", Deliberate differences`,
-		apply: func(c *comparison) bool {
-			if c.slugHost() || !strings.HasPrefix(c.path(), "/p/") || !c.isNotFound() {
-				return false
-			}
-			c.explained = true
-			return true
-		},
-	},
-	{
 		// Each server mints its own room id.
 		name: "room-ids-are-minted",
 		spec: `"The HTTP API" ("POST /api/rooms generates a fresh UUIDv4")`,

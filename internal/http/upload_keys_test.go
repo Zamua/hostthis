@@ -44,6 +44,7 @@ func TestServePaste_KeyedDocumentReadsAndValidatesOnItsKey(t *testing.T) {
 	const key = "uploads/u1/0"
 	blobs := &recordingBlobs{bodies: map[string]string{key: "<h1>keyed</h1>"}}
 	srv := &Server{
+		PathMode: true,
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Kind: domain.KindHTML, UpdatedAt: time.Now().UTC(),
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key}),
@@ -71,6 +72,7 @@ func TestServePaste_KeyedDocumentReadsAndValidatesOnItsKey(t *testing.T) {
 func TestServePaste_RawMarkdownReadsItsKey(t *testing.T) {
 	const key = "uploads/u2/0"
 	srv := &Server{
+		PathMode: true,
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Kind: domain.KindMarkdown, UpdatedAt: time.Now().UTC(),
 			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: key}),
@@ -96,7 +98,7 @@ func TestServePaste_KeylessRootIsNotFound(t *testing.T) {
 		} {
 			p.UpdatedAt = time.Now().UTC()
 			blobs := &recordingBlobs{bodies: map[string]string{"deadbeef": "<h1>legacy</h1>", "": "<h1>legacy</h1>"}}
-			w := serveOne(&Server{Pastes: stubPasteReader{p: p}, Blobs: blobs}, req.target, req.ifNoneMatch)
+			w := serveOne(&Server{PathMode: true, Pastes: stubPasteReader{p: p}, Blobs: blobs}, req.target, req.ifNoneMatch)
 			if w.Code != 404 || len(blobs.reads) != 0 {
 				t.Fatalf("%s: GET %s (If-None-Match %q) = %d with %d reads, want 404 and none",
 					name, req.target, req.ifNoneMatch, w.Code, len(blobs.reads))
@@ -113,6 +115,7 @@ func TestServeSite_KeylessEntryIsNotFound(t *testing.T) {
 	m.Add("old.css", domain.ManifestEntry{Size: 6, ContentType: "text/css; charset=utf-8"})
 	blobs := &recordingBlobs{bodies: map[string]string{"uploads/u3/0": "<h1>site</h1>", "": "body{}"}}
 	srv := &Server{
+		PathMode: true,
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: "abc23456", Kind: domain.KindSite, Manifest: m, UpdatedAt: time.Now().UTC(),
 		}},

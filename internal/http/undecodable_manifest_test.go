@@ -46,7 +46,7 @@ func TestServe_UndecodableManifestIsNotFound(t *testing.T) {
 				}))
 				defer cell.Close()
 				blobs := &countingBlobs{}
-				srv := &httpapi.Server{Pastes: worker.NewPasteRepo(cell.URL, cell.Client()), Blobs: blobs}
+				srv := &httpapi.Server{PathMode: true, Pastes: worker.NewPasteRepo(cell.URL, cell.Client()), Blobs: blobs}
 				for _, target := range paths {
 					w := httptest.NewRecorder()
 					srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", target, nil))

@@ -40,6 +40,7 @@ func liveWorkerServer(t *testing.T) (*httptest.Server, string) {
 	base := workertest.Target(t)
 	repo := worker.NewPasteRepo(base, nil)
 	srv := &Server{
+		PathMode: true,
 		// Empty apex: path mode plus no origin verification, which is what a
 		// loopback harness needs and exactly how `make run` dev serves.
 		ApexDomain: "",

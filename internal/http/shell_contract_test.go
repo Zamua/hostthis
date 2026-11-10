@@ -19,6 +19,7 @@ const (
 func serveReady(t *testing.T, kind domain.ContentKind, slug, key string, body []byte, target, accept string) *httptest.ResponseRecorder {
 	t.Helper()
 	srv := &Server{
+		PathMode: true,
 		Pastes: stubPasteReader{p: domain.Paste{
 			Slug: domain.Slug(slug), Status: domain.PasteStatusReady, Kind: kind,
 			Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: key, Size: len(body), DecodedSize: len(body)}),
@@ -119,7 +120,7 @@ func TestHTMLPaste_ServedAsItself(t *testing.T) {
 // Every whitelisted asset serves under /_hostthis/<name> with its declared
 // type and the immutable cache header; a name outside the whitelist 404s.
 func TestServeAsset_WhitelistAndDeny(t *testing.T) {
-	mux := (&Server{ApexDomain: "paste.test"}).Handler()
+	mux := (&Server{PathMode: true, ApexDomain: "paste.test"}).Handler()
 	for name, sh := range assetSource {
 		r := httptest.NewRequest("GET", "/_hostthis/"+name, nil)
 		w := httptest.NewRecorder()
