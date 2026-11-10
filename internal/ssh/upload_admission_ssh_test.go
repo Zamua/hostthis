@@ -328,3 +328,22 @@ func TestUploadAdmission_ReadsUngated(t *testing.T) {
 		t.Fatal("HTTP read blocked while upload slots were held")
 	}
 }
+
+// An upload session that sends no body takes no slot, so silent sessions
+// cannot keep other uploads out.
+func TestUploadAdmission_SilentSessionHoldsNoSlot(t *testing.T) {
+	gate := mustAdmission(t, 1, 500*time.Millisecond)
+	s := startStack(t, withUploads(gate))
+
+	for range 3 {
+		silent, w := io.Pipe()
+		t.Cleanup(func() { _ = w.Close() })
+		runAsync(t, s, "", silent)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	r := await(t, runAsync(t, s, "", strings.NewReader("# through\n")), 10*time.Second)
+	if r.exit != hostssh.ExitOK {
+		t.Fatalf("upload beside silent sessions: exit %d, stderr %q", r.exit, r.stderr)
+	}
+}

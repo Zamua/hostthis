@@ -172,6 +172,11 @@ func main() {
 		logger.Fatalf("%v", err)
 	}
 
+	sshIdle, sshMax, err := sshConnectionBounds(logger, uploadGate.Wait())
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
+
 	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
 
 	// Decorators, so a write invalidates the edge cache for its slug while the
@@ -206,6 +211,8 @@ func main() {
 		Allow:       sshAllow,
 		Abuse:       abuse,
 		Uploads:     uploadGate,
+		IdleTimeout: sshIdle,
+		MaxSession:  sshMax,
 		BuildURL:    build,
 		Pods:        pods,
 		PodLinkURL: func(id, secret string) string {
@@ -353,7 +360,25 @@ const (
 	defaultWorkerPutWait     = 30 * time.Second
 	defaultUploadConcurrency = 8
 	defaultUploadWait        = 30 * time.Second
+	defaultSSHIdleTimeout    = 5 * time.Minute
+	defaultSSHMaxSession     = 2 * time.Hour
 )
+
+// sshConnectionBounds reads how long an SSH connection may stay silent and
+// how long it may last in total (docs/SPEC.md "Connection limits").
+func sshConnectionBounds(logger *log.Logger, uploadWait time.Duration) (idle, max time.Duration, err error) {
+	idle = envParse("HOSTTHIS_SSH_IDLE_TIMEOUT", defaultSSHIdleTimeout, time.ParseDuration, "a duration")
+	max = envParse("HOSTTHIS_SSH_MAX_SESSION", defaultSSHMaxSession, time.ParseDuration, "a duration")
+	if idle <= 0 || max <= 0 {
+		return 0, 0, fmt.Errorf("HOSTTHIS_SSH_IDLE_TIMEOUT / HOSTTHIS_SSH_MAX_SESSION: must be positive, got %s and %s", idle, max)
+	}
+	// A queued upload is silent while it waits for its slot.
+	if idle <= uploadWait {
+		return 0, 0, fmt.Errorf("HOSTTHIS_SSH_IDLE_TIMEOUT: %s must exceed the upload wait limit %s", idle, uploadWait)
+	}
+	logger.Printf("config: ssh idle timeout %s, max session %s", idle, max)
+	return idle, max, nil
+}
 
 // buildUploadAdmission bounds concurrent uploads per process, since each holds
 // an encoder and stream buffers (docs/SPEC.md "Upload admission").

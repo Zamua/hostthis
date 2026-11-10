@@ -75,6 +75,7 @@ type stackOpts struct {
 	manageRepo func(*worker.PasteRepo) service.PasteAdmin
 	rawBlobs   func(storage.InnerBlobStore) storage.InnerBlobStore
 	uploads    *hostssh.UploadAdmission
+	idle, max  time.Duration
 	logOut     io.Writer
 	purger     service.CachePurger
 	abuse      *abuselog.Logger
@@ -99,6 +100,11 @@ func withManageRepo(wrap func(*worker.PasteRepo) service.PasteAdmin) stackOpt {
 // cmd/hostthisd does for a backend decorator.
 func withRawBlobs(wrap func(storage.InnerBlobStore) storage.InnerBlobStore) stackOpt {
 	return func(o *stackOpts) { o.rawBlobs = wrap }
+}
+
+// withConnBounds sets the SSH idle timeout and total connection lifetime.
+func withConnBounds(idle, max time.Duration) stackOpt {
+	return func(o *stackOpts) { o.idle, o.max = idle, max }
 }
 
 // withUploads wires a per-process upload admission gate.
@@ -202,6 +208,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		sshSrv.Denylist = denyGate
 	}
 	sshSrv.Allow = o.allow
+	sshSrv.IdleTimeout, sshSrv.MaxSession = o.idle, o.max
 
 	hs := httptest.NewServer(httpSrv.Handler())
 	t.Cleanup(hs.Close)

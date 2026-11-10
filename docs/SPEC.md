@@ -401,6 +401,22 @@ authentication has finished; the callback itself records nothing. A session
 that authenticated without a key has no identity. Never trust a
 self-asserted username or fingerprint.
 
+### Connection limits
+
+Every SSH connection has two time bounds, so a client cannot hold one open
+at no cost:
+
+- **Idle.** A connection that carries no bytes in either direction for the
+  idle timeout (default 5m, `HOSTTHIS_SSH_IDLE_TIMEOUT`) is closed. The
+  handshake counts: a client that connects and says nothing is dropped too.
+  The timeout must exceed the upload wait limit (see "Upload admission"),
+  since a queued upload is silent while it waits.
+- **Total.** A connection is closed once it has lasted the maximum session
+  time (default 2h, `HOSTTHIS_SSH_MAX_SESSION`), however busy it is.
+
+Both are validated at startup: a value that is not a positive duration stops
+the process. A closed connection releases whatever its session held.
+
 ### SSH session hardening
 
 A hostthis session is a single short verb exchange: client connects,
@@ -3260,10 +3276,14 @@ the encoders that produce them.
 - **Limit.** Each `hostthisd` process runs at most 8 uploads at once
   (`HOSTTHIS_UPLOAD_CONCURRENCY`). The gate is per process, so the total
   bound is the limit times the number of processes.
+- **A slot is taken once the body starts.** An upload asks for its slot when
+  the first bytes of its body arrive (or the body ends). A session that sends
+  nothing holds no slot, so silent sessions cannot keep other uploads out;
+  the idle timeout ends them (see "Connection limits").
 - **Waits, never rejects.** An upload beyond the limit waits in arrival order
-  (FIFO). While it waits the server reads none of its body, so SSH flow control
-  holds the bytes on the client once the channel's receive window fills, and a
-  waiting upload costs no encoder.
+  (FIFO). While it waits the server reads none of its body past those first
+  bytes, so SSH flow control holds the rest on the client once the channel's
+  receive window fills, and a waiting upload costs no encoder.
 - **Bounded wait.** An upload still waiting after the wait limit (default 30s,
   `HOSTTHIS_UPLOAD_WAIT`) fails with the same busy error as a Worker write:
   `hostthis: busy storing other uploads; try again in a minute` (exit 1).
@@ -5176,6 +5196,8 @@ file). Defaults in parens:
                          / HOSTTHIS_WORKER_PUT_WAIT          max wait for Worker write admission      (30s)
                          / HOSTTHIS_UPLOAD_CONCURRENCY      concurrent uploads per process          (8)
                          / HOSTTHIS_UPLOAD_WAIT             max wait for an upload slot              (30s)
+                         / HOSTTHIS_SSH_IDLE_TIMEOUT        close a silent SSH connection after      (5m)
+                         / HOSTTHIS_SSH_MAX_SESSION         longest an SSH connection may last       (2h)
 
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
