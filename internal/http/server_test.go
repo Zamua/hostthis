@@ -400,8 +400,8 @@ func TestStoredETag_ChangesWithTheSandboxHeaders(t *testing.T) {
 		t.Fatalf("storedETag = %q", got)
 	}
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(sandboxPolicy + " "))
+	_, _ = h.Write([]byte(sandboxPolicy))
 	if fmt.Sprintf("%08x", h.Sum32()) == sandboxTag {
-		t.Fatal("a different policy hashed to the same tag")
+		t.Fatal("the tag does not cover X-Robots-Tag")
 	}
 }
