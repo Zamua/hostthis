@@ -3,6 +3,11 @@
 # ---- build stage ------------------------------------------------------------
 FROM golang:1.27.3-alpine AS build
 
+# The image only bootstraps the build: go.mod's toolchain line picks the
+# compiler, fetched and checksum-verified by the go command, so a Go patch
+# release does not wait for a base image.
+ENV GOTOOLCHAIN=auto
+
 WORKDIR /src
 
 # Cache module downloads independently of source edits.
