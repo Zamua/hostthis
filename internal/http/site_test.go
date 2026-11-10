@@ -148,7 +148,7 @@ func TestSite_SPAFallback_SameHeadersAsRoot(t *testing.T) {
 		t.Fatalf("body mismatch: route=%q root=%q", route.Body.String(), root.Body.String())
 	}
 	for _, hdr := range []string{
-		"Content-Type", "X-Frame-Options", "Referrer-Policy",
+		"Content-Type", "X-Frame-Options", "Referrer-Policy", "X-Robots-Tag",
 		"Permissions-Policy", "Cache-Control", "ETag",
 	} {
 		if route.Header().Get(hdr) != root.Header().Get(hdr) {
@@ -177,6 +177,9 @@ func TestSite_SandboxHeaders(t *testing.T) {
 	h := w.Header()
 	if h.Get("X-Frame-Options") != "DENY" {
 		t.Fatalf("missing X-Frame-Options: %q", h.Get("X-Frame-Options"))
+	}
+	if got := h.Get("X-Robots-Tag"); got != "noindex, nofollow" {
+		t.Fatalf("X-Robots-Tag: %q", got)
 	}
 	if h.Get("Referrer-Policy") != "no-referrer" {
 		t.Fatalf("missing Referrer-Policy")

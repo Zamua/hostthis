@@ -41,7 +41,7 @@ export function storedETag(validator) {
 }
 
 function sandbox() {
-  return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer" };
+  return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "X-Robots-Tag": "noindex, nofollow" };
 }
 
 function warn(slug, cause) {
