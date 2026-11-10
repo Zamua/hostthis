@@ -4826,12 +4826,34 @@ servers. When the policy changes, every cached copy's validator stops
 matching, so the next revalidation answers 200 with the new headers rather
 than a 304 that would keep the old ones.
 
+### Search engines
+
+Pastes and sites are link-only: nothing lists them, and they are kept out of
+search indexes. Every response that carries the framing headers (an HTML
+paste, a render shell, `?raw` bytes, a site or knowledge base file, a file
+list, a single-page fallback, the pending and failed pages) also carries
+`X-Robots-Tag: noindex, nofollow`, from both servers, on a 200 and a 304
+alike. An uploaded page cannot turn it off: crawlers take the most
+restrictive rule they see, whatever the page's own markup says. A bare 5xx
+does not carry it.
+
+There is no platform `robots.txt` on a paste host, by design. A crawler that
+`robots.txt` turns away never fetches the page, so it never sees `noindex`,
+and a URL it learned from a link can stay listed. Leaving crawling open is
+what lets the header remove a page. A site that uploads its own `robots.txt`
+is served it like any other file; the header applies whatever it says. The
+apex landing page carries no such header and stays indexable.
+
+The header binds only crawlers that honor it, and takes effect as each
+recrawls.
+
 Response headers on paste reads:
 
 - `X-Frame-Options: DENY` - no embedding the paste in iframes elsewhere
   (clickjacking defense)
 - `Referrer-Policy: no-referrer` - visiting a paste leaks nothing about
   who sent it
+- `X-Robots-Tag: noindex, nofollow` - see "Search engines" above
 - `Content-Security-Policy` (https/wss only, forms same-origin) on stored
   bytes, as above
 - `Permissions-Policy: camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()`

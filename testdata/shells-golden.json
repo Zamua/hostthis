@@ -459,7 +459,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 2172,
     "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
@@ -473,7 +474,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 97,
     "sha256": "657f823d65043e5835ecc6455a73f418c1ad7fe24cd8dbfd93b339c58ddeac08"
@@ -487,7 +489,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 162,
     "sha256": "59fbab191712bd0626a0e5136adeb262a147af36f55f4b04b99b1652c337254c"
@@ -503,7 +506,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 8,
     "sha256": "5a4f421ee720f133f23c0e822eaf4f047560f62255b451624a3ec1145084494e"
@@ -518,7 +522,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 2172,
     "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
@@ -534,7 +539,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -550,7 +556,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -566,7 +573,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -582,7 +590,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -598,7 +607,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -614,7 +624,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -630,7 +641,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -646,7 +658,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -662,7 +675,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -678,7 +692,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 23,
     "sha256": "f8f4b8547d85681b4bf5ac8f2fc56e1ef7626fd87e601a49e22631ba83b66b80"
@@ -720,7 +735,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 1200,
     "sha256": "a962c5f5193c2e1d57a365a705dd1ec4bbd80468aceeb39bd8a8ddebdf264bf2"
@@ -735,7 +751,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 1126,
     "sha256": "93ca800e049f996030255a0f787bdb1d61c59cf6c02a64be4af5fe79c38b442d"
@@ -750,7 +767,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 888,
     "sha256": "8bd10ae04f431a28cf4fb60b1dac42bd844411b60c405382fe1f51ef407f24d6"
@@ -765,7 +783,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 1201,
     "sha256": "3c7ff2445c65b1b2c205244d10baabbaf5ceab4d7c80499bee0441ffc1f4790c"
@@ -780,7 +799,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 2172,
     "sha256": "10a2f9f2e61fc8c9c2f766f66352dcd080b5ff0c8492245af3811e566ad624ba"
@@ -795,7 +815,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 1185,
     "sha256": "051817ba05d2674e237547187d3ccadfcb62dfaecf2e7887d9e5e1f7f57c05be"
@@ -810,7 +831,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 506,
     "sha256": "4c76f8671030a71e6958141c630a7dbe30a9777f43a2c311355f44d8acb25f28"
@@ -825,7 +847,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 512,
     "sha256": "1f50915dd3af7cb2679b4c757f3e95d72870a430811cae2ee15c66600189af3d"
@@ -840,7 +863,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 791,
     "sha256": "2cf3b8a9651330ffa046651246952010db18e937e307c8a9cbf9661e3599cb7f"
@@ -855,7 +879,8 @@
       "Last-Modified": "Sun, 07 Jun 2026 14:00:00 GMT",
       "Permissions-Policy": "camera=(), microphone=(), geolocation=(), usb=(), payment=()",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 725,
     "sha256": "7f49bdddeb81a9701ca0c087d6b048eaa233456df577d6aab12e1d73c9fe01f3"
@@ -866,7 +891,8 @@
       "Cache-Control": "no-store",
       "Content-Type": "text/html; charset=utf-8",
       "Referrer-Policy": "no-referrer",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 805,
     "sha256": "2346ecb7503501b9f71b705aa23d00730bbf60372918f44091bf73845aa66598"
@@ -878,7 +904,8 @@
       "Content-Type": "text/html; charset=utf-8",
       "Referrer-Policy": "no-referrer",
       "Retry-After": "1",
-      "X-Frame-Options": "DENY"
+      "X-Frame-Options": "DENY",
+      "X-Robots-Tag": "noindex, nofollow"
     },
     "size": 1206,
     "sha256": "8f9db65481eeb4644ff65de6ee48f46db18c327c5bca7ea37d259f26c0efbe87"
