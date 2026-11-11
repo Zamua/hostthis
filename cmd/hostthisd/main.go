@@ -103,6 +103,8 @@ func main() {
 	manageSvc := service.NewManage(pasteRepo, blobUnit)
 	manageSvc.Logger = logger
 
+	appRooms := &service.OwnerRooms{Slugs: pasteRepo, Rooms: metadata.AppRooms, Now: time.Now}
+
 	// Static-site archive deploys reuse the same blob store and per-identity
 	// quota as pastes.
 	deploySvc := service.NewDeploySite(siteRepo, pasteRepo, blobUnit)
@@ -211,6 +213,7 @@ func main() {
 		Allow:       sshAllow,
 		Abuse:       abuse,
 		Uploads:     uploadGate,
+		AppRooms:    appRooms,
 		IdleTimeout: sshIdle,
 		MaxSession:  sshMax,
 		BuildURL:    build,

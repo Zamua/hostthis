@@ -181,6 +181,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
 	}
+	sshSrv.AppRooms = &service.OwnerRooms{Slugs: repo, Rooms: worker.NewAppRoomsRepo(endpoint, nil), Now: time.Now}
 	sshSrv.ProxyProtocol = o.proxyProto
 	sshSrv.Abuse = o.abuse
 	if o.logOut != nil {

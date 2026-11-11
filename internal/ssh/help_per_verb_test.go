@@ -14,7 +14,7 @@ import (
 // dispatcher needs an entry here AND a descriptor.
 var verbHelpVerbs = []string{
 	"get", "list", "url", "qr", "rename", "delete",
-	"versions", "pin", "unpin", "whoami", "help",
+	"versions", "pin", "unpin", "whoami", "help", "rooms",
 }
 
 // TestHelpVerb_HelpSpaceVerb pins that `help <verb>` emits the verb-specific
