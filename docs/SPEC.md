@@ -1530,7 +1530,8 @@ informs them):
   whether the owner is protected and keeps the answer for ten minutes.
 - **Private rooms.** A private instance such as staging can close its rooms
   API: with `HOSTTHIS_ROOMS_ALLOW` (comma-separated CIDR prefixes) or
-  `HOSTTHIS_ROOMS_TOKEN` set on `hostthisd`, a request under `/api/rooms`
+  `HOSTTHIS_ROOMS_TOKEN` set (on `hostthisd`, and on the Worker for its
+  public surface, with the same values), a request under `/api/rooms`
   (creation, reads, writes, push and the WebSocket) is served only when the
   client address, derived as for the rate limits, is in a listed prefix, or
   the request carries the token in `X-Hostthis-Rooms-Token`. Anything else is
@@ -5410,6 +5411,8 @@ HOSTTHIS_WATCHER_TOKEN         the abuse watcher's token, /watcher/* only       
 HOSTTHIS_WORKER_TOKEN_NEXT     a second full token, accepted during a rotation    (unset)
 HOSTTHIS_INTERNAL_ALLOW        addresses and CIDRs the full token is accepted from (unset: any)
 HOSTTHIS_READ_TOKEN            read-only token for operator tools                (unset)
+HOSTTHIS_ROOMS_ALLOW           addresses and CIDRs a private rooms API serves     (unset: public)
+HOSTTHIS_ROOMS_TOKEN           token that opens a private rooms API               (unset)
 HOSTTHIS_ADMIN_TOKEN           abuse-admin token for operator tools              (unset)
 HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on, and owners
                                the default room rules skip                       (unset)
