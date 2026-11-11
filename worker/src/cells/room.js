@@ -9,20 +9,28 @@ import { setOwn } from "./records.js";
 // A Room cell owns one room's KV document, dense mutation sequence, budget
 // recovery state, and hibernatable WebSockets. Its app's Paste cell serializes
 // cross-room byte allocations.
+// An op a quarantined app's room refuses as if the room were absent (docs/
+// SPEC.md "Quarantine"). The check runs inside the op, so a mutation makes it
+// under its gate and no call to another cell precedes the gate.
+const hidden = (entry) => ({
+  ...entry,
+  run: async (self, body, url, doc) => (await self.hiddenAnswer(doc)) ?? entry.run(self, body, url, doc),
+});
+
 const ROOM_OPS = {
   count: read((self) => Response.json({ sockets: self.state.getWebSockets().length })),
-  meta: read((self, _body, _url, doc) => Response.json(doc.meta), { room: true }),
-  get: read((self, _body, url, doc) => self.getValue(doc, url.searchParams.get("key")), { room: true }),
-  scan: read((self, _body, _url, doc) => Response.json({ values: doc.kv, seq: doc.seq, wire: wireTexts(doc) }), { room: true }),
+  meta: hidden(read((self, _body, _url, doc) => Response.json(doc.meta), { room: true })),
+  get: hidden(read((self, _body, url, doc) => self.getValue(doc, url.searchParams.get("key")), { room: true })),
+  scan: hidden(read((self, _body, _url, doc) => Response.json({ values: doc.kv, seq: doc.seq, wire: wireTexts(doc) }), { room: true })),
   create: mutation((self, body) => self.createBlocked(body)),
-  put: mutation((self, body, _url, doc) => self.putBlocked(doc, body), { room: true }),
-  del: mutation((self, body, _url, doc) => self.delBlocked(doc, body), { room: true }),
-  pushsublist: read((self) => self.pushSubList(), { room: true }),
-  pushscheduleget: read((self) => self.pushScheduleGet(), { room: true }),
-  pushsubput: mutation((self, body) => self.pushSubPut(body), { room: true }),
-  pushsubdel: mutation((self, body) => self.pushSubDel(body), { room: true }),
-  pushscheduleput: mutation((self, body) => self.pushSchedulePut(body), { room: true }),
-  pushtest: mutation((self, body, _url, doc) => self.pushTest(doc, body), { room: true }),
+  put: hidden(mutation((self, body, _url, doc) => self.putBlocked(doc, body), { room: true })),
+  del: hidden(mutation((self, body, _url, doc) => self.delBlocked(doc, body), { room: true })),
+  pushsublist: hidden(read((self) => self.pushSubList(), { room: true })),
+  pushscheduleget: hidden(read((self) => self.pushScheduleGet(), { room: true })),
+  pushsubput: hidden(mutation((self, body) => self.pushSubPut(body), { room: true })),
+  pushsubdel: hidden(mutation((self, body) => self.pushSubDel(body), { room: true })),
+  pushscheduleput: hidden(mutation((self, body) => self.pushSchedulePut(body), { room: true })),
+  pushtest: hidden(mutation((self, body, _url, doc) => self.pushTest(doc, body), { room: true })),
   remove: mutation((self, body) => self.removeBlocked(body)),
 };
 
@@ -49,12 +57,7 @@ const POLICY_TTL_MS = 10 * 60 * 1000;
 // How long a room trusts its last answer on whether its app is quarantined.
 // A quarantine or release reaches every room of the app within this time.
 const QUARANTINE_TTL_MS = 60 * 1000;
-// Ops a quarantined app's rooms refuse as if the room were absent. Creation is
-// refused upstream with the app itself; removal and the socket count stay.
-const HIDDEN_WHEN_QUARANTINED = new Set([
-  "meta", "get", "scan", "put", "del", "join",
-  "pushsublist", "pushscheduleget", "pushsubput", "pushsubdel", "pushscheduleput", "pushtest",
-]);
+
 const BINARY_MAGIC = ["%PDF", "GIF8", "PK\u0003\u0004", "\u007fELF", "MZ", "ID3", "OggS", "fLaC", "\u0089PNG"]
   .map((m) => Uint8Array.from(m, (c) => c.charCodeAt(0)));
 
@@ -148,17 +151,17 @@ export class Room {
   // Whether the room's app is quarantined, asked of the app cell at most once
   // per QUARANTINE_TTL_MS while the cell stays in memory. An app cell that
   // cannot answer leaves the last answer standing (not quarantined at first).
-  async appQuarantined() {
+  async appQuarantined(doc) {
     const now = Date.now();
     if (this.quarantine && now - this.quarantine.at < QUARANTINE_TTL_MS) {
       return this.quarantine.value;
     }
-    const doc = await this.loadRoom();
-    if (!doc) {
+    const room = doc ?? await this.loadRoom();
+    if (!room) {
       return false;
     }
     try {
-      const res = await this.appCall(doc.meta.appSlug, "roompolicy", {});
+      const res = await this.appCall(room.meta.appSlug, "roompolicy", {});
       if (res.ok) {
         this.quarantine = { value: (await res.json()).quarantined === true, at: now };
       }
@@ -166,6 +169,16 @@ export class Room {
       // keep the last answer
     }
     return this.quarantine?.value ?? false;
+  }
+
+  // The answer of a hidden op when the app is quarantined: the absent room's
+  // 404, with the room's sockets closed. Null otherwise.
+  async hiddenAnswer(doc) {
+    if (!(await this.appQuarantined(doc))) {
+      return null;
+    }
+    this.closeForQuarantine();
+    return new Response("not found\n", { status: 404 });
   }
 
   // Sockets of a quarantined app's room are closed: nothing more is relayed.
@@ -180,17 +193,18 @@ export class Room {
   }
 
   async fetch(request) {
-    const op = new URL(request.url).pathname.split("/").pop();
-    if (HIDDEN_WHEN_QUARANTINED.has(op) && await this.appQuarantined()) {
-      this.closeForQuarantine();
-      return new Response("not found\n", { status: 404 });
-    }
     const handled = (await cellRoute(this.state, request, this.env.ROOMS)) ?? (await dispatch(this, ROOM_OPS, request));
     if (handled) {
       return handled;
     }
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket\n", { status: 426 });
+    }
+    // A join writes nothing, so asking the app cell here interleaves with no
+    // mutation of this room.
+    const hiddenJoin = await this.hiddenAnswer();
+    if (hiddenJoin) {
+      return hiddenJoin;
     }
     // Nothing awaits between the cap check and the accept, so concurrent joins
     // cannot both take the last place.
