@@ -177,6 +177,18 @@ func (u *Upload) Create(body io.Reader, owner domain.Owner, name string, typeHin
 	if err := u.Screen.checkStaged(owner, staged, name); err != nil {
 		return Result{}, err
 	}
+	// The store admits the write before the row is committed: once a URL is
+	// handed out, the background write no longer waits behind other uploads,
+	// and a store too busy to take it refuses the upload here instead.
+	writeCtx, releaseWrite, err := u.Blob.AdmitWrite(context.Background(), staged.encodedSize())
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() {
+		if !transferred {
+			releaseWrite()
+		}
+	}()
 	now := u.Now().UTC()
 	p := domain.Paste{
 		Identity:      owner.Identity(),
@@ -206,7 +218,7 @@ func (u *Upload) Create(body io.Reader, owner domain.Owner, name string, typeHin
 			// the finalizer flips the status when they are durable. Ownership
 			// of the spill file transfers to the goroutine.
 			transferred = true
-			u.startFinalize(p, staged)
+			u.startFinalize(writeCtx, releaseWrite, p, staged)
 			return Result{Paste: p}, nil
 		case commitSlugTaken:
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
@@ -227,11 +239,13 @@ func (u *Upload) WaitFinalize() { u.finalizeWG.Wait() }
 
 // startFinalize runs the background half of Create (write the blob, then flip
 // the paste's status) so the SSH/HTTP caller never blocks on the blob write.
-func (u *Upload) startFinalize(paste domain.Paste, staged stagedUpload) {
+func (u *Upload) startFinalize(writeCtx context.Context, releaseWrite func(), paste domain.Paste, staged stagedUpload) {
 	u.finalizeWG.Go(func() {
-		// The goroutine owns the spill file: the request has already returned.
+		// The goroutine owns the spill file and the store's admission of its
+		// write: the request has already returned.
 		defer staged.discard()
-		u.finalize(paste, staged)
+		defer releaseWrite()
+		u.finalize(writeCtx, paste, staged)
 		if u.onFinalizeDone != nil {
 			u.onFinalizeDone()
 		}
@@ -246,8 +260,8 @@ func (u *Upload) startFinalize(paste domain.Paste, staged stagedUpload) {
 // Streams from the spill file: buffering would make resident memory scale with
 // concurrent uploads times payload size (docs/SPEC.md "Writes are
 // constant-memory").
-func (u *Upload) finalize(paste domain.Paste, staged stagedUpload) {
-	if err := u.Blob.StagePrecompressed(context.Background(), paste.RootEntry().Key, staged.File, staged.encodedSize()); err != nil {
+func (u *Upload) finalize(writeCtx context.Context, paste domain.Paste, staged stagedUpload) {
+	if err := u.Blob.StagePrecompressed(writeCtx, paste.RootEntry().Key, staged.File, staged.encodedSize()); err != nil {
 		// Flip to failed and release the reservation so the paste stops
 		// charging quota and a read serves the error page.
 		u.logf("upload: finalize %s: blob write failed: %v", paste.Slug, err)

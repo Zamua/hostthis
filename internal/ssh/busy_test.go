@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -83,5 +84,42 @@ func TestUpload_StoreBusySaysTryAgain(t *testing.T) {
 				t.Fatalf("stderr = %q, want %q", stderr, want)
 			}
 		})
+	}
+}
+
+// A new paste that the blob store cannot admit is refused before any URL is
+// handed out, and a paste whose URL was handed out is written however busy the
+// store has become since.
+func TestUpload_NewPasteIsAdmittedBeforeItsURL(t *testing.T) {
+	blobs := newSlowBlobs()
+	s := startStack(t, withRawBlobs(func(raw storage.InnerBlobStore) storage.InnerBlobStore {
+		gate, err := storage.NewGatedBlobStore(blobs.wrap(raw), 64, 300*time.Millisecond)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return gate
+	}))
+	t.Cleanup(blobs.release)
+	blobs.park.Store(true)
+
+	// The first paste gets its URL; its write then holds the whole budget.
+	first := runOnce(s.keyed, "", strings.NewReader("<!doctype html><p>first</p>"))
+	if first.err != nil || first.exit != hostssh.ExitOK {
+		t.Fatalf("first paste: exit %d, %v (stderr %q)", first.exit, first.err, first.stderr)
+	}
+	waitFor(t, func() bool { return blobs.parked.Load() == 1 })
+
+	second := runOnce(s.keyed, "", strings.NewReader("<!doctype html><p>second</p>"))
+	if second.exit != hostssh.ExitErr || second.stdout != "" {
+		t.Fatalf("second paste: exit %d stdout %q, want %d and no URL", second.exit, second.stdout, hostssh.ExitErr)
+	}
+	if want := "hostthis: busy storing other uploads; try again in a minute\n"; second.stderr != want {
+		t.Fatalf("stderr = %q, want %q", second.stderr, want)
+	}
+
+	blobs.release()
+	s.upload.WaitFinalize()
+	if code, body := getBody(t, strings.TrimSpace(first.stdout)); code != 200 || !strings.Contains(body, "first") {
+		t.Fatalf("first paste after the store freed: %d %q", code, body)
 	}
 }

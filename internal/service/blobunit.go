@@ -14,6 +14,11 @@ type BlobUnit interface {
 	// StagePrecompressed persists bytes already in the at-rest format at key.
 	StagePrecompressed(ctx context.Context, key string, r io.Reader, size int64) error
 
+	// AdmitWrite waits for the store to accept a later StagePrecompressed of
+	// size bytes, or fails with domain.ErrStoreBusy. That write must use the
+	// returned context, and release must be called when it has ended.
+	AdmitWrite(ctx context.Context, size int64) (admitted context.Context, release func(), err error)
+
 	// StageEncoding encodes and persists uncompressed bytes at key, returning
 	// their quota-relevant stored size.
 	StageEncoding(ctx context.Context, key string, r io.Reader) (storedSize int, err error)

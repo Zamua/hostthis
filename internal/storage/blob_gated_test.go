@@ -1,6 +1,7 @@
 package storage_test
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -248,3 +249,40 @@ func TestGatedBlobStore_RejectsBadConfig(t *testing.T) {
 }
 
 func (p *gateProbe) Delete(string) error { return nil }
+
+// A write admitted ahead of time holds its budget from Admit to release, and
+// its Put neither waits nor takes the budget a second time.
+func TestGatedBlobStore_AdmitHoldsTheBudgetForItsPut(t *testing.T) {
+	p := newGateProbe()
+	g := newGate(t, p, 10, 50*time.Millisecond)
+	ctx, release, err := g.Admit(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	if _, _, err := g.Admit(context.Background(), 1); !errors.Is(err, domain.ErrStoreBusy) {
+		t.Fatalf("second admit with the budget held = %v, want ErrStoreBusy", err)
+	}
+	if err := <-putAsync(g, 1); !errors.Is(err, domain.ErrStoreBusy) {
+		t.Fatalf("put with the budget held = %v, want ErrStoreBusy", err)
+	}
+
+	admitted := make(chan error, 1)
+	go func() { admitted <- g.PutContext(ctx, "uploads/x/0", strings.NewReader("body"), 10) }()
+	waitEntered(t, p)
+	p.release <- struct{}{}
+	if err := <-admitted; err != nil {
+		t.Fatalf("admitted put: %v", err)
+	}
+	// The budget stays held until the caller releases it.
+	if err := <-putAsync(g, 1); !errors.Is(err, domain.ErrStoreBusy) {
+		t.Fatalf("put before release = %v, want ErrStoreBusy", err)
+	}
+	release()
+	release()
+	next := putAsync(g, 10)
+	waitEntered(t, p)
+	p.release <- struct{}{}
+	if err := <-next; err != nil {
+		t.Fatalf("put after release: %v", err)
+	}
+}
