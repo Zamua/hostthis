@@ -41,3 +41,17 @@ test("a mutating op still notices the change it makes", async () => {
   assert.ok(reads.row >= 2, "the change is noticed by comparing the row before and after");
   assert.equal(notes.length, 1);
 });
+
+test("a create whose row is too large for the cell is refused 413 and leaves nothing behind", async () => {
+  const storage = new FakeStorage();
+  storage.tooBig = (key) => key === "row";
+  const cell = new Paste(state(storage), {});
+  const res = await cell.fetch(new Request("https://cell/paste/put?slug=abc12345", {
+    method: "POST",
+    body: JSON.stringify({ row: { ...ROW, manifest: { files: [] } }, generation: "g1", fingerprint: "f1" }),
+  }));
+  assert.equal(res.status, 413);
+  assert.deepEqual(await res.json(), { error: "version-too-large" });
+  assert.equal(storage.data.has("row"), false);
+  assert.equal(storage.data.has("maxVer"), false);
+});
