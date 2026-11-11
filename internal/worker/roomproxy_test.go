@@ -3,7 +3,7 @@ package worker_test
 // The proxy against a FAKE cell: a local WS server standing where the room
 // cell would. What these pin is the PROXY's own contract - dial, pipe
 // verbatim, caps, release - not the cell's, which the Worker room conformance
-// and the staging cross-pod battery own.
+// and a multi-node deployment test own.
 
 import (
 	"bytes"

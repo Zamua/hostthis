@@ -68,7 +68,7 @@ func (k ContentKind) IsDirectory() bool { return k == KindSite || k == KindKnowl
 // ErrUnsupportedKind is returned when content sniffs outside the accepted set.
 // The message is what the user sees on stderr.
 var ErrUnsupportedKind = errors.New(
-	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json, flamegraph)")
+	"hostthis only accepts content it can render (html, markdown, diff, mermaid, pdf, csv, json, flamegraph, log, text)")
 
 // MaxPasteBytes is the per-paste size cap in COMPRESSED bytes (post-zstd, as
 // written to the blob store). It bounds what one request can commit to

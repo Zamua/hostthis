@@ -304,7 +304,7 @@ func (n namespacedRooms) TestPush(app domain.Slug, id domain.RoomID, now time.Ti
 //
 // It ran as three partial entries first - lifecycle, owner index, sites - and
 // the paste ADMIN surface fell in the gap between them: versions, pins and
-// tombstones went unverified, and a staging smoke run found two real defects
+// tombstones went unverified, and a live run found two real defects
 // there that no test would have. A backend either passes the whole contract or
 // its gaps are found by someone else.
 func TestConformance_Worker(t *testing.T) {

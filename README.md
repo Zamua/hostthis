@@ -184,9 +184,10 @@ site     1 GiB unpacked
 ## EXIT STATUS
 
 ```
-0  ok              3  no ssh key
-1  error           4  not found
-2  usage           6  rate limited
+0  ok              4  not found            8  refused by screening
+1  error           6  rate limited         9  key at its upload limit
+2  usage           7  banned
+3  no ssh key      (5 is reserved)
 ```
 
 ## ENVIRONMENT
