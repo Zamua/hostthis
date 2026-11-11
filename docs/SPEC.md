@@ -5019,7 +5019,9 @@ listing, and schedules each for permanent deletion a retention window later
 (403 `protected-owner`). The Abuse cell keeps one ban record per owner (its id
 `banId`, the owner hash, reason, times, the slugs it quarantined, and progress
 counters) and works it from its alarm in small batches, so an owner with many
-slugs never makes one request fan out unbounded:
+slugs never makes one request fan out unbounded. A pass runs alone in the
+cell: a ban or unban that arrives during it is applied after it, never
+overwritten by it. The work of a pass:
 
 - quarantine each listed slug as `actor: "ban:<banId>"`, purging its host
   twice as a single quarantine does;
