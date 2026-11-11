@@ -297,14 +297,16 @@ export class Paste {
   // 16-hex owner hashes. An app with no live row is not protected.
   async roomPolicy() {
     const row = await this.state.storage.get("row");
+    // A quarantined app's rooms are hidden with it (docs/SPEC.md "Quarantine").
+    const quarantined = (await this.state.storage.get("quarantine")) !== undefined;
     const items = String(this.env?.HOSTTHIS_PROTECTED_OWNERS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     if (!row?.identity || items.length === 0) {
-      return Response.json({ protected: false });
+      return Response.json({ protected: false, quarantined });
     }
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(row.identity));
     const hash = [...new Uint8Array(digest)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
     const fp = row.identity.replace(/^key:/, "");
-    return Response.json({ protected: items.some((i) => i === hash || i.replace(/^key:/, "") === fp) });
+    return Response.json({ protected: items.some((i) => i === hash || i.replace(/^key:/, "") === fp), quarantined });
   }
 
   // A room the operator removed stops counting toward the app's limit. Its

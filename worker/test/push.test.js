@@ -552,7 +552,9 @@ test("Room alarm survives a failed VAPID signing and a throwing push service", a
     now: Date.parse("2026-09-05T15:00:00Z"),
     items: [recurring({ id: "sun", days: [0] })],
   });
-  h.transport.failBefore = 1;
+  // The fire asks the app cell twice: whether the app is quarantined, then to
+  // sign. Both calls fail here.
+  h.transport.failBefore = 2;
   await h.room().alarm({ now: Date.parse("2026-09-06T12:00:00Z") });
   assert.equal(h.sends.length, 0);
   assert.equal(h.push().nextFireAt, Date.parse("2026-09-13T12:00:00Z"));
@@ -740,4 +742,21 @@ test("Room VAPID subject comes only from the request, never from the cell env", 
   assert.equal((await given.call("pushtest", { now: Date.parse("2026-09-05T15:00:00Z") })).status, 200);
   const header = given.sends[0].init.headers.Authorization;
   assert.equal(decodeJWT(header.slice("vapid t=".length, header.indexOf(","))).payload.sub, "https://apex.example");
+});
+
+test("Room alarm sends nothing for a quarantined app, drops what was due and keeps the schedule moving", async () => {
+  const h = harness();
+  await arrange(h, {
+    now: Date.parse("2026-09-05T15:00:00Z"),
+    items: [recurring({ id: "sun", days: [0] })],
+  });
+  h.pasteStorage.data.set("quarantine", { reason: "abuse", actor: "operator", at: 1 });
+  await h.room().alarm({ now: Date.parse("2026-09-06T12:00:00Z") });
+  assert.equal(h.sends.length, 0);
+  assert.equal(h.push().nextFireAt, Date.parse("2026-09-13T12:00:00Z"));
+
+  // Released before the next occurrence: that one is sent, the missed one is not.
+  h.pasteStorage.data.delete("quarantine");
+  await h.room().alarm({ now: Date.parse("2026-09-13T12:00:00Z") });
+  assert.equal(h.sends.length, 1);
 });

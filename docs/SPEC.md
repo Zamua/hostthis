@@ -5025,6 +5025,15 @@ While a slug is quarantined:
   operator` (exit 4) and its owner can neither change nor delete it. 451 is
   not 404 on purpose: a delete that took the slug for absent would heal the
   owner's listing entry away while the row still exists;
+- the app's rooms go with it. Every room read, write, socket join and push
+  route answers as an absent room (404), open sockets are closed (close code
+  1008, `unavailable`), and no scheduled notification is sent: one that falls
+  due during the quarantine is dropped, not held for later, while recurring
+  items keep their schedule. The room's values, subscriptions and schedule are
+  kept, so a release restores them. A Room cell learns of a quarantine or a
+  release by asking its app cell, at most once a minute, so either reaches
+  every room within a minute. An owner can still delete the rooms ("Owner
+  room deletion"), and the operator can still remove one;
 - the row, its versions and its bytes stay, and still count against the
   owner's quota.
 
