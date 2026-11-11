@@ -500,3 +500,32 @@ test("a source error reaches both copies", async () => {
   const [a, b] = lockstepTee(failing).copies;
   await assert.rejects(Promise.all([a.getReader().read(), b.getReader().read()]), /boom/);
 });
+
+test("a range request reaches the cache lookup with its range, and a miss with one fills nothing", async () => {
+  const asked = [];
+  const cache = { async match(request) { asked.push(Object.fromEntries(request.headers)); return undefined; }, put: async () => assert.fail("a 206 filled the cache") };
+  const read = withEdgeCache(async () => new Response("ell", { status: 206, headers: { "Cache-Control": "public, no-cache", "Content-Range": "bytes 1-3/5" } }),
+    { cache, ttl: 60, build: "b" });
+  const target = { slug: SLUG, path: "/", host: `${SLUG}.paste.test`, mount: "", flags: { raw: false, files: false } };
+  const res = await read(new Request(at("/"), { headers: { "Range": "bytes=1-3", "If-Range": "\"k\"" } }), {}, {}, target);
+  assert.equal(res.status, 206);
+  assert.deepEqual(asked, [{ "range": "bytes=1-3", "if-range": "\"k\"" }]);
+});
+
+test("a response that states its length is stored through a fixed-length stream of that length", async () => {
+  const made = [];
+  class Fixed extends TransformStream {
+    constructor(length) { super(); made.push(length); }
+  }
+  let stored;
+  const cache = { match: async () => undefined, async put(_key, response) { stored = await response.text(); } };
+  const waits = [];
+  const read = withEdgeCache(async () => new Response("hello", { headers: { "Cache-Control": "public, no-cache", "Content-Length": "5" } }),
+    { cache, ttl: 60, build: "b", fixedLengthStream: Fixed });
+  const target = { slug: SLUG, path: "/", host: `${SLUG}.paste.test`, mount: "", flags: { raw: false, files: false } };
+  const res = await read(new Request(at("/")), {}, { waitUntil: (p) => waits.push(p) }, target);
+  assert.equal(await res.text(), "hello");
+  await Promise.all(waits);
+  assert.deepEqual(made, [5]);
+  assert.equal(stored, "hello");
+});

@@ -4533,10 +4533,12 @@ off unless configured, and used only where the runtime has a Cache API
   `Cache-Tag: <slug>`, while the
   client gets the browser headers. A hit answers GET, HEAD and conditional
   requests (the cache answers `If-None-Match` and `If-Modified-Since` with a
-  304 itself, by RFC 9110's rules) without a cell call or a payload read, and
+  304 itself, by RFC 9110's rules, and a `Range` with the part asked for)
+  without a cell call or a payload read. A stored response that states its
+  length keeps it, so a hit carries `Content-Length` as a miss does. A hit
   reaches the client with `Cache-Control: public, no-cache`; a 304, or the
-  answer to a HEAD, carries no body. A conditional request or a HEAD that
-  misses goes to the read path and fills nothing. Only a `200` with the
+  answer to a HEAD, carries no body. A conditional request, a range request
+  or a HEAD that misses goes to the read path and fills nothing. Only a `200` with the
   content posture is stored: never a 5xx, a 404, or a pending or failed page.
   A fill is capped by `HOSTTHIS_EDGE_CACHE_MAX_BYTES` (default 8 MiB): a
   response whose `Content-Length` (the entry's decoded size) is over it starts
