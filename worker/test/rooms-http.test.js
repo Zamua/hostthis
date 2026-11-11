@@ -952,3 +952,41 @@ test("ice is not a value key, but ice/x and ice:x are", async () => {
   const scan = await (await w.fetch(url(`/api/rooms/${id}`))).json();
   assert.deepEqual(Object.keys(scan).sort(), ["ice/x", "ice:x"]);
 });
+
+// docs/SPEC.md "Private rooms".
+test("a private instance serves the rooms API only to a listed address or the token, and the push key to anyone", async () => {
+  const vars = { HOSTTHIS_CLIENT_IP_SOURCE: "cf-connecting-ip", HOSTTHIS_ROOMS_ALLOW: "203.0.113.0/24, 2001:db8::/32", HOSTTHIS_ROOMS_TOKEN: "rooms-secret" };
+  const w = world(vars);
+  w.app();
+  const refusedBody = "the rooms API is private on this instance\n\n";
+  const post = (headers) => w.fetch(url("/api/rooms"), { method: "POST", headers });
+
+  for (const headers of [
+    {},
+    { "CF-Connecting-IP": "198.51.100.9" },
+    { "CF-Connecting-IP": "198.51.100.9", "X-Hostthis-Rooms-Token": "wrong" },
+    { "CF-Connecting-IP": "198.51.100.9", "X-Forwarded-For": "203.0.113.5" },
+    { "X-Hostthis-Client-IP": "203.0.113.5" },
+  ]) {
+    const res = await post(headers);
+    assert.equal(res.status, 403, JSON.stringify(headers));
+    assert.equal(await res.text(), refusedBody);
+  }
+  const listed = await post({ "CF-Connecting-IP": "203.0.113.5" });
+  assert.equal(listed.status, 201);
+  const { id } = await listed.json();
+  assert.equal((await post({ "CF-Connecting-IP": "2001:db8:1::7" })).status, 201);
+  assert.equal((await post({ "CF-Connecting-IP": "198.51.100.9", "X-Hostthis-Rooms-Token": "rooms-secret" })).status, 201);
+
+  // Every other rooms route is closed the same way; the push key is not.
+  for (const path of [`/api/rooms/${id}`, `/api/rooms/${id}/k`, `/api/rooms/${id}/push/schedule`, `/api/rooms/${id}/ws`]) {
+    const res = await w.fetch(url(path), { headers: { "CF-Connecting-IP": "198.51.100.9" } });
+    assert.equal(res.status, 403, path);
+  }
+  assert.notEqual((await w.fetch(url("/api/push-key"), { headers: { "CF-Connecting-IP": "198.51.100.9" } })).status, 403);
+
+  // With neither variable set, anyone is served.
+  const open = world({ HOSTTHIS_CLIENT_IP_SOURCE: "cf-connecting-ip" });
+  open.app();
+  assert.equal((await open.fetch(url("/api/rooms"), { method: "POST", headers: { "CF-Connecting-IP": "198.51.100.9" } })).status, 201);
+});
