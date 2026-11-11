@@ -1509,10 +1509,11 @@ informs them):
   charge MORE than the committed room bytes while recovering an interrupted
   mutation, but it must never charge less. This is the room-tier analogue of
   the per-identity paste quota: one app cannot consume the whole service.
-- **Rooms per app.** An app may create at most **500 rooms** over its
-  lifetime: rooms never expire and have no delete, so the count only grows.
-  The app cell counts each room it records for the first time, less rooms
-  the operator removed ("Room removal"); an app older than the count starts
+- **Rooms per app.** An app may hold at most **500 rooms**. Rooms never
+  expire and the public API has no delete, so the count grows until the
+  app's owner deletes rooms over SSH ("Owner room deletion") or the operator
+  removes one ("Room removal"). The app cell counts each room it records for
+  the first time, less removed rooms; an app older than the count starts
   from its rooms that hold bytes. A create past the
   limit is refused with the full-app **507**.
 - **Default room rules.** With `HOSTTHIS_DEFAULT_ROOM_RULES=on` on the
@@ -5060,6 +5061,38 @@ key from the denylist, releases exactly the slugs the ban quarantined (a slug
 quarantined on its own stays quarantined) and cancels the deletion. After
 deletion the record stays as a tombstone (owner hash, counts, times). The
 watcher's credential reaches `/watcher/ban-owner` (below) but never `unban-owner`; lifting a ban stays with the operator.
+
+**Owner room deletion.** The owner of a slug manages its rooms over SSH,
+authenticated by key like every other verb:
+
+```
+ssh hostthis.dev rooms <slug> [-o json]           # list: room id, created, last size change (UTC)
+ssh hostthis.dev rooms <slug> rm <room-id>...      # delete those rooms
+ssh hostthis.dev rooms <slug> rm --all             # delete every listed room
+```
+
+Deleting a room is the removal described next, without the audit entry: its
+bytes are released from the app's ceiling and the owner's quota, it stops
+counting toward the app's room limit, so a new room can be created in its
+place, every key is dropped, its open sockets are closed (close code 1000,
+reason `room removed`), and its push subscriptions and schedule go with it,
+so no scheduled notification fires afterwards. Reads and writes of the room
+then answer 404. There is no undo.
+
+A slug that does not exist and one owned by another key are both `not found`
+(exit 4). An id the app has no room for is reported on stderr (`<id>: no such
+room`) and does not fail the command. A room that could not be removed
+completely stops the command with `the room could not be removed completely;
+run the command again` (exit 1); rooms removed before it stay removed, and
+they are reported first. `rm` with `-o json` answers `{removed: [...],
+absent: [...]}` on stdout.
+
+The list comes from the app's room index ("Change feed and room index"), so
+a room created before the index existed appears only after its size next
+changes; `rm <room-id>` works for any room whose id the owner knows.
+
+Deletion does not stop new rooms from being created: the room-creation rate
+limits above are what bound how fast a cleared app can be filled again.
 
 **Room removal.** Rooms have no delete in the public API; the operator route
 `/abuse/room-delete` removes one. The Room cell releases the room's bytes
