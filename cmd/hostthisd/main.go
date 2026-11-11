@@ -360,6 +360,7 @@ const (
 	defaultWorkerPutBudget   = 16 << 20
 	defaultWorkerPutWait     = 30 * time.Second
 	defaultUploadConcurrency = 8
+	defaultUploadPerKey      = 4
 	defaultUploadWait        = 30 * time.Second
 	defaultSSHIdleTimeout    = 5 * time.Minute
 	defaultSSHMaxSession     = 2 * time.Hour
@@ -386,11 +387,12 @@ func sshConnectionBounds(logger *log.Logger, uploadWait time.Duration) (idle, ma
 func buildUploadAdmission(logger *log.Logger) (*hostssh.UploadAdmission, error) {
 	limit := envParse("HOSTTHIS_UPLOAD_CONCURRENCY", defaultUploadConcurrency, strconv.Atoi, "an integer")
 	wait := envParse("HOSTTHIS_UPLOAD_WAIT", defaultUploadWait, time.ParseDuration, "a duration")
-	gate, err := hostssh.NewUploadAdmission(limit, wait)
+	perKey := envParse("HOSTTHIS_UPLOAD_PER_KEY", min(defaultUploadPerKey, limit), strconv.Atoi, "an integer")
+	gate, err := hostssh.NewUploadAdmission(limit, perKey, wait)
 	if err != nil {
-		return nil, fmt.Errorf("HOSTTHIS_UPLOAD_CONCURRENCY / HOSTTHIS_UPLOAD_WAIT: %w", err)
+		return nil, fmt.Errorf("HOSTTHIS_UPLOAD_CONCURRENCY / HOSTTHIS_UPLOAD_PER_KEY / HOSTTHIS_UPLOAD_WAIT: %w", err)
 	}
-	logger.Printf("config: upload concurrency %d per process, wait %s", limit, wait)
+	logger.Printf("config: upload concurrency %d per process, %d per key, wait %s", limit, perKey, wait)
 	return gate, nil
 }
 
