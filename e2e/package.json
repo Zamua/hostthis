@@ -1,6 +1,9 @@
 {
   "name": "hostthis-e2e",
   "private": true,
+  "engines": {
+    "node": ">=24"
+  },
   "type": "module",
   "scripts": { "test": "playwright test" },
   "devDependencies": { "@playwright/test": "1.64.1", "@types/node": "^24.0.0" }

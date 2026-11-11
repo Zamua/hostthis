@@ -1,6 +1,6 @@
-.PHONY: vuln help build bundle test parity smoke dev run docker-build docker-up docker-down \
-        e2e e2e-ci \
-        fmt vet clean data-dir-perms rebuild-site-fixtures
+.PHONY: help build bundle test parity smoke dev run docker-build docker-up docker-down \
+        e2e e2e-ci check require-node \
+        fmt fmt-check vet fix-check vuln clean data-dir-perms rebuild-site-fixtures
 
 # Default goal: show the help text rather than silently no-op.
 .DEFAULT_GOAL := help
@@ -14,6 +14,8 @@ help:
 	@echo "Developer targets:"
 	@echo "  make build         build ./bin/hostthisd (local Go)"
 	@echo "  make bundle        build the Worker bundle (worker/dist)"
+	@echo "  make check         everything CI's main job gates on: fmt-check, vet,"
+	@echo "                     fix-check, test, vuln"
 	@echo "  make test          run all unit + integration tests"
 	@echo "  make parity        diff hostthisd against the Worker's public surface"
 	@echo "  make e2e           run the browser suite (needs Chrome)"
@@ -42,17 +44,21 @@ WORKER_SRC := $(shell find worker/src worker/build worker/vendor web/shells -typ
 
 bundle: worker/dist/index.js
 
-worker/dist/index.js: $(WORKER_SRC) worker/package.json worker/node_modules
+worker/dist/index.js: $(WORKER_SRC) worker/package.json worker/node_modules | require-node
 	npm --prefix worker run build
 
-worker/node_modules: worker/package-lock.json
+# Every target that runs Node goes through this first.
+require-node:
+	@./scripts/require-node.sh
+
+worker/node_modules: worker/package-lock.json | require-node
 	npm ci --prefix worker
 	@touch $@
 
 # Go tests run the Worker bundle locally (internal/workertest), so they
 # need it built and its runtime installed. The parity suite runs as its own
 # target, once.
-test: bundle worker/localrt/node_modules
+test: require-node bundle worker/localrt/node_modules
 	go test $$(go list ./... | grep -v '/internal/parity$$')
 	$(MAKE) parity
 	npm --prefix worker test
@@ -62,7 +68,7 @@ test: bundle worker/localrt/node_modules
 # to the Worker's public surface, diffed. Locally by default; against a
 # deployed environment when PARITY_HOSTTHISD_URL, PARITY_WORKER_URL,
 # PARITY_TOKEN_FILE and PARITY_SLUGS are set (internal/parity/external_test.go).
-parity: bundle worker/localrt/node_modules
+parity: require-node bundle worker/localrt/node_modules
 	go test -count=1 -v -run '^TestParity' ./internal/parity/
 
 # Run locally (no container) - useful for fast iteration. Defaults to
@@ -93,7 +99,7 @@ smoke:
 # make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'.
 # E2E_READS=worker reads every paste from the Worker's public surface
 # instead of hostthisd, into e2e/playwright-report-worker.
-e2e: e2e/node_modules bundle worker/localrt/node_modules
+e2e: require-node e2e/node_modules bundle worker/localrt/node_modules
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
 # CI installs the browsers with their system libraries first. The HTML report
@@ -102,7 +108,7 @@ e2e: e2e/node_modules bundle worker/localrt/node_modules
 # already installed, as in the Playwright image the PR workflow runs in; the
 # install is then a no-op for browsers the image already holds.
 PLAYWRIGHT_DEPS ?= --with-deps
-e2e-ci: e2e/node_modules bundle worker/localrt/node_modules
+e2e-ci: require-node e2e/node_modules bundle worker/localrt/node_modules
 	cd e2e && npx playwright install $(PLAYWRIGHT_DEPS) chromium webkit
 	cd e2e && npx playwright test $(E2E_FLAGS)
 
@@ -113,8 +119,24 @@ e2e/node_modules: e2e/package-lock.json
 fmt:
 	gofmt -s -w .
 
+# Every file must be gofmt-clean.
+fmt-check:
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then \
+		echo "These files are not gofmt-clean (run 'gofmt -w .'):"; echo "$$out"; exit 1; fi
+
 vet:
 	go vet ./...
+
+# 'go fix -diff' prints pending modernizations without applying them; any
+# output means the tree has idioms 'go fix ./...' would rewrite.
+fix-check:
+	@out=$$(go fix -diff ./... 2>/dev/null); if [ -n "$$out" ]; then \
+		echo "Pending modernizations (run 'go fix ./...' and commit):"; echo "$$out"; exit 1; fi
+
+# What CI's main job gates on, in one command. CI runs these same targets.
+# The browser suite (make e2e), the zstd module rebuild and the celld
+# contracts are separate CI jobs.
+check: fmt-check vet fix-check test vuln
 
 # Fails when a known vulnerability is reachable from this module's code.
 vuln:
