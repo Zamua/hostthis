@@ -35,7 +35,7 @@ func (s *Server) commandLogMiddleware() wish.Middleware {
 // every other code is a normal outcome and logs nothing.
 func abuseEvent(code int) (domain.AbuseEvent, bool) {
 	switch code {
-	case ExitSybilRefuse:
+	case ExitSybilRefuse, ExitKeyBusy:
 		return domain.AbuseRateLimited, true
 	case ExitAuth, ExitBanned:
 		return domain.AbuseAuthFailure, true

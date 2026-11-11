@@ -123,7 +123,7 @@ func await(t *testing.T, ch <-chan result, within time.Duration) result {
 
 func mustAdmission(t *testing.T, limit int, wait time.Duration) *hostssh.UploadAdmission {
 	t.Helper()
-	a, err := hostssh.NewUploadAdmission(limit, wait)
+	a, err := hostssh.NewUploadAdmission(limit, limit, wait)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,5 +345,40 @@ func TestUploadAdmission_SilentSessionHoldsNoSlot(t *testing.T) {
 	r := await(t, runAsync(t, s, "", strings.NewReader("# through\n")), 10*time.Second)
 	if r.exit != hostssh.ExitOK {
 		t.Fatalf("upload beside silent sessions: exit %d, stderr %q", r.exit, r.stderr)
+	}
+}
+
+// One key running its limit of uploads is refused the next with its own exit
+// code, while another key's upload and the first key's other verbs go through.
+func TestUploadAdmission_PerKeyLimitOverSSH(t *testing.T) {
+	blobs := newSlowBlobs()
+	gate, err := hostssh.NewUploadAdmission(4, 1, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := startStack(t, withSites(), withRawBlobs(blobs.wrap), withUploads(gate))
+	t.Cleanup(blobs.release)
+	blobs.park.Store(true)
+	arc := makeSiteArchive(t, map[string]string{"index.html": "<h1>held</h1>"})
+	held := runKeyed(s, "", bytes.NewReader(arc))
+	waitFor(t, func() bool { return blobs.parked.Load() > 0 })
+
+	r := await(t, runKeyed(s, "", strings.NewReader("# second\n")), 10*time.Second)
+	if r.exit != hostssh.ExitKeyBusy || !strings.Contains(r.stderr, "1 uploads already running for this key") {
+		t.Fatalf("second upload on the same key: exit %d, stderr %q, want %d", r.exit, r.stderr, hostssh.ExitKeyBusy)
+	}
+	if r := await(t, runKeyed(s, "list", nil), 10*time.Second); r.exit != hostssh.ExitOK {
+		t.Fatalf("list on the capped key: exit %d, stderr %q", r.exit, r.stderr)
+	}
+
+	blobs.release()
+	if r := await(t, runAsync(t, s, "", strings.NewReader("# other key\n")), 10*time.Second); r.exit != hostssh.ExitOK {
+		t.Fatalf("another key's upload: exit %d, stderr %q", r.exit, r.stderr)
+	}
+	if r := await(t, held, 10*time.Second); r.exit != hostssh.ExitOK {
+		t.Fatalf("held upload: exit %d, stderr %q", r.exit, r.stderr)
+	}
+	if r := await(t, runKeyed(s, "", strings.NewReader("# after\n")), 10*time.Second); r.exit != hostssh.ExitOK {
+		t.Fatalf("upload after the held one finished: exit %d, stderr %q", r.exit, r.stderr)
 	}
 }

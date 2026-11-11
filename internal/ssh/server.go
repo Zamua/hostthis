@@ -533,7 +533,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 	// Admission precedes every read past that small buffer, so a queued upload
 	// holds no encoder and SSH flow control stalls its client.
 	if s.Uploads != nil {
-		release, err := s.Uploads.Acquire(sess.Context())
+		release, err := s.Uploads.Acquire(sess.Context(), owner)
 		if err != nil {
 			if sess.Context().Err() == nil {
 				emitServiceErr(sess, err)
@@ -1277,6 +1277,9 @@ func exitForServiceErr(err error) int {
 	}
 	if errors.Is(err, service.ErrContentRefused) {
 		return ExitRefused
+	}
+	if errors.As(err, new(*OwnerUploadsError)) {
+		return ExitKeyBusy
 	}
 	return ExitErr
 }

@@ -3283,6 +3283,12 @@ the encoders that produce them.
   the first bytes of its body arrive (or the body ends). A session that sends
   nothing holds no slot, so silent sessions cannot keep other uploads out;
   the idle timeout ends them (see "Connection limits").
+- **Per key.** One key may have at most 4 uploads admitted or waiting in a
+  process at once (`HOSTTHIS_UPLOAD_PER_KEY`, between 1 and the limit), so a
+  single key cannot take every slot. The next upload on that key is refused
+  at once, without waiting: `hostthis: 4 uploads already running for this
+  key; try again when one finishes` (exit 9). Other keys, and every other
+  verb on the same key, are unaffected. Like the limit, this is per process.
 - **Waits, never rejects.** An upload beyond the limit waits in arrival order
   (FIFO). While it waits the server reads none of its body past those first
   bytes, so SSH flow control holds the rest on the client once the channel's
@@ -3299,8 +3305,9 @@ the encoders that produce them.
   encoded; the background write that follows (see "Paste lifecycle status")
   runs outside the slot.
 
-Both settings are validated at startup: a limit below 1, a wait that is not a
-positive duration, or an unparseable value stops the process.
+The settings are validated at startup: a limit below 1, a per-key limit
+outside 1 to the limit, a wait that is not a positive duration, or an
+unparseable value stops the process.
 
 ### On-disk format
 
@@ -5199,6 +5206,7 @@ file). Defaults in parens:
                          / HOSTTHIS_WORKER_PUT_BUDGET_BYTES  in-flight Worker write bytes per process (16777216)
                          / HOSTTHIS_WORKER_PUT_WAIT          max wait for Worker write admission      (30s)
                          / HOSTTHIS_UPLOAD_CONCURRENCY      concurrent uploads per process          (8)
+                         / HOSTTHIS_UPLOAD_PER_KEY          concurrent uploads per key per process  (4)
                          / HOSTTHIS_UPLOAD_WAIT             max wait for an upload slot              (30s)
                          / HOSTTHIS_SSH_IDLE_TIMEOUT        close a silent SSH connection after      (5m)
                          / HOSTTHIS_SSH_MAX_SESSION         longest an SSH connection may last       (2h)
