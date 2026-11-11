@@ -76,8 +76,29 @@ func NewCompressedBlobStore(inner InnerBlobStore) *CompressedBlobStore {
 }
 
 // StagePrecompressed streams a body already in the at-rest format.
-func (c *CompressedBlobStore) StagePrecompressed(_ context.Context, key string, r io.Reader, size int64) error {
+func (c *CompressedBlobStore) StagePrecompressed(ctx context.Context, key string, r io.Reader, size int64) error {
+	if inner, ok := c.Inner.(admittingStore); ok {
+		return inner.PutContext(ctx, key, r, size)
+	}
 	return c.Inner.Put(key, r, size)
+}
+
+// AdmitWrite takes the store's admission for a later StagePrecompressed of
+// size bytes, failing with domain.ErrStoreBusy when the store stays too busy.
+// The returned context must be the one passed to that StagePrecompressed, and
+// release called once the write has ended. A store with no admission control
+// admits at once.
+func (c *CompressedBlobStore) AdmitWrite(ctx context.Context, size int64) (context.Context, func(), error) {
+	if inner, ok := c.Inner.(admittingStore); ok {
+		return inner.Admit(ctx, size)
+	}
+	return ctx, func() {}, nil
+}
+
+// admittingStore is an inner store that queues its writes.
+type admittingStore interface {
+	Admit(ctx context.Context, size int64) (context.Context, func(), error)
+	PutContext(ctx context.Context, key string, r io.Reader, size int64) error
 }
 
 // StageEncoding spills the encoded body to disk, so the store receives a known
