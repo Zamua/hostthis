@@ -196,6 +196,19 @@ export class Paste {
     if (!isUploadId(body.row.uploadId)) {
       return Response.json({ error: "invalid-upload-id" }, { status: 400 });
     }
+    try {
+      return await this.putRow(body);
+    } catch (error) {
+      // A manifest past what one stored value holds: nothing was written, and
+      // the caller hears a refusal it can name, as an append would.
+      if (!isTooBig(error)) {
+        throw error;
+      }
+      return Response.json({ error: "version-too-large" }, { status: 413 });
+    }
+  }
+
+  putRow(body) {
     return this.state.storage.transaction(async (tx) => {
       // The slug namespace is global, and this cell IS the slug, so uniqueness is
       // enforced here or nowhere: an unconditional write would let a second

@@ -3849,7 +3849,10 @@ restarts when the operation advances a stage. A candidate version too large to
 persist is refused with `version-too-large` (413) before any charge. One the
 storage layer refuses only at publish can never succeed on retry: the append
 ends with a permanent receipt carrying the same answer and settles the granted
-charge back down through the same version fence.
+charge back down through the same version fence. A create whose first row
+is too large to persist gets the same `version-too-large` (413): nothing is
+written, and `hostthisd` releases the reservation it made for it and reports
+the upload as having too many files.
 
 Cell storage caps a single value at about 2 MiB, so a Paste cell never keeps a
 growing history in one value. Each version's metadata lives under `ver:<n>` and

@@ -160,3 +160,30 @@ func TestInsertInspectsConfirmStatus(t *testing.T) {
 		t.Fatal("insert = nil, want semantic confirm error")
 	}
 }
+
+// A row the cell refuses as too large is a file-count refusal to the caller,
+// and its reservation is released since the row can never land.
+func TestInsertTooLargeRowIsRefusedAndReleased(t *testing.T) {
+	var released bool
+	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
+		switch c.Path {
+		case "/identity/reserve":
+			return cellResponse(http.StatusOK, ""), nil
+		case "/paste/put":
+			return cellResponse(http.StatusRequestEntityTooLarge, `{"error":"version-too-large"}`), nil
+		case "/identity/release":
+			released = true
+			return cellResponse(http.StatusNoContent, ""), nil
+		}
+		t.Fatalf("unexpected path %q", c.Path)
+		return nil, nil
+	}}
+	repo := NewPasteRepo("https://cell", f.client())
+	err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now())
+	if !errors.Is(err, domain.ErrTooManyFiles) {
+		t.Fatalf("insert = %v, want ErrTooManyFiles", err)
+	}
+	if !released {
+		t.Fatal("the reservation of a row that can never land was not released")
+	}
+}

@@ -168,6 +168,15 @@ func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, us
 			}, nil)
 		return domain.ErrSlugTaken
 	}
+	if status == http.StatusRequestEntityTooLarge {
+		// The row was refused whole (its manifest is past what the cell stores),
+		// so it can never land and its charge is released.
+		_, _ = r.call(ctx, opIdentityRelease, owner,
+			releaseRequest{
+				Slug: p.Slug.String(), Generation: generation, IntentID: intentID,
+			}, nil)
+		return fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
+	}
 	if status >= 300 {
 		// Any other conflict may name this generation's own row; the intent
 		// resolves it.
