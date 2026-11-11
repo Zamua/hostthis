@@ -13,7 +13,7 @@ const ADDR_MAX = 64;
 // Sign-in attempts one pending pod link keeps (docs/SPEC.md "Pod storage").
 const LINK_LOGIN_ATTEMPTS = 8;
 
-const IDENTITY_OPS = {
+export const IDENTITY_OPS = {
   bytes: read((self) => self.bytes()),
   list: read((self) => self.list()),
   firstSeen: read((self) => self.firstSeen()),

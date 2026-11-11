@@ -1,6 +1,7 @@
 // The Worker entry: the host-picked routers, and the cell classes the runtime
 // binds by name (wrangler.jsonc durable_objects).
 import { abuseRoute } from "./abuse-routes.js";
+import { bearerIs, credentialScope, scopePermits } from "./auth.js";
 import { BLOB_PATH, handleBlob } from "./blobs.js";
 import { TURN_CELL } from "./cells/turn.js";
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
@@ -16,34 +17,6 @@ export { Paste } from "./cells/paste.js";
 export { Room } from "./cells/room.js";
 export { Subnet } from "./cells/subnet.js";
 export { Turn } from "./cells/turn.js";
-
-const BEARER = /^bearer +/i;
-
-// HOSTTHIS_WORKER_TOKEN, when set, is the bearer token every route but /healthz
-// requires. Both sides are hashed first, so the compare runs over two equal
-// length digests and its timing says nothing about the token.
-async function authorized(request, env) {
-  const token = env.HOSTTHIS_WORKER_TOKEN;
-  if (!token) {
-    return true;
-  }
-  return bearerIs(request, token);
-}
-
-async function bearerIs(request, token) {
-  const header = request.headers.get("Authorization") ?? "";
-  const scheme = BEARER.exec(header);
-  if (!scheme) {
-    return false;
-  }
-  const [want, got] = await Promise.all([token, header.slice(scheme[0].length)]
-    .map(async (text) => new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))));
-  let diff = 0;
-  for (let i = 0; i < want.length; i++) {
-    diff |= want[i] ^ got[i];
-  }
-  return diff === 0;
-}
 
 // Cell-internal paths are reachable only through a class binding, so the
 // router refuses any path naming one, however it is spelled.
@@ -68,15 +41,17 @@ const internalRouter = {
     if (url.pathname === "/healthz") {
       return new Response("ok\n");
     }
+    const scope = await credentialScope(request, env);
     // The watcher's token opens these routes and nothing else.
     if (url.pathname.startsWith("/watcher/")) {
-      const watcher = Boolean(env.HOSTTHIS_WATCHER_TOKEN) && (await bearerIs(request, env.HOSTTHIS_WATCHER_TOKEN));
-      if (!watcher && !(await authorized(request, env))) {
+      if (scope !== "full" && !(await bearerIs(request, env.HOSTTHIS_WATCHER_TOKEN))) {
         return UNAUTHORIZED();
       }
       return abuseRoute(request, env, ctx, url, "watcher");
     }
-    if (!(await authorized(request, env))) {
+    // One answer for a missing token, a wrong one, the full token from an
+    // address off its list, and a narrower token outside its operations.
+    if (!scopePermits(scope, request.method, url)) {
       return UNAUTHORIZED();
     }
     if (namesCellInternal(url.pathname)) {
@@ -120,14 +95,18 @@ const internalRouter = {
     if (!url.pathname.startsWith("/identity/")) {
       return new Response("not found\n", { status: 404 });
     }
-    const scope = url.searchParams.get("scope");
-    if (!scope) {
+    const owner = url.searchParams.get("scope");
+    if (!owner) {
       return new Response("scope required\n", { status: 400 });
     }
     // One owner maps deterministically to one cell holding intents, quota, and index.
-    return env.IDENTITY.get(env.IDENTITY.idFromName(scope)).fetch(request);
+    return env.IDENTITY.get(env.IDENTITY.idFromName(owner)).fetch(request);
   },
 };
+
+function forwardPermitted(scope, method) {
+  return scope === "full" || ((scope === "admin" || scope === "read") && (method === "GET" || method === "HEAD"));
+}
 
 // The host picks the router before any path is read (docs/SPEC.md "Public and
 // internal hosts"). Without an apex the internal router answers everything.
@@ -144,8 +123,11 @@ export default {
     if (!env.HOSTTHIS_WORKER_TOKEN) {
       return new Response("internal routes need HOSTTHIS_WORKER_TOKEN\n", { status: 503 });
     }
+    // A forwarded request is served as the public host it names and trusts the
+    // client address it carries, so only the full token may send one; the
+    // narrower tokens may forward reads.
     const forwarded = request.headers.get(FORWARDED_HOST);
-    if (forwarded !== null && (await authorized(request, env))) {
+    if (forwarded !== null && forwardPermitted(await credentialScope(request, env), request.method)) {
       const target = normalizeHost(forwarded);
       if (!isHostname(target) || !withinApex(target, apex)) {
         return new Response("forwarded host outside the apex\n", { status: 400 });

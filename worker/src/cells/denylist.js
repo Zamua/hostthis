@@ -92,7 +92,7 @@ export function canonicalEntry(text) {
   return null;
 }
 
-const DENYLIST_OPS = {
+export const DENYLIST_OPS = {
   list: read((self) => self.list()),
   add: mutation((self, body) => self.add(body)),
   remove: mutation((self, body) => self.remove(body)),

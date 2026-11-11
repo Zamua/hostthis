@@ -13,7 +13,7 @@ import { ARTIFACT_PENDING, ARTIFACT_RECEIPT_PREFIX, LEGACY_VERSIONS, chargeOf, c
 // the index reader holds an identity and does not know the slugs. No single
 // cell can serve both, which is exactly why the create spans two and needs an
 // intent to survive a crash between them.
-const PASTE_OPS = {
+export const PASTE_OPS = {
   get: read((self) => self.get()),
   versions: read((self) => self.listVersions()),
   resolve: read((self, _body, url) => self.resolve(url)),

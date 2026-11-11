@@ -616,7 +616,7 @@ function cellOps() {
     .map((entry) => readFileSync(join(entry.parentPath, entry.name), "utf8"))
     .join("\n");
   const ops = new Set();
-  for (const table of text.matchAll(/^const (?:[A-Z]+_OPS|CELL_ROUTES) = \{\n([\s\S]*?)\n\};/gm)) {
+  for (const table of text.matchAll(/^(?:export )?const (?:[A-Z]+_OPS|CELL_ROUTES) = \{\n([\s\S]*?)\n\};/gm)) {
     for (const key of table[1].matchAll(/^ {2}(\w+):/gm)) ops.add(key[1]);
   }
   return [...ops];
