@@ -9,8 +9,10 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Zamua/hostthis/internal/workertest"
 
@@ -211,4 +213,56 @@ func TestWorkerBlob_RetriesADroppedSeekablePut(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("streamed put sent %d times, want 1", calls.Load())
 	}
+}
+
+// A Put whose body the store stops reading ends with an error after the stall
+// timeout instead of holding on forever; a store that is only slow to answer
+// once it has the whole body is not mistaken for a stalled one.
+func TestWorkerBlob_PutEndsWhenTheStoreStopsReading(t *testing.T) {
+	release := make(chan struct{})
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadFull(r.Body, make([]byte, 1024))
+		<-release
+	}))
+	defer stuck.Close()
+	defer close(release)
+	store, err := storage.NewWorkerBlobStore(stuck.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.StallTimeout = 200 * time.Millisecond
+
+	const size = 64 << 20 // far more than the socket buffers hold
+	done := make(chan error, 1)
+	go func() { done <- store.Put("uploads/x/0", io.LimitReader(zeros{}, size), size) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "stopped reading the body") {
+			t.Fatalf("put = %v, want the stall error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("put still running long after the stall timeout")
+	}
+
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		time.Sleep(600 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer slow.Close()
+	store, err = storage.NewWorkerBlobStore(slow.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.StallTimeout = 200 * time.Millisecond
+	if err := store.Put("uploads/x/0", io.LimitReader(zeros{}, 1<<20), 1<<20); err != nil {
+		t.Fatalf("put to a store slow to answer: %v", err)
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
 }
