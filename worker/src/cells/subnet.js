@@ -43,13 +43,13 @@ export class Subnet {
 
   // Tells the abuse cell a key is fresh on this subnet, for its recent-keys
   // ring. Best effort: a failure costs the ring an event, never the admission.
-  async reportFresh(subnet, identity, at) {
+  async reportFresh(subnet, identity, at, addr) {
     if (!this.env?.ABUSE || !subnet) {
       return;
     }
     try {
       await this.env.ABUSE.get(this.env.ABUSE.idFromName("abuse")).fetch(new Request("https://cell/abuse/fresh", {
-        method: "POST", body: JSON.stringify({ subnet, identity, at }),
+        method: "POST", body: JSON.stringify({ subnet, identity, at, addr }),
       }));
     } catch (error) {
       console.warn(`warn: fresh report: ${error?.message ?? error}`);
@@ -68,7 +68,7 @@ export class Subnet {
     }
     rows[body.identity] = body.now;
     await this.state.storage.put("rows", rows);
-    await this.reportFresh(url?.searchParams.get("subnet"), body.identity, body.now);
+    await this.reportFresh(url?.searchParams.get("subnet"), body.identity, body.now, body.addr);
     return Response.json({ knownAlready: false, admitted: true });
   }
 

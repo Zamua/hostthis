@@ -35,6 +35,12 @@ func roomKey(app domain.Slug, id domain.RoomID) string {
 // Room-cell request. A cell that already holds the room answers
 // {created:false}: domain.ErrSlugTaken, so the caller retries a fresh id.
 func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
+	return r.CreateRoomFrom(room, subnet, "", appCap, now)
+}
+
+// CreateRoomFrom is CreateRoom that also records addr, the creating client's
+// address, beside the subnet in the app's creation ledger.
+func (r *RoomRepo) CreateRoomFrom(room domain.Room, subnet, addr string, appCap int64, now time.Time) error {
 	var res struct {
 		Created *bool `json:"created"`
 	}
@@ -43,7 +49,7 @@ func (r *RoomRepo) CreateRoom(room domain.Room, subnet string, appCap int64, now
 			AppSlug: room.AppSlug.String(), ID: room.ID.String(),
 			CreatedAt: room.CreatedAt.UTC().UnixMilli(),
 			UpdatedAt: room.UpdatedAt.UTC().UnixMilli(),
-			Subnet:    subnet, At: now.UTC().UnixMilli(),
+			Subnet:    subnet, Addr: addr, At: now.UTC().UnixMilli(),
 			AppCap: appCap, RoomLimit: domain.MaxAppRooms,
 		}, &res, map[int]error{http.StatusInsufficientStorage: domain.ErrAppRoomsFull}); err != nil {
 		return err

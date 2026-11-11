@@ -31,12 +31,21 @@ func NewKeyGateRepo(base string, c *http.Client) *KeyGateRepo {
 func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitPerSubnet int,
 	window time.Duration,
 ) (bool, error) {
+	return r.AdmitNewKeyFrom(identity, subnet, "", now, limitPerSubnet, window)
+}
+
+// AdmitNewKeyFrom is AdmitNewKey that also records addr, the client's address,
+// beside the subnet in the fresh-key and per-identity records. The subnet
+// alone decides admission.
+func (r *KeyGateRepo) AdmitNewKeyFrom(identity, subnet, addr string, now time.Time, limitPerSubnet int,
+	window time.Duration,
+) (bool, error) {
 	var res struct {
 		KnownAlready bool `json:"knownAlready"`
 		Admitted     bool `json:"admitted"`
 	}
 	body := admitRequest{
-		Identity: identity, Now: now.UTC().UnixMilli(),
+		Addr: addr, Identity: identity, Now: now.UTC().UnixMilli(),
 		Window: window.Milliseconds(), Limit: limitPerSubnet,
 	}
 	status, err := r.call(context.Background(), opSubnetAdmit, subnet, body, &res)
@@ -54,7 +63,7 @@ func (r *KeyGateRepo) AdmitNewKey(identity, subnet string, now time.Time, limitP
 	}
 	if !res.KnownAlready || retried {
 		if _, err := r.call(context.Background(), opIdentityNoteSubnet, identity,
-			noteSubnetRequest{Subnet: subnet, Now: now.UTC().UnixMilli()}, nil); err != nil {
+			noteSubnetRequest{Addr: addr, Subnet: subnet, Now: now.UTC().UnixMilli()}, nil); err != nil {
 			return false, err
 		}
 	}

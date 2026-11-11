@@ -1,5 +1,5 @@
 import { cellRoute } from "./image.js";
-import { BAN, RETENTION_DAYS, advance, clearOpenBan, createBan, openBanId, ownerSlugs, ownerSubnets, summary } from "./bans.js";
+import { BAN, RETENTION_DAYS, advance, clearOpenBan, createBan, openBanId, ownerNetworks, ownerSlugs, summary } from "./bans.js";
 import { dispatch, mutation, read } from "./ops.js";
 
 // The ABUSE cell (docs/SPEC.md "Quarantine"): serializes quarantine, release
@@ -11,6 +11,8 @@ import { dispatch, mutation, read } from "./ops.js";
 const WATCHER_BANS_PER_HOUR = 5;
 const HOUR_MS = 3_600_000;
 const AUDIT_MAX = 1000;
+// Longest address text a record keeps (an IPv6 address is at most 45 characters).
+const ADDR_MAX = 64;
 const FRESH_MAX = 2000;
 const FRESH_KEEP_MS = 24 * HOUR_MS;
 const REASON_MAX = 200;
@@ -257,8 +259,8 @@ export class Abuse {
     });
     await this.schedule(body.now);
     await this.record(body, hash, "ok", { banId, slugs: slugs.length });
-    const subnets = await ownerSubnets(this.env, identity, body.now);
-    return Response.json({ banId, owner: hash, slugs: slugs.length, deleteAfter: record.deleteAfter, subnets });
+    const { subnets, addrs } = await ownerNetworks(this.env, identity, body.now);
+    return Response.json({ banId, owner: hash, slugs: slugs.length, deleteAfter: record.deleteAfter, subnets, addrs });
   }
 
   async unbanOwner(input) {
@@ -364,7 +366,12 @@ export class Abuse {
       return fail(400, "invalid-request");
     }
     const ring = (await this.state.storage.get("fresh")) ?? [];
-    ring.push({ subnet: body.subnet, fp: body.identity.replace(/^key:/, ""), at: body.at });
+    const event = { subnet: body.subnet, fp: body.identity.replace(/^key:/, ""), at: body.at };
+    // The address the key came from, when the caller sent one.
+    if (typeof body.addr === "string" && body.addr !== "" && body.addr.length <= ADDR_MAX) {
+      event.addr = body.addr;
+    }
+    ring.push(event);
     const kept = ring.filter((e) => body.at - e.at < FRESH_KEEP_MS).slice(-FRESH_MAX);
     await this.state.storage.put("fresh", kept);
     return Response.json({ ok: true });
@@ -385,7 +392,7 @@ export class Abuse {
       }
       const keys = bySubnet.get(e.subnet) ?? new Map();
       if (!keys.has(e.fp)) {
-        keys.set(e.fp, e.at);
+        keys.set(e.fp, { at: e.at, addr: e.addr ?? null });
       }
       bySubnet.set(e.subnet, keys);
     }
@@ -405,9 +412,10 @@ export class Abuse {
         continue;
       }
       const rows = [];
-      for (const [fp, at] of [...keys].sort((a, b) => a[1] - b[1])) {
+      for (const [fp, { at, addr }] of [...keys].sort((a, b) => a[1].at - b[1].at)) {
         rows.push({
-          key: fp.replace(/^SHA256:/, "").slice(0, 10), owner: (await ownerHash(`key:${fp}`)).slice(0, 8), at, banned: banned.has(fp),
+          key: fp.replace(/^SHA256:/, "").slice(0, 10), owner: (await ownerHash(`key:${fp}`)).slice(0, 8), at, addr,
+          banned: banned.has(fp),
         });
       }
       groups.push({ subnet, first: rows[0].at, last: rows[rows.length - 1].at, keys: rows });

@@ -111,6 +111,18 @@ func (e *RoomRateLimit) Is(target error) bool { return target == ErrRoomCreateRa
 // count and overshoot the cap slightly. Accepted for a coarse abuse bound; the
 // hard bound is the per-app aggregate byte cap, enforced inside the tx.
 func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) {
+	return s.CreateFrom(appSlug, subnet, "")
+}
+
+// addrRecordingRooms is a RoomRepo that can also record the address a room
+// was created from.
+type addrRecordingRooms interface {
+	CreateRoomFrom(room domain.Room, subnet, addr string, appCap int64, now time.Time) error
+}
+
+// CreateFrom is Create that also records addr, the creating client's address,
+// when the store keeps addresses. The subnet alone is rate limited.
+func (s *Rooms) CreateFrom(appSlug domain.Slug, subnet, addr string) (domain.Room, error) {
 	now := s.now()
 
 	perSubnet, perApp, err := s.Repo.CountRoomCreates(appSlug, subnet, now, s.CreateWindow)
@@ -133,7 +145,12 @@ func (s *Rooms) Create(appSlug domain.Slug, subnet string) (domain.Room, error) 
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		err := s.Repo.CreateRoom(room, subnet, s.PerAppByteCap, now)
+		var err error
+		if repo, ok := s.Repo.(addrRecordingRooms); ok && addr != "" {
+			err = repo.CreateRoomFrom(room, subnet, addr, s.PerAppByteCap, now)
+		} else {
+			err = s.Repo.CreateRoom(room, subnet, s.PerAppByteCap, now)
+		}
 		switch {
 		case err == nil:
 			return room, nil
