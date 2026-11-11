@@ -50,11 +50,9 @@ func wantSSHLine(t *testing.T, lines []string, event string, status int) {
 	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
 		t.Fatalf("line is not JSON: %q", lines[0])
 	}
-	if got["event"] != event || got["route"] != "ssh" || got["status"] != float64(status) || got["subnet"] != "127.0.0.0/24" || len(got) != 4 {
-		t.Fatalf("line %v, want event=%s route=ssh status=%d subnet=127.0.0.0/24", got, event, status)
-	}
-	if strings.Contains(lines[0], "127.0.0.1") {
-		t.Fatalf("line carries the full address: %q", lines[0])
+	if got["event"] != event || got["route"] != "ssh" || got["status"] != float64(status) ||
+		got["addr"] != "127.0.0.1" || got["subnet"] != "127.0.0.0/24" || len(got) != 5 {
+		t.Fatalf("line %v, want event=%s route=ssh status=%d addr=127.0.0.1 subnet=127.0.0.0/24", got, event, status)
 	}
 }
 
@@ -171,9 +169,9 @@ func TestAbuseLog_RefusedKeyIsNotACreation(t *testing.T) {
 	}
 }
 
-// Property: behind the PROXY protocol, whatever the client address, no line
-// spells it and the subnet is the /24 or /40 of it.
-func TestAbuseLog_ProxiedAddressNeverReachesALine(t *testing.T) {
+// Behind the PROXY protocol a line names the client's own address, not the
+// forwarder's, and the /24 or /40 it groups under.
+func TestAbuseLog_ProxiedAddressIsTheClients(t *testing.T) {
 	sink := &abuseSink{}
 	g := startStack(t, withProxyProto(), withKeyGate(100), withAbuse(abuselog.New(sink.printf)))
 	for _, tc := range []struct{ family, ip, subnet string }{
@@ -188,13 +186,8 @@ func TestAbuseLog_ProxiedAddressNeverReachesALine(t *testing.T) {
 		}
 		lines := sink.await(t, 1)
 		line := lines[len(lines)-1]
-		if !strings.Contains(line, `"subnet":"`+tc.subnet+`"`) {
-			t.Fatalf("%s: line %q, want subnet %s", tc.ip, line, tc.subnet)
-		}
-		for _, l := range lines {
-			if strings.Contains(l, tc.ip) {
-				t.Fatalf("line %q carries the address %s", l, tc.ip)
-			}
+		if !strings.Contains(line, `"subnet":"`+tc.subnet+`"`) || !strings.Contains(line, `"addr":"`+tc.ip+`"`) {
+			t.Fatalf("%s: line %q, want addr %s subnet %s", tc.ip, line, tc.ip, tc.subnet)
 		}
 		sink.mu.Lock()
 		sink.lines = nil

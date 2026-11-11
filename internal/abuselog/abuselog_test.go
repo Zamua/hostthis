@@ -17,11 +17,9 @@ func capture() (*Logger, *[]string) {
 	return New(func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }), &lines
 }
 
-// Port-shaped guard: the address is a parameter only so it can be truncated;
-// no header, body, URL or user agent can be handed to the line.
-var _ func(*Logger, domain.AbuseEvent, string, int, net.IP) = (*Logger).Log
-
-func TestLineCarriesFourFieldsAndNeverTheAddress(t *testing.T) {
+// A line carries the event, route and status, the client's address in its
+// canonical text, and the subnet that address groups under.
+func TestLineCarriesTheAddressAndItsSubnet(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261103))
 	for i := range 1000 {
 		var ip net.IP
@@ -47,43 +45,27 @@ func TestLineCarriesFourFieldsAndNeverTheAddress(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &fields); err != nil {
 			t.Fatalf("not JSON: %q", line)
 		}
-		keys := make([]string, 0, len(fields))
-		for k := range fields {
-			keys = append(keys, k)
+		if len(fields) != 5 || fields["event"] != "rate-limited" || fields["route"] != "collection" || fields["status"] != float64(429) {
+			t.Fatalf("fields %v in %q", fields, line)
 		}
-		if len(keys) != 4 || fields["event"] != "rate-limited" || fields["route"] != "collection" || fields["status"] != float64(429) {
-			t.Fatalf("fields %v in %q", keys, line)
-		}
-		for _, spelling := range spellings(ip) {
-			if strings.Contains(line, spelling) {
-				t.Fatalf("line %q holds the address %q", line, spelling)
-			}
+		want, _ := netip.AddrFromSlice(ip)
+		want = want.Unmap()
+		if fields["addr"] != want.String() {
+			t.Fatalf("addr %q, want %q", fields["addr"], want)
 		}
 		prefix, err := netip.ParsePrefix(fields["subnet"].(string))
 		if err != nil {
 			t.Fatalf("subnet %q: %v", fields["subnet"], err)
 		}
-		want, _ := netip.AddrFromSlice(ip)
-		want = want.Unmap()
 		if prefix.Bits() != bits || prefix.Addr() != netip.PrefixFrom(want, bits).Masked().Addr() {
-			t.Fatalf("%v logged as %v, want %d kept bits", ip, prefix, bits)
-		}
-		if prefix.Addr() != prefix.Masked().Addr() {
-			t.Fatalf("host bits survive in %v", prefix)
+			t.Fatalf("%v grouped under %v, want %d kept bits", ip, prefix, bits)
 		}
 	}
-}
-
-// spellings are the textual forms an address could reach a line in.
-func spellings(ip net.IP) []string {
-	out := []string{ip.String()}
-	if a, ok := netip.AddrFromSlice(ip); ok {
-		out = append(out, a.Unmap().String(), strings.ToUpper(a.String()))
-		if a.Is6() && !a.Is4In6() {
-			out = append(out, a.StringExpanded())
-		}
+	logger, lines := capture()
+	logger.Log(domain.AbuseRateLimited, "ssh", 6, nil)
+	if !strings.Contains((*lines)[0], `"addr":"unknown"`) {
+		t.Fatalf("a missing address logged as %q", (*lines)[0])
 	}
-	return out
 }
 
 func TestNilLoggerIsANoOp(t *testing.T) {

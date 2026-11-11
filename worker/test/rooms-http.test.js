@@ -839,7 +839,7 @@ function abuseLines(run) {
   );
 }
 
-test("a refused creation logs one abuse line carrying the subnet and nothing else of the client", async () => {
+test("a refused creation logs one abuse line carrying the client's address and subnet, and no header", async () => {
   const w = world({ HOSTTHIS_CLIENT_IP_SOURCE: "cf-connecting-ip" });
   w.app();
   seedLedger(w, Array.from({ length: 60 }, (_, n) => ({ id: `s${n}`, subnet: "203.0.113.0/24", at: Date.now() })));
@@ -850,9 +850,10 @@ test("a refused creation logs one abuse line carrying the subnet and nothing els
   assert.equal(res.status, 429);
   assert.equal(lines.length, 1);
   assert.deepEqual(JSON.parse(lines[0]), {
-    event: "rate-limited", route: "collection", status: 429, subnet: "203.0.113.0/24", country: null, asn: null,
+    event: "rate-limited", route: "collection", status: 429, addr: "203.0.113.77", subnet: "203.0.113.0/24",
+    country: null, asn: null,
   });
-  assert.doesNotMatch(lines[0], /203\.0\.113\.77|secret-agent/);
+  assert.doesNotMatch(lines[0], /secret-agent/);
 });
 
 test("a created room logs one line, and ordinary traffic logs none", async () => {
@@ -863,7 +864,8 @@ test("a created room logs one line, and ordinary traffic logs none", async () =>
   assert.equal(created.value.status, 201);
   assert.equal(created.lines.length, 1);
   assert.deepEqual(JSON.parse(created.lines[0]), {
-    event: "created", route: "collection", status: 201, subnet: "2001:db8:ab00::/40", country: null, asn: null,
+    event: "created", route: "collection", status: 201, addr: "2001:db8:abcd:1234::1", subnet: "2001:db8:ab00::/40",
+    country: null, asn: null,
   });
   const { id } = await created.value.json();
   const traffic = await abuseLines(async () => {

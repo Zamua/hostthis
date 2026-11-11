@@ -1,6 +1,8 @@
 package ssh
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"time"
 
@@ -10,9 +12,11 @@ import (
 )
 
 // commandLogMiddleware logs one line per session: verb, slug, outcome and
-// duration, so load on the cells can be traced to the commands behind it.
-// Only bounded or public values are logged: the verb from the registry and a
-// slug that parses as one. Names, labels and payloads never are.
+// duration, so load on the cells can be traced to the commands behind it, and
+// who ran it from where: a short hash of the key, how the session logged in,
+// and the client's address and subnet, so a question about a key's use can be
+// answered from the log. The verb comes from the registry and the slug must
+// parse as one; names, labels and payloads are never logged.
 func (s *Server) commandLogMiddleware() wish.Middleware {
 	return func(next gossh.Handler) gossh.Handler {
 		return func(sess gossh.Session) {
@@ -20,15 +24,45 @@ func (s *Server) commandLogMiddleware() wish.Middleware {
 			rec := &exitRecorder{Session: sess}
 			next(rec)
 			verb, slug := commandFields(sess.Command())
-			s.Logger.Printf("ssh: command verb=%s slug=%s outcome=%s ms=%d",
-				verb, slug, outcomeLabel(rec), time.Since(start).Milliseconds())
+			ip := remoteIP(sess)
+			s.Logger.Printf("ssh: command verb=%s slug=%s outcome=%s ms=%d key=%s auth=%s addr=%s subnet=%s",
+				verb, slug, outcomeLabel(rec), time.Since(start).Milliseconds(),
+				sessionKeyHash(sess), sessionAuthMethod(sess), domain.AddrText(ip), domain.SubnetOf(ip))
 			if rec.set && s.Abuse != nil {
 				if event, ok := abuseEvent(rec.code); ok {
-					s.Abuse.Log(event, "ssh", rec.code, remoteIP(sess))
+					s.Abuse.Log(event, "ssh", rec.code, ip)
 				}
 			}
 		}
 	}
+}
+
+// sessionKeyHash is the short hash operator tools and the audit log name an
+// owner by (the first 8 bytes of the SHA-256 of the identity, in hex), or "-"
+// for a session that authenticated without a key.
+func sessionKeyHash(sess gossh.Session) string {
+	owner, err := domain.OwnerFromKeyFingerprint(sessionKeyFingerprint(sess))
+	if err != nil {
+		return "-"
+	}
+	sum := sha256.Sum256([]byte(owner.String()))
+	return hex.EncodeToString(sum[:8])
+}
+
+// authMethodKey is the connection-context key under which the password and
+// keyboard-interactive callbacks note themselves. It is for the log only:
+// identity comes from the verified key (sessionKeyFingerprint).
+const authMethodKey = "hostthisAuthMethod"
+
+// sessionAuthMethod names how the session authenticated.
+func sessionAuthMethod(sess gossh.Session) string {
+	if sess.PublicKey() != nil {
+		return "publickey"
+	}
+	if method, ok := sess.Context().Value(authMethodKey).(string); ok {
+		return method
+	}
+	return "none"
 }
 
 // abuseEvent classifies the exit codes that are refusals of the client:

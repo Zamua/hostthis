@@ -75,7 +75,7 @@ type Server struct {
 	Pods       *service.Pods
 	PodLinkURL func(id, secret string) string
 	Logger     *log.Logger
-	// Abuse, when set, receives one subnet-only line per refused session
+	// Abuse, when set, receives one line per refused session
 	// (docs/SPEC.md "Abuse log on hostthisd"). Nil disables.
 	Abuse service.AbuseLog
 	// Metrics is optional; nil records nothing. Kept as a port so this package
@@ -189,8 +189,12 @@ func (s *Server) ListenAndServe() error {
 		// The callbacks only admit. A client may offer a key it cannot sign
 		// for, so identity is read after authentication (sessionKeyFingerprint).
 		wish.WithPublicKeyAuth(func(gossh.Context, gossh.PublicKey) bool { return true }),
-		wish.WithPasswordAuth(func(_ gossh.Context, _ string) bool { return true }),
-		wish.WithKeyboardInteractiveAuth(func(_ gossh.Context, _ xssh.KeyboardInteractiveChallenge) bool {
+		wish.WithPasswordAuth(func(ctx gossh.Context, _ string) bool {
+			ctx.SetValue(authMethodKey, "password")
+			return true
+		}),
+		wish.WithKeyboardInteractiveAuth(func(ctx gossh.Context, _ xssh.KeyboardInteractiveChallenge) bool {
+			ctx.SetValue(authMethodKey, "keyboard-interactive")
 			return true
 		}),
 		// The LAST middleware in the list wraps the rest and runs FIRST, so
