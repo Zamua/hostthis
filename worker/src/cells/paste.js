@@ -1,6 +1,6 @@
 import { b64url } from "../solid/jose.js";
 import { ECDSA_P256, VAPID_KEY, VAPID_TTL_MS, httpsOrigin, rawPoint, signVapid } from "../push.js";
-import { manifestObjects, resolveRead } from "../read.js";
+import { decodeServedManifest, manifestObjects, resolveRead } from "../read.js";
 import { noteChange } from "./feed.js";
 import { cellRoute } from "./image.js";
 import { USER_QUOTA_BYTES } from "../rooms/policy.js";
@@ -70,6 +70,7 @@ export class Paste {
   async fetch(request) {
     const cell = await cellRoute(this.state, request);
     if (cell) {
+      this.served = null;
       return cell;
     }
     const slug = new URL(request.url).searchParams.get("slug");
@@ -82,7 +83,29 @@ export class Paste {
       ?? new Response("unknown op\n", { status: 404 });
     // A read changes nothing a reader could see, so it skips the two row
     // reads that noticing a change costs: a read stays one read of the row.
-    return opOf(PASTE_OPS, request)?.mutating === false ? work() : this.noticed(slug, work);
+    if (opOf(PASTE_OPS, request)?.mutating === false) {
+      return work();
+    }
+    // Anything that may write drops the decoded manifest, before and after:
+    // a read only ever uses one decoded from the row as it now stands.
+    this.served = null;
+    try {
+      return await this.noticed(slug, work);
+    } finally {
+      this.served = null;
+    }
+  }
+
+  // The row's manifest, decoded once and kept for the reads that follow: the
+  // decoding costs time in proportion to the site's file count, and a site's
+  // every file request passes through here. The stamp is a second guard: a
+  // row that differs in any of its fields is decoded afresh.
+  servedManifest(row) {
+    const stamp = JSON.stringify([row.generation, row.uploadId, row.updatedAt, row.pinnedVersion]);
+    if (this.served?.stamp !== stamp) {
+      this.served = { stamp, manifest: decodeServedManifest(row.manifest) };
+    }
+    return this.served.manifest;
   }
 
   // Runs work and, when it changed the row or its quarantine, tells the feed.
@@ -642,8 +665,10 @@ export class Paste {
       return Response.json({ error: "invalid-path" }, { status: 400 });
     }
     const [row, quarantine] = await Promise.all(["row", "quarantine"].map((k) => this.state.storage.get(k)));
-    return Response.json(resolveRead(quarantine ? undefined : row, {
+    const served = quarantine ? undefined : row;
+    return Response.json(resolveRead(served, {
       path,
+      manifest: served && this.servedManifest(served),
       raw: url.searchParams.get("raw") === "1",
       files: url.searchParams.get("files") === "1",
     }));
@@ -1436,14 +1461,19 @@ export class Paste {
   // A thrown alarm would fall to the runtime's own retry, which neither backs
   // off far enough nor keeps the operation's state.
   async alarm() {
-    await this.noticed(null, () => this.state.blockConcurrencyWhile(async () => {
-      try {
-        await this.resumeArtifactPending(true);
-      } catch (error) {
-        console.error(`paste alarm: ${error}`);
-        await this.retryArtifactPending();
-      }
-    }));
+    this.served = null;
+    try {
+      await this.noticed(null, () => this.state.blockConcurrencyWhile(async () => {
+        try {
+          await this.resumeArtifactPending(true);
+        } catch (error) {
+          console.error(`paste alarm: ${error}`);
+          await this.retryArtifactPending();
+        }
+      }));
+    } finally {
+      this.served = null;
+    }
   }
 
   // Only a still-PENDING row transitions, so a late finalizer cannot resurrect

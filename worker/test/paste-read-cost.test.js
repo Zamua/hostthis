@@ -55,3 +55,57 @@ test("a create whose row is too large for the cell is refused 413 and leaves not
   assert.equal(storage.data.has("row"), false);
   assert.equal(storage.data.has("maxVer"), false);
 });
+
+const SITE = { ...ROW, kind: "site", generation: "g1" };
+const file = (key) => ({ Key: key, DecodedSize: 3, ContentType: "text/plain" });
+const resolveKey = async (cell, path) => {
+  const res = await cell.fetch(new Request(`https://cell/paste/resolve?slug=abc12345&path=${path}`));
+  return (await res.json()).entry?.key;
+};
+
+test("reads of one row decode its manifest once, and any op that may write decodes it afresh", async () => {
+  const storage = new FakeStorage(new Map([["row", { ...SITE, manifest: { Files: { "a.txt": file("blobs/one") } } }]]));
+  const cell = new Paste(state(storage), {});
+  assert.equal(await resolveKey(cell, "/a.txt"), "blobs/one");
+
+  // Stored behind the cell's back with nothing else changed: only a kept
+  // decoding still answers with the old key.
+  storage.data.set("row", { ...SITE, manifest: { Files: { "a.txt": file("blobs/two") } } });
+  assert.equal(await resolveKey(cell, "/a.txt"), "blobs/one");
+
+  // A mutating op, whatever it does, drops what was kept.
+  await cell.fetch(new Request("https://cell/paste/release?slug=abc12345", { method: "POST", body: "{}" }));
+  assert.equal(await resolveKey(cell, "/a.txt"), "blobs/two");
+
+  // So does the alarm.
+  storage.data.set("row", { ...SITE, manifest: { Files: { "a.txt": file("blobs/three") } } });
+  await cell.alarm();
+  assert.equal(await resolveKey(cell, "/a.txt"), "blobs/three");
+});
+
+test("a row that differs in generation, upload, update time or pin is decoded afresh without any op", async () => {
+  const changes = [{ generation: "g2" }, { uploadId: "b".repeat(32) }, { updatedAt: 8 }, { pinnedVersion: 2 }];
+  for (const change of changes) {
+    const storage = new FakeStorage(new Map([["row", { ...SITE, manifest: { Files: { "a.txt": file("blobs/one") } } }]]));
+    const cell = new Paste(state(storage), {});
+    assert.equal(await resolveKey(cell, "/a.txt"), "blobs/one");
+    storage.data.set("row", { ...SITE, ...change, manifest: { Files: { "a.txt": file("blobs/two") } } });
+    assert.equal(await resolveKey(cell, "/a.txt"), "blobs/two", JSON.stringify(change));
+  }
+});
+
+test("a quarantined paste answers not found even with its manifest decoded and kept", async () => {
+  const storage = new FakeStorage(new Map([["row", { ...SITE, manifest: { Files: { "a.txt": file("blobs/one") } } }]]));
+  const cell = new Paste(state(storage), {});
+  assert.equal(await resolveKey(cell, "/a.txt"), "blobs/one");
+  storage.data.set("quarantine", { reason: "abuse", at: 9 });
+  const res = await cell.fetch(new Request("https://cell/paste/resolve?slug=abc12345&path=/a.txt"));
+  assert.deepEqual(await res.json(), { found: false });
+});
+
+test("every paste op declares whether it may write", async () => {
+  const { PASTE_OPS } = await import("../src/cells/paste.js");
+  for (const [name, op] of Object.entries(PASTE_OPS)) {
+    assert.equal(typeof op.mutating, "boolean", name);
+  }
+});

@@ -33,7 +33,10 @@ export const ASSET_EXTENSIONS = new Set([
   ".gz", ".br", ".zip", ".bin", ".dat",
 ]);
 
-export function resolveRead(row, { path, raw = false, files = false }) {
+//
+// manifest is the row's manifest already decoded (decodeServedManifest), for a
+// caller that keeps it between reads; without it the row's is decoded here.
+export function resolveRead(row, { path, raw = false, files = false, manifest: decoded }) {
   if (!row) {
     return { found: false };
   }
@@ -45,7 +48,7 @@ export function resolveRead(row, { path, raw = false, files = false }) {
     uploadId: typeof row.uploadId === "string" ? row.uploadId : "",
     ...extra,
   });
-  const manifest = decodeManifest(row.manifest);
+  const manifest = decoded ?? decodeManifest(row.manifest);
 
   // The shape is the declared kind, never the entry count: a one-file
   // directory still hands back its file.
@@ -224,6 +227,12 @@ function decodeManifest(value, accounting = false) {
     }
     throw error;
   }
+}
+
+// A stored manifest as resolveRead looks paths up in it. Nothing changes the
+// result, so one decoding serves every read of the same manifest.
+export function decodeServedManifest(value) {
+  return decodeManifest(value);
 }
 
 // An entry's validator, the same as Go's ManifestEntry.Validator: its
