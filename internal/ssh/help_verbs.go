@@ -116,6 +116,20 @@ var verbDescriptors = map[string]verbDescriptor{
 			"ssh {{apex}} versions abc12345 -o json | jq '.versions'",
 		},
 	},
+	"rooms": {
+		Name:      "rooms",
+		Signature: "ssh {{apex}} rooms <slug> [-o json] | rooms <slug> rm <room-id>... | rooms <slug> rm --all",
+		Description: "List the rooms of an app you own, or delete them. Anyone who " +
+			"can open the app can create rooms in it, up to the app's room " +
+			"limit; deleting a room frees its place and its stored bytes. A " +
+			"deleted room is gone for good: its values are dropped, its open " +
+			"connections are closed, and its scheduled notifications stop.",
+		Examples: []string{
+			"ssh {{apex}} rooms abc12345",
+			"ssh {{apex}} rooms abc12345 rm 0b3c1f6e-8a52-4e0b-9a0d-2f1c5d7e9a11",
+			"ssh {{apex}} rooms abc12345 rm --all",
+		},
+	},
 	"pin": {
 		Name:      "pin",
 		Signature: "ssh {{apex}} pin <slug> <ver>",

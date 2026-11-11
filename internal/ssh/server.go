@@ -59,6 +59,7 @@ type Server struct {
 	ApexDomain  string // used in user-visible messages (help text, error hints).
 	Upload      *service.Upload
 	Deploy      service.SiteDeployer // optional; nil disables static-site archive uploads
+	AppRooms    OwnerRooms           // optional; nil answers `rooms` as not found
 	Manage      service.PasteManager
 	Pastes      PasteReader       // by-slug read for the `versions` current-marker
 	Sites       SiteReader        // optional; by-slug site read for `url`/`qr` (nil = paste-only)
@@ -486,6 +487,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbHave(sess, owner, argv[1:])
 	case "versions":
 		s.verbVersions(sess, owner, argv[1:])
+	case "rooms":
+		s.verbRooms(sess, owner, argv[1:])
 	case "pin":
 		s.verbPin(sess, owner, argv[1:])
 	case "unpin":
@@ -1156,6 +1159,7 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
     ssh {{apex}} qr <slug>                  re-show the URL + QR code
     ssh {{apex}} rename <slug> "label"      set / change owner label
     ssh {{apex}} delete <slug> [<ver>]      wipe the paste, or tombstone one version
+    ssh {{apex}} rooms <slug>               list an app's rooms (rooms <slug> rm deletes)
     ssh {{apex}} whoami                     identity + active count + quota
     ssh {{apex}} pod link <webid>           store new uploads in your Solid pod
 

@@ -25,6 +25,8 @@ type metadataBundle struct {
 	Denylist service.DenylistSource
 	Sites    siteStore
 	Rooms    roomStore
+	// AppRooms lists and removes an app's rooms for its owner.
+	AppRooms *worker.AppRoomsRepo
 	// RoomRelay is the cell-backed real-time transport.
 	RoomRelay httpapi.RoomRelay
 	// Solid forwards the apex /_solid/ paths to the Worker.
@@ -86,6 +88,7 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 		Denylist: worker.NewDenylistRepo(base, client),
 		Sites:    storage.NewSites(repo),
 		Rooms:    rooms,
+		AppRooms: worker.NewAppRoomsRepo(base, client),
 		// Every socket terminates at its Room cell, which owns broadcast order.
 		RoomRelay: worker.NewRoomProxy(base, client),
 		Solid:     solid,

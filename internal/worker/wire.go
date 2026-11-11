@@ -76,6 +76,7 @@ var (
 	opPastePin        = route{http.MethodPost, "/paste/pin", bySlug}
 	opPastePushKey    = route{http.MethodPost, "/paste/pushkey", bySlug}
 	opPasteRoomCounts = route{http.MethodGet, "/paste/roomcounts", bySlug}
+	opPasteRoomIndex  = route{http.MethodGet, "/paste/roomindex", bySlug}
 
 	opSubnetAdmit    = route{http.MethodPost, "/subnet/admit", bySubnet}
 	opSubnetSnapshot = route{http.MethodGet, "/subnet/snapshot", bySubnet}
@@ -90,6 +91,7 @@ var (
 	opRoomPut             = route{http.MethodPost, "/room/put", byRoom}
 	opRoomDel             = route{http.MethodPost, "/room/del", byRoom}
 	opRoomJoin            = route{http.MethodGet, "/room/join", byRoom}
+	opRoomRemove          = route{http.MethodPost, "/room/remove", byRoom}
 	opRoomPushSubPut      = route{http.MethodPost, "/room/pushsubput", byRoom}
 	opRoomPushSubDel      = route{http.MethodPost, "/room/pushsubdel", byRoom}
 	opRoomPushSubList     = route{http.MethodPost, "/room/pushsublist", byRoom}

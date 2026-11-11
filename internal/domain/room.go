@@ -46,10 +46,22 @@ const MaxRoomValueBytes = MaxRoomBytes
 // that app are refused until the app deletes rooms or values. Tunable default.
 const MaxAppRoomBytes = 48 << 20 // 48 MiB
 
-// MaxAppRooms bounds how many rooms one app may ever create. Rooms are never
-// deleted, so it is a lifetime count; past it new rooms are refused like a
-// full app.
+// MaxAppRooms bounds how many rooms one app may hold: every room it ever
+// created, less those its owner or the operator removed. Past it new rooms
+// are refused like a full app.
 const MaxAppRooms = 500
+
+// AppRoom is one room of an app as its owner sees it: when it was created and
+// when its stored size last changed.
+type AppRoom struct {
+	ID        RoomID
+	CreatedAt time.Time
+	TouchedAt time.Time
+}
+
+// ErrRoomRemovalIncomplete is returned when a room was emptied but the cells
+// could not finish removing it; asking again completes it.
+var ErrRoomRemovalIncomplete = errors.New("the room could not be removed completely; run the command again")
 
 // Room-creation rate-limit defaults (SPEC.md "Quota and abuse"). Creation is
 // gated per source IP AND per app so a script cannot spam rooms into
