@@ -46,6 +46,15 @@ const STRANGER_VALUE_BYTES = 64 * 1024;
 const STRANGER_APP_BYTES = 1024 * 1024;
 const STRANGER_BASE64_RUN = 8 * 1024;
 const POLICY_TTL_MS = 10 * 60 * 1000;
+// How long a room trusts its last answer on whether its app is quarantined.
+// A quarantine or release reaches every room of the app within this time.
+const QUARANTINE_TTL_MS = 60 * 1000;
+// Ops a quarantined app's rooms refuse as if the room were absent. Creation is
+// refused upstream with the app itself; removal and the socket count stay.
+const HIDDEN_WHEN_QUARANTINED = new Set([
+  "meta", "get", "scan", "put", "del", "join",
+  "pushsublist", "pushscheduleget", "pushsubput", "pushsubdel", "pushscheduleput", "pushtest",
+]);
 const BINARY_MAGIC = ["%PDF", "GIF8", "PK\u0003\u0004", "\u007fELF", "MZ", "ID3", "OggS", "fLaC", "\u0089PNG"]
   .map((m) => Uint8Array.from(m, (c) => c.charCodeAt(0)));
 
@@ -136,7 +145,46 @@ export class Room {
     return cellCall(this.env.PASTES, appSlug, `/paste/${op}`, "slug", body);
   }
 
+  // Whether the room's app is quarantined, asked of the app cell at most once
+  // per QUARANTINE_TTL_MS while the cell stays in memory. An app cell that
+  // cannot answer leaves the last answer standing (not quarantined at first).
+  async appQuarantined() {
+    const now = Date.now();
+    if (this.quarantine && now - this.quarantine.at < QUARANTINE_TTL_MS) {
+      return this.quarantine.value;
+    }
+    const doc = await this.loadRoom();
+    if (!doc) {
+      return false;
+    }
+    try {
+      const res = await this.appCall(doc.meta.appSlug, "roompolicy", {});
+      if (res.ok) {
+        this.quarantine = { value: (await res.json()).quarantined === true, at: now };
+      }
+    } catch {
+      // keep the last answer
+    }
+    return this.quarantine?.value ?? false;
+  }
+
+  // Sockets of a quarantined app's room are closed: nothing more is relayed.
+  closeForQuarantine() {
+    for (const ws of this.state.getWebSockets()) {
+      try {
+        ws.close(1008, "unavailable");
+      } catch {
+        // already closing
+      }
+    }
+  }
+
   async fetch(request) {
+    const op = new URL(request.url).pathname.split("/").pop();
+    if (HIDDEN_WHEN_QUARANTINED.has(op) && await this.appQuarantined()) {
+      this.closeForQuarantine();
+      return new Response("not found\n", { status: 404 });
+    }
     const handled = (await cellRoute(this.state, request, this.env.ROOMS)) ?? (await dispatch(this, ROOM_OPS, request));
     if (handled) {
       return handled;
@@ -708,6 +756,12 @@ export class Room {
     if (!doc) {
       return;
     }
+    // A quarantined app sends nothing: what was due is dropped, not held for
+    // later, and the schedule above has already moved on.
+    if (await this.appQuarantined()) {
+      this.closeForQuarantine();
+      return;
+    }
     const signed = new Map();
     const sends = [];
     for (const { item, date } of fires) {
@@ -831,6 +885,10 @@ export class Room {
   }
 
   async webSocketMessage(ws, message) {
+    if (await this.appQuarantined()) {
+      this.closeForQuarantine();
+      return;
+    }
     if (this.publicSurface && overFrameLimit(message)) {
       try {
         ws.close(1009, "frame too large");
