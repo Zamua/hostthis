@@ -621,6 +621,15 @@ test("stored bytes carry their decoded size, generated pages none, and an entry 
     const text = await res.text();
     if (body !== null) assert.equal(text, body, path);
   }
+  // A HEAD states the length its GET would, a ranged one the range's.
+  for (const [path, range, status, length] of [
+    ["/doc.md?raw", null, 200, "6"], ["/doc.md?raw", "bytes=1-3", 206, "3"], ["/negative.txt", null, 200, null],
+  ]) {
+    const res = await w.fetch(at(path), { method: "HEAD", headers: range ? { Range: range } : {} });
+    assert.equal(res.status, status, path);
+    assert.equal(res.headers.get("Content-Length"), length, path);
+    assert.equal(await res.text(), "", path);
+  }
   // An answer without a decoded size streams the same way.
   const answer = { action: "file", kind: "site", updatedAt: UPDATED, uploadId: "up", entry: { key: "k-doc", contentType: "" } };
   w.env.PASTES = { idFromName: (name) => name, get: () => ({ fetch: async () => Response.json(answer) }) };
