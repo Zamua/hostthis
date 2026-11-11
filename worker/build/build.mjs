@@ -3,6 +3,8 @@
 // running the Worker: dist/assets (the renderer assets at _hostthis/<name> and
 // their _headers) and dist/static-r2.json (the assets too large for static
 // assets, with the PAYLOADS key each is uploaded to).
+import "./require-node.mjs";
+
 import { build } from "esbuild";
 import { copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";

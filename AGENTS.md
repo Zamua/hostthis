@@ -140,7 +140,7 @@ README.md            user-facing manpage
 
 ## Local setup
 
-Go 1.27+ (per `go.mod`), Node 24+, and Docker required.
+Go 1.27+ (per `go.mod`), Node 24+ (`.nvmrc`; `make` and the Worker build refuse an older `node`), and Docker required.
 
 The Go tests and `make run` run the Worker locally under Miniflare, from
 `worker/localrt`. They run the bundle `worker/dist/index.js`, which esbuild builds
@@ -161,6 +161,7 @@ Worker code with no shared state.
 
 ```
 make build         # local Go build → ./bin/hostthisd
+make check         # what CI's main job gates on: fmt-check, vet, fix-check, test, vuln
 make test          # run all tests (domain unit + storage + service + ssh/http e2e)
 make vuln          # govulncheck: fails on a reachable known vulnerability (also a CI job)
 make run           # run locally, no container; ssh :2222 http :8080, path-mode,

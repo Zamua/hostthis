@@ -23,37 +23,21 @@ jobs:
       # `make test` builds the bundle and installs both from these lockfiles.
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: |
             worker/package-lock.json
             worker/localrt/package-lock.json
 
-      # Formatting: every file must be gofmt-clean.
+      # The same targets `make check` runs locally.
       - name: gofmt
-        run: |
-          out=$(gofmt -l .)
-          if [ -n "$out" ]; then
-            echo "These files are not gofmt-clean (run 'gofmt -w .'):"
-            echo "$out"
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: go vet
-        run: go vet ./...
+        run: make vet
 
-      # Modernize check: 'go fix' is the modernizer suite (same
-      # analysis framework as vet). '-diff' prints pending modernizations
-      # without applying; a non-empty diff means the tree has un-modernized
-      # idioms. Run 'go fix ./...' locally and commit to satisfy this.
       - name: go fix (modernize check)
-        run: |
-          out=$(go fix -diff ./... 2>/dev/null)
-          if [ -n "$out" ]; then
-            echo "Pending modernizations (run 'go fix ./...' and commit):"
-            echo "$out"
-            exit 1
-          fi
+        run: make fix-check
 
       - name: test
         run: make test
@@ -110,7 +94,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: .nvmrc
 
       # celld deploys the bundle wrangler.jsonc names as main.
       - name: build the Worker bundle
