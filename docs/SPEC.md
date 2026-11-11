@@ -3267,6 +3267,11 @@ uploads arrive at once:
   committed and keeps it until the background write ends (see "Paste lifecycle
   status"), so it gets the same busy error, with no URL handed out, and a
   paste that did get its URL never waits in this queue.
+- **A stalled write gives its budget back.** A write whose body the store
+  stops reading for a minute ends with an error, like any failed write, so a
+  stuck store cannot hold budget forever. A write of any size may take as long
+  as it needs while bytes keep moving; once the whole body is sent, the store
+  has a minute to answer.
 - **Reads and deletes are not queued.** `GetReader` streams without growing
   the runtime's memory, and `DeletePrefix` carries no body.
 

@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -25,11 +27,21 @@ const blobSizeHeader = "X-Blob-Size"
 type WorkerBlobStore struct {
 	base   string
 	client *http.Client
+	// StallTimeout ends a Put whose body the Worker stops reading for this
+	// long, so a stuck upstream cannot hold the write (and whatever admitted
+	// it) forever. Zero disables it.
+	StallTimeout time.Duration
 }
+
+// DefaultBlobStallTimeout is how long a Put's body may sit unread.
+const DefaultBlobStallTimeout = time.Minute
+
+// errBlobStalled is the cause of a Put ended by StallTimeout.
+var errBlobStalled = errors.New("the store stopped reading the body")
 
 // NewWorkerBlobStore talks to the Worker at base. A nil client gets one over
 // WorkerBlobTransport with no overall deadline, since a body of any size streams
-// through it.
+// through it; a write is bounded by progress instead (StallTimeout).
 func NewWorkerBlobStore(base string, client *http.Client) (*WorkerBlobStore, error) {
 	if base == "" {
 		return nil, errors.New("blob worker: endpoint required")
@@ -37,7 +49,9 @@ func NewWorkerBlobStore(base string, client *http.Client) (*WorkerBlobStore, err
 	if client == nil {
 		client = &http.Client{Transport: WorkerBlobTransport()}
 	}
-	return &WorkerBlobStore{base: strings.TrimRight(base, "/"), client: client}, nil
+	return &WorkerBlobStore{
+		base: strings.TrimRight(base, "/"), client: client, StallTimeout: DefaultBlobStallTimeout,
+	}, nil
 }
 
 // WorkerBlobTransport bounds the wait for a response, which starts only after
@@ -65,7 +79,9 @@ func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 	if err := checkKey(key); err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPut, s.objectURL(key), r)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.objectURL(key), r)
 	if err != nil {
 		return fmt.Errorf("blob worker: put %s: %w", key, err)
 	}
@@ -88,6 +104,8 @@ func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 		}
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	watch := watchBodyProgress(req, s.StallTimeout, func() { cancel(errBlobStalled) })
+	defer watch.stop()
 	resp, err := s.client.Do(req)
 	if err != nil && req.GetBody != nil && req.Context().Err() == nil {
 		retry := req.Clone(req.Context())
@@ -96,9 +114,101 @@ func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 		}
 	}
 	if err != nil {
+		if cause := context.Cause(ctx); errors.Is(cause, errBlobStalled) {
+			return fmt.Errorf("blob worker: put %s: %w for %s", key, cause, s.StallTimeout)
+		}
 		return fmt.Errorf("blob worker: put %s: %w", key, err)
 	}
 	return expectNoContent(resp, "put "+key)
+}
+
+// bodyWatch ends a request whose body goes unread for too long. Only the
+// sending of the body is watched: once it is fully read, the transport's own
+// response timeout takes over.
+type bodyWatch struct {
+	mu       sync.Mutex
+	last     time.Time
+	size     int64 // the body's length, negative when unknown
+	sent     int64
+	done     bool
+	timer    *time.Timer
+	limit    time.Duration
+	onStall  func()
+	stopOnce sync.Once
+}
+
+// watchBodyProgress wraps req's body (and the copy a resend makes) so every
+// read counts as progress, and calls onStall after limit without one.
+func watchBodyProgress(req *http.Request, limit time.Duration, onStall func()) *bodyWatch {
+	w := &bodyWatch{last: time.Now(), size: req.ContentLength, limit: limit, onStall: onStall}
+	if limit <= 0 || req.Body == nil || req.Body == http.NoBody {
+		w.done = true
+		return w
+	}
+	req.Body = &watchedBody{ReadCloser: req.Body, watch: w}
+	if getBody := req.GetBody; getBody != nil {
+		req.GetBody = func() (io.ReadCloser, error) {
+			body, err := getBody()
+			if err != nil {
+				return nil, err
+			}
+			w.restart()
+			return &watchedBody{ReadCloser: body, watch: w}, nil
+		}
+	}
+	w.timer = time.AfterFunc(limit, w.check)
+	return w
+}
+
+// progress records n more bytes read. The body is done at its end, at a read
+// error, or once its whole length has been read: the transport stops reading
+// a body of known length there, without asking for the end.
+func (w *bodyWatch) progress(n int, ended bool) {
+	w.mu.Lock()
+	w.last = time.Now()
+	w.sent += int64(n)
+	w.done = w.done || ended || (w.size >= 0 && w.sent >= w.size)
+	w.mu.Unlock()
+}
+
+// restart begins the count again for a resent body.
+func (w *bodyWatch) restart() {
+	w.mu.Lock()
+	w.last, w.sent, w.done = time.Now(), 0, false
+	w.mu.Unlock()
+}
+
+func (w *bodyWatch) check() {
+	w.mu.Lock()
+	idle, done := time.Since(w.last), w.done
+	w.mu.Unlock()
+	switch {
+	case done:
+	case idle >= w.limit:
+		w.onStall()
+	default:
+		w.timer.Reset(w.limit - idle)
+	}
+}
+
+func (w *bodyWatch) stop() {
+	w.stopOnce.Do(func() {
+		w.progress(0, true)
+		if w.timer != nil {
+			w.timer.Stop()
+		}
+	})
+}
+
+type watchedBody struct {
+	io.ReadCloser
+	watch *bodyWatch
+}
+
+func (b *watchedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.watch.progress(n, err != nil)
+	return n, err
 }
 
 // GetReader streams the stored bytes and their length. The caller closes it.
