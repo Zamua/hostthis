@@ -5,7 +5,7 @@ import { noteChange } from "./feed.js";
 import { cellRoute } from "./image.js";
 import { USER_QUOTA_BYTES } from "../rooms/policy.js";
 import { DECIDE, DROP, PROJECT, advance, decisionEvent, nextPending, samePending, startPending } from "./artifact-saga.js";
-import { cellCall, dispatch, mutation, read, requireShape } from "./ops.js";
+import { cellCall, dispatch, mutation, opOf, read, requireShape } from "./ops.js";
 import { ARTIFACT_PENDING, ARTIFACT_RECEIPT_PREFIX, LEGACY_VERSIONS, chargeOf, createAbortKey, deleteInBatches, fence, isTooBig, isUploadId, latestLive, loadManifest, loadVersions, manifestKey, prefixOf, retryDelay, servedOf, splitLegacyVersions, uploadPrefix, versionKey, withUploadId } from "./records.js";
 
 // The PASTE cell: one row, addressed by slug. Separate from the identity cell
@@ -78,8 +78,11 @@ export class Paste {
     if (slug) {
       this.slug = slug;
     }
-    return this.noticed(slug, async () => (await dispatch(this, PASTE_OPS, request))
-      ?? new Response("unknown op\n", { status: 404 }));
+    const work = async () => (await dispatch(this, PASTE_OPS, request))
+      ?? new Response("unknown op\n", { status: 404 });
+    // A read changes nothing a reader could see, so it skips the two row
+    // reads that noticing a change costs: a read stays one read of the row.
+    return opOf(PASTE_OPS, request)?.mutating === false ? work() : this.noticed(slug, work);
   }
 
   // Runs work and, when it changed the row or its quarantine, tells the feed.
