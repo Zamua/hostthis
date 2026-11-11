@@ -16,8 +16,8 @@ RUN go mod download
 
 COPY . .
 
-# Pure-Go sqlite (modernc.org/sqlite) means CGO=0 - static binary,
-# trivial to drop into distroless.
+# No cgo dependencies, so CGO_ENABLED=0 gives a static binary that drops
+# straight into distroless.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
     go build -ldflags="-s -w" -o /out/hostthisd ./cmd/hostthisd
 

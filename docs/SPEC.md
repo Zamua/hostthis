@@ -475,13 +475,12 @@ With* options. Refusal behavior is pinned by
 
 ## File handling
 
-- **Per-paste hard cap**: 10 MiB of COMPRESSED bytes (post-zstd).
-  Equal to the per-identity quota (see Limits). Compression-aware:
-  heavily redundant content (typical HTML/Markdown) compresses 5–10×,
-  so a user can upload ~50–100 MiB of text and still fit; binary or
-  already-compressed payloads compress poorly and hit the cap fast.
-  The user-visible cap is the same number in both directions because
-  it's the number that actually constrains the service.
+- **Per-paste hard cap**: 10 MiB of COMPRESSED bytes (post-zstd),
+  separate from the 1 GiB per-identity quota (see Limits).
+  Compression-aware: heavily redundant content (typical HTML/Markdown)
+  compresses 5–10×, so a user can upload ~50–100 MiB of text and still
+  fit; binary or already-compressed payloads compress poorly and hit the
+  cap fast.
 - **Hard raw-byte fast-fail**: 100 MiB. To prevent an attacker from
   streaming arbitrary bytes forever just to discover whether they
   compress under the cap, the server stops reading after 100 MiB of
@@ -1921,7 +1920,7 @@ https://abc12345.hostthis.dev
 ```
 Reads stdin until EOF or the per-paste cap (10 MiB after compression;
 see "File handling → Per-paste hard cap" for the bytes-counted detail).
-Validates content type (HTML or Markdown in v1). Generates a fresh
+Detects the kind (see "Supported formats") and rejects what it cannot render. Generates a fresh
 random slug.
 
 **`-T` on piped uploads**: `cat file | ssh hostthis.dev` makes the ssh
@@ -2059,7 +2058,23 @@ URL still serves the pinned version. Failure modes
   blob store to admit its bytes (see "Worker upload admission"). Nothing was
   saved.
 
-See "Exit codes" below for the canonical mapping.
+### Exit codes
+
+Scripts branch on these, so a value's meaning never changes and a new meaning
+takes the next free number.
+
+| code | meaning |
+| --- | --- |
+| 0 | success |
+| 1 | generic failure (including a busy store) |
+| 2 | usage: malformed arguments, unknown verb |
+| 3 | no usable ssh key |
+| 4 | not found, including a slug owned by another key and a quarantined one |
+| 5 | reserved, never returned |
+| 6 | refused by the fresh-key limit for the client's network |
+| 7 | key or network on the operator's denylist, or off its allow-list |
+| 8 | upload refused by pre-publish screening |
+| 9 | the key already runs its limit of uploads |
 
 Update creates a new immutable version under the hood, stored under
 its own upload prefix. What the URL serves next
@@ -2084,7 +2099,7 @@ x7y8z9q0   -                      540B   markdown  v1
 qrs78901   bugfix.diff           2.1k    diff      v1
 mnop4567   Onboarding email      3.8k    html      v3 (pinned, latest v5)
 zwy11122   -                     800B    html      v3 (pinned)
-portfolio2 -                    213.0k   site      -
+portfolio2 -                    213.0k   site      v2
 ```
 **SIZE is what the item COSTS the owner, not the size of what it serves.**
 For a paste that is every LIVE version summed, so a paste at v3 shows more
@@ -2100,14 +2115,14 @@ version NUMBER, not how many versions are stored, and a paste whose v1 was
 deleted is charged for two while still displaying `v3`.
 
 Lists BOTH text pastes AND deployed **directories** (a directory shows its
-own kind - `site` or `knowledgebase` - and its stored byte total; one
-carrying no version timeline shows `-` in `VERS`). This matters because a site counts against the
+own kind - `site` or `knowledgebase` - its stored byte total, and its
+served version like any paste). This matters because a site counts against the
 same 1 GiB per-identity quota as pastes: if `list` omitted sites, an owner
 could hit `would exceed your 1 GiB total quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
 `delete`. Sorted most recently updated first. `NAME` column shows the user-supplied
-label or `-` if none (sites have no label, so `-`). Columns are space-padded so they stay aligned in the terminal no
+label or `-` if none. Columns are space-padded so they stay aligned in the terminal no
 matter how long a `NAME` runs (a raw single-tab separator overflows the
 8-column tab stop as soon as one label is wide, shoving every following
 column out of true). The header line is on stdout (top of the output) so
@@ -2197,9 +2212,10 @@ stderr line):
     "name": "",
     "size_bytes": 218000,
     "kind": "site",
-    "served_version": null,
-    "latest_version": null,
-    "pinned_version": null
+    "served_version": 2,
+    "served_size_bytes": 218000,
+    "latest_version": 2,
+    "pinned_version": 0
   }
 ]
 ```
@@ -2208,11 +2224,11 @@ stderr line):
 `pinned_version` is `0` when the paste follows latest (unpinned);
 `served_version` is `pinned_version` when pinned, else `latest_version`.
 A **directory** is discriminated by its kind: `"site"` for a static site,
-`"knowledgebase"` for a browsable base. A row with no version timeline has
-`served_version` / `latest_version` / `pinned_version` `null`.
+`"knowledgebase"` for a browsable base. It carries versions like any paste:
+each redeploy is a new version.
 `size_bytes` is the item's CHARGED total: every live version for a paste,
 the stored total for a directory. `served_size_bytes` is the bytes of
-the version being served, and is `null` where there are no versions.
+the version being served.
 
 Both are emitted because json mode prints only the array - the human
 footer never reaches a script - and a consumer cannot infer which figure
@@ -2249,12 +2265,12 @@ session has no subnet:
   "first_seen": "2026-06-01T00:00:00Z",
   "active_pastes": 2,
   "used_bytes": 1234,
-  "quota_bytes": 10485760,
+  "quota_bytes": 1073741824,
   "session": {
     "subnet": "203.0.113.0/24",
     "identity_subnets": 2,
     "subnet_fresh_count": 1,
-    "subnet_cap": 5
+    "subnet_cap": 20
   }
 }
 ```
@@ -2475,7 +2491,16 @@ ssh hostthis.dev whoami
 key:     SHA256:abc...xyz
 joined:  2026-06-05
 active:  4 paste(s)
+quota:   2.1M / 1024.0M (0%)
+rooms:   12.0k of that in your apps' rooms
+
+session:
+  subnet:        203.0.113.0/24
+  seen subnets:  1  (this one + 0 other in the last 24h)
+  subnet budget: 3 of 20 fresh keys used here today
 ```
+The `rooms:` line appears only when the owner's apps hold room bytes, and the
+`session:` block only when the fresh-key limit is on.
 Sessions without a key never reach this verb - they're rejected at
 session startup with "ssh key required" on stderr and exit 3.
 
@@ -2510,13 +2535,22 @@ README, and the landing page.
 ```
 Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
-UPLOAD
+UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
+         -- is required before an UPLOAD flag, or ssh parses it as its
+         own; verb flags like -o json are already safe;
+         a QR code of the URL also prints to stderr on success)
 
-    cat foo.html | ssh -T hostthis.dev
-    cat doc.md   | ssh -T hostthis.dev -- --name "design notes"
-
-    (-T silences the ssh "pseudo-terminal will not be allocated" warning
-     on piped uploads. A QR code of the URL prints to stderr on success.)
+    cat foo.html   | ssh -T hostthis.dev
+    cat doc.md     | ssh -T hostthis.dev -- --name "design notes"
+    git diff       | ssh -T hostthis.dev                 rendered as a diff
+    cat chart.mmd  | ssh -T hostthis.dev                 mermaid diagram
+    cat report.pdf | ssh -T hostthis.dev                 paged pdf viewer
+    cat sales.csv  | ssh -T hostthis.dev                 sortable table + SQL
+    cat events.json| ssh -T hostthis.dev                 collapsible tree
+    cat cpu.folded | ssh -T hostthis.dev                 interactive flame graph
+    cat app.ndjson | ssh -T hostthis.dev                 log viewer (query + histogram)
+    cat nginx.conf | ssh -T hostthis.dev                 text with linkable lines
+    cat x.txt      | ssh -T hostthis.dev -- --type csv   force a renderer
 
 UPDATE & MANAGE (owner only; ssh key authenticates)
 
@@ -2527,13 +2561,37 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
     ssh hostthis.dev qr <slug>                  re-show the URL + QR code
     ssh hostthis.dev rename <slug> "label"      set / change owner label
     ssh hostthis.dev delete <slug> [<ver>]      wipe the paste, or tombstone one version
+    ssh hostthis.dev rooms <slug>               list an app's rooms (rooms <slug> rm deletes)
     ssh hostthis.dev whoami                     identity + active count + quota
+    ssh hostthis.dev pod link <webid>           store new uploads in your Solid pod
 
 VERSION HISTORY
 
     ssh hostthis.dev versions <slug>            timeline of every version
     ssh hostthis.dev pin <slug> <ver>           stick the URL to <ver> (survives updates)
     ssh hostthis.dev unpin <slug>               URL follows latest again
+
+LINK TO A PLACE INSIDE A PASTE
+
+    <url>#some-heading      markdown: jump to that heading
+    <url>#page=3            pdf: jump to that page
+    <url>#row=42            csv: jump to that row
+    <url>#F1L42-L48         diff: highlight lines 42-48 of file 1
+    <url>#focus=main;serve  flamegraph: zoom to that stack
+    <url>#q=malloc          flamegraph: highlight matching frames
+    <url>#L42-L48           text / log: highlight those lines
+    <url>#q=level=error     log: a saved query, time window and selection
+                            all live in the fragment, so a filtered view
+                            is just a link
+
+    Clicking a heading, row, page, diff line number, or flame frame updates
+    the URL, so the address bar always holds a link you can copy. To select
+    a range of diff lines: shift-click a second line number, or on a touch
+    screen just tap it.
+
+OUTPUT
+
+    list, versions, whoami accept -o json
 
 STATIC SITES
 
@@ -2547,9 +2605,10 @@ LIMITS
 
     1 GiB per identity, counting post-compression bytes across all
     your active pastes. One paste: 10 MiB after compression. One site:
-    1 GiB unpacked. HTML, Markdown, diff, or a gzip-tar site archive.
+    1 GiB unpacked. HTML, Markdown, diff, Mermaid, PDF, CSV, JSON,
+    folded stacks, NDJSON logs, plain text, or a gzip-tar site archive.
 
-    Apps can persist + sync state: https://hostthis.dev/  (rooms + realtime API)
+    Apps can persist + sync state: https://hostthis.dev/  (rooms, realtime + push API)
 ```
 
 `get` and `versions`/`pin`/`unpin` per-verb help comes from `help <verb>` /
@@ -3026,8 +3085,8 @@ its prior state, and concurrent admission cannot race a stale check.
   browser (marked + DOMPurify), not on the server, so a hot markdown
   slug hammered in parallel no longer pegs server CPU; each read just
   streams the raw bytes or the fixed shell.
-- *Bandwidth amplification*. No per-slug egress cap. Hetzner-style
-  free egress allowances are generous but not infinite. A CDN in front
+- *Bandwidth amplification*. No per-slug egress cap. Origin egress
+  allowances are generous but not infinite. A CDN in front
   (see "Edge caching" below) makes this concern moot for cached reads.
 
 ---
@@ -4508,7 +4567,7 @@ leaves the client to read alone.
 hostthis has two scaling cliffs that a CDN solves:
 
 - *Egress bandwidth*: a 10 MiB paste served at 100 req/s = ~2.5 PB/month.
-  Hetzner free egress is ~20 TB; one viral paste could blow the budget
+  Origin egress is finite; one viral paste could exhaust an allowance
   in days. A CDN that stores responses absorbs nearly all of it: it
   revalidates with the origin, and an unchanged response's 304 carries
   no body.
@@ -5489,10 +5548,9 @@ content." Keep the surface small.
 - **Binary / non-renderable file hosting**. ZIPs, photos, videos,
   arbitrary blobs are out of scope.
 - **Comments / threaded discussion**. Out of scope.
-- **Password protection on public pastes**. Signed share links cover the
-  "private but shareable" case; password is duplicative friction.
-- **View limits / view counts visible to the public**. Owner can see
-  totals in `whoami`; no public-facing analytics.
+- **Password protection on public pastes**. Links are unlisted, not
+  private; a password is out of scope.
+- **View limits / view counts**. No view counts, public or private.
 - **Visual editor**. ssh pipe is the only authoring tool. Edit locally,
   re-pipe.
 - **Teams / orgs / shared accounts**. Personal use only.
