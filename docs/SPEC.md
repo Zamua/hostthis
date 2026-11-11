@@ -589,10 +589,12 @@ A row with no persisted status is read as **`ready`**.
 1. mint the upload id, then stream + compress into a spill file on local
    disk,
 2. detect the content kind,
-3. **check quota + write the authoritative paste row with
+3. wait for the object store to admit the write (see "Worker upload
+   admission"); a store too busy to take it refuses the upload here,
+4. **check quota + write the authoritative paste row with
    `status=pending`**, whose manifest already names the object key
    `uploads/<upload-id>/0`,
-4. return the URL.
+5. return the URL.
 
 Quota is enforced here, inside the serialized metadata commit, so an
 over-quota upload is rejected before any URL is handed out.
@@ -3254,9 +3256,10 @@ uploads arrive at once:
 - **Bounded wait.** A write still waiting after the wait limit (default 30s,
   `HOSTTHIS_WORKER_PUT_WAIT`) fails with the busy error and writes nothing. The
   SSH user sees `hostthis: busy storing other uploads; try again in a minute`
-  (exit 1) on an update or site deploy. A new paste has already returned its
-  URL when its write runs (see "Paste lifecycle status"), so a busy write there
-  fails the paste like any other background write failure.
+  (exit 1). A new paste asks for its write's admission before its row is
+  committed and keeps it until the background write ends (see "Paste lifecycle
+  status"), so it gets the same busy error, with no URL handed out, and a
+  paste that did get its URL never waits in this queue.
 - **Reads and deletes are not queued.** `GetReader` streams without growing
   the runtime's memory, and `DeletePrefix` carries no body.
 

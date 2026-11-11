@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -48,15 +49,51 @@ func (g *GatedBlobStore) weight(size int64) int64 {
 
 // Put waits for admission without touching r, then streams it to Inner.
 func (g *GatedBlobStore) Put(key string, r io.Reader, size int64) error {
+	return g.PutContext(context.Background(), key, r, size)
+}
+
+// PutContext is Put for a caller that may already hold the write's admission
+// (from Admit, carried in ctx): then nothing more is acquired or released.
+func (g *GatedBlobStore) PutContext(ctx context.Context, key string, r io.Reader, size int64) error {
+	if held, _ := ctx.Value(admissionKey{}).(*admission); held != nil && held.gate == g {
+		return g.Inner.Put(key, r, size)
+	}
+	release, err := g.acquire(size)
+	if err != nil {
+		return fmt.Errorf("blob put %s: %w", key, err)
+	}
+	defer release()
+	return g.Inner.Put(key, r, size)
+}
+
+// Admit takes the admission of a later write of size bytes now, so the wait
+// (and a busy refusal) happens before the caller commits to the write. The
+// returned context carries it to PutContext; release frees it and is safe to
+// call more than once.
+func (g *GatedBlobStore) Admit(ctx context.Context, size int64) (context.Context, func(), error) {
+	release, err := g.acquire(size)
+	if err != nil {
+		return ctx, nil, fmt.Errorf("blob admission: %w", err)
+	}
+	return context.WithValue(ctx, admissionKey{}, &admission{gate: g}), release, nil
+}
+
+// acquire waits up to the wait limit for size bytes of budget.
+func (g *GatedBlobStore) acquire(size int64) (release func(), err error) {
 	w := g.weight(size)
 	ctx, cancel := context.WithTimeout(context.Background(), g.wait)
 	defer cancel()
 	if err := g.sem.Acquire(ctx, w); err != nil {
-		return fmt.Errorf("blob put %s: %w", key, domain.ErrStoreBusy)
+		return nil, domain.ErrStoreBusy
 	}
-	defer g.sem.Release(w)
-	return g.Inner.Put(key, r, size)
+	var once sync.Once
+	return func() { once.Do(func() { g.sem.Release(w) }) }, nil
 }
+
+type admissionKey struct{}
+
+// admission marks a context whose write gate already admitted.
+type admission struct{ gate *GatedBlobStore }
 
 func (g *GatedBlobStore) GetReader(key string) (io.ReadCloser, int64, error) {
 	return g.Inner.GetReader(key)
