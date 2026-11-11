@@ -34,7 +34,7 @@ export function publicReads(
   let read = readPath(open);
   if (cache && ttl) {
     const maxBytes = positive(env.HOSTTHIS_EDGE_CACHE_MAX_BYTES) || EDGE_CACHE_MAX_BYTES;
-    read = withEdgeCache(read, { cache, ttl, build: BUILD, maxBytes });
+    read = withEdgeCache(read, { cache, ttl, build: BUILD, maxBytes, fixedLengthStream });
   }
   if (fixedLengthStream) {
     read = withFixedLength(read, fixedLengthStream);

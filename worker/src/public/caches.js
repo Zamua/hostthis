@@ -8,6 +8,10 @@ import { CONTENT_CACHE_CONTROL } from "./reads.js";
 
 const IMMUTABLE = "public, max-age=31536000, immutable";
 const CONDITIONALS = ["If-None-Match", "If-Modified-Since"];
+// Passed to the cache lookup too, so a hit answers a range itself. A range
+// request that misses goes to the read path and, not being a 200, fills
+// nothing.
+const RANGES = ["Range", "If-Range"];
 
 // The largest response the edge cache stores when the deployment names none.
 export const EDGE_CACHE_MAX_BYTES = 8 * 1024 * 1024;
@@ -135,8 +139,20 @@ function bounded(copy, { maxBytes, deadline = Infinity, now = Date.now }) {
 // Stores the tee's second copy under key in the background, within limits
 // (bounded's). However the put ends, the copy is released, so a put that
 // stops reading never stalls the client.
-function keep(ctx, cache, key, tee, init, limits) {
-  const put = cache.put(key, new Response(bounded(tee.copies[1], limits), init))
+//
+// sized is { length, Stream } when the response states a length and the
+// runtime has a fixed-length stream: the stored copy then goes through one,
+// so the entry keeps its Content-Length. A streamed body otherwise loses it,
+// and a hit would reach the client without a length and could not answer a
+// range.
+function keep(ctx, cache, key, tee, init, limits, sized) {
+  let body = bounded(tee.copies[1], limits);
+  if (sized) {
+    const fixed = new sized.Stream(sized.length);
+    body.pipeTo(fixed.writable).catch(() => {});
+    body = fixed.readable;
+  }
+  const put = cache.put(key, new Response(body, init))
     .catch(() => {})
     .finally(() => tee.release(1));
   ctx?.waitUntil?.(put);
@@ -176,8 +192,9 @@ function forBrowser(stored, method) {
 // posture and at most maxBytes: never an error, a 404, or a pending or failed
 // page. A fill that would end more than EDGE_FILL_WINDOW_MS after its read
 // began (by now, in ms) is abandoned. build names the code and shells serving
-// the reads.
-export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_MAX_BYTES, now = Date.now }) {
+// the reads. fixedLengthStream is the runtime's FixedLengthStream class, where
+// there is one: a stored response that states a length keeps it.
+export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_MAX_BYTES, now = Date.now, fixedLengthStream }) {
   return async function cachedRead(request, env, ctx, target) {
     const { method } = request;
     if (method !== "GET" && method !== "HEAD") {
@@ -190,7 +207,12 @@ export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_M
       if (value !== null) conditional[name] = value;
     }
     // A cache that fails is a miss: the read path still answers.
-    const hit = await cache.match(new Request(key, { headers: conditional })).catch(() => undefined);
+    const asked = { ...conditional };
+    for (const name of RANGES) {
+      const value = request.headers.get(name);
+      if (value !== null) asked[name] = value;
+    }
+    const hit = await cache.match(new Request(key, { headers: asked })).catch(() => undefined);
     if (hit) {
       return forBrowser(hit, method);
     }
@@ -203,14 +225,16 @@ export function withEdgeCache(read, { cache, ttl, build, maxBytes = EDGE_CACHE_M
     }
     // A stated size over the cap starts no fill; an unstated one is cut off
     // at the cap.
-    if ((statedLength(res.headers) ?? 0) > maxBytes) {
+    const length = statedLength(res.headers);
+    if ((length ?? 0) > maxBytes) {
       return res;
     }
     const tee = lockstepTee(res.body);
     const headers = new Headers(res.headers);
     headers.set("Cache-Control", `public, max-age=${ttl}`);
     headers.set("Cache-Tag", target.slug);
-    keep(ctx, cache, key, tee, { status: 200, headers }, { maxBytes, deadline, now });
+    const sized = length !== null && fixedLengthStream ? { length, Stream: fixedLengthStream } : null;
+    keep(ctx, cache, key, tee, { status: 200, headers }, { maxBytes, deadline, now }, sized);
     return new Response(tee.copies[0], { status: res.status, headers: res.headers });
   };
 }
