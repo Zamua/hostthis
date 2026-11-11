@@ -4,6 +4,7 @@
 // built here from parsed values: nothing from the client's URL, query,
 // headers or body is passed on as it came.
 
+import { addressListed, secretIs } from "../auth.js";
 import { TURN_CELL } from "../cells/turn.js";
 import {
   APP_MAX_ROOM_BYTES,
@@ -160,11 +161,38 @@ export async function serveRooms(request, env, slug, path, client) {
   }
 }
 
+// The header that carries a private instance's rooms token.
+const ROOMS_TOKEN_HEADER = "X-Hostthis-Rooms-Token";
+
+// A private instance's refusal (docs/SPEC.md "Private rooms"): with
+// HOSTTHIS_ROOMS_ALLOW or HOSTTHIS_ROOMS_TOKEN set, a rooms request is served
+// only from a listed client address or with the token. Null when it is served.
+async function privateRefusal(request, env, client) {
+  const allow = String(env.HOSTTHIS_ROOMS_ALLOW ?? "").trim();
+  const token = env.HOSTTHIS_ROOMS_TOKEN;
+  if (allow === "" && !token) {
+    return null;
+  }
+  if (await secretIs(request.headers.get(ROOMS_TOKEN_HEADER), token)) {
+    return null;
+  }
+  const address = clientAddress(request.headers, env.HOSTTHIS_CLIENT_IP_SOURCE, client.forwarded);
+  if (addressListed(address, allow)) {
+    return null;
+  }
+  return goError(403, "the rooms API is private on this instance\n");
+}
+
 async function serveRoute(request, env, app, route, client) {
   const { method } = request;
+  if (route.kind === "pushkey") {
+    return pushKey(method, app);
+  }
+  const refused = await privateRefusal(request, env, client);
+  if (refused) {
+    return refused;
+  }
   switch (route.kind) {
-    case "pushkey":
-      return pushKey(method, app);
     case "collection":
       return method === "POST" ? createRoom(request, env, app, client) : methodNotAllowed("POST");
     case "malformed":

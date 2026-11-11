@@ -63,6 +63,22 @@ function inNetwork(groups, network) {
   return true;
 }
 
+// Whether address is in the comma separated list of addresses and CIDR
+// prefixes. An empty list, an entry that does not parse, or an address that
+// does not parse is false.
+export function addressListed(address, list) {
+  const networks = String(list ?? "").split(",").map((entry) => entry.trim()).filter(Boolean).map(parseNetwork);
+  const groups = parseIP(address ?? "");
+  return groups !== null && networks.length > 0 && !networks.includes(null) &&
+    networks.some((network) => inNetwork(groups, network));
+}
+
+// Whether given is secret, compared in constant time. An unset secret matches
+// nothing.
+export async function secretIs(given, secret) {
+  return Boolean(secret) && sameDigest(await digest(secret), await digest(given ?? ""));
+}
+
 // The networks HOSTTHIS_INTERNAL_ALLOW names (comma separated addresses and
 // CIDR prefixes), or null when it is unset. An entry that does not parse
 // makes the list match nothing, so a typo locks the full token out instead
