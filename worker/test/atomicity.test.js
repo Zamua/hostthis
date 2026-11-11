@@ -1385,6 +1385,11 @@ function roomHarness({ room = roomDoc(), pasteSeed = budgetSeed() } = {}) {
   const transport = { failBefore: 0, failAfter: 0 };
   const endpoint = {
     async fetch(request) {
+      // The injected failures are for budget calls; a room's question about
+      // quarantine is answered and not counted.
+      if (new URL(request.url).pathname.endsWith("/roompolicy")) {
+        return paste.fetch(request);
+      }
       if (transport.failBefore-- > 0) {
         throw new Error("coordinator unavailable");
       }
