@@ -299,29 +299,34 @@ export class Abuse {
     }
   }
 
-  async alarm() {
-    const now = this.now();
-    let next = null;
-    const rows = await this.state.storage.list({ prefix: BAN });
-    for (const [key, record] of rows) {
-      if (record.state === "deleted" || record.state === "lifted") {
-        continue;
+  // The pass holds the gate: it works on the records it read at its start and
+  // awaits other cells, so a ban or unban delivered in between would be
+  // overwritten by the write that ends the pass.
+  alarm() {
+    return this.state.blockConcurrencyWhile(async () => {
+      const now = this.now();
+      let next = null;
+      const rows = await this.state.storage.list({ prefix: BAN });
+      for (const [key, record] of rows) {
+        if (record.state === "deleted" || record.state === "lifted") {
+          continue;
+        }
+        let due;
+        try {
+          due = await advance(this, record, now);
+        } catch (error) {
+          console.warn(`warn: ban ${record.banId}: ${error?.message ?? error}`);
+          due = now + 60_000;
+        }
+        await this.state.storage.put(key, record);
+        if (due !== null) {
+          next = next === null ? due : Math.min(next, due);
+        }
       }
-      let due;
-      try {
-        due = await advance(this, record, now);
-      } catch (error) {
-        console.warn(`warn: ban ${record.banId}: ${error?.message ?? error}`);
-        due = now + 60_000;
+      if (next !== null) {
+        await this.state.storage.setAlarm(Math.max(next, now + 1));
       }
-      await this.state.storage.put(key, record);
-      if (due !== null) {
-        next = next === null ? due : Math.min(next, due);
-      }
-    }
-    if (next !== null) {
-      await this.state.storage.setAlarm(Math.max(next, now + 1));
-    }
+    });
   }
 
   // Operator only: the router never maps the watcher's credential here.
