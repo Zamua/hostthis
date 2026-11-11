@@ -162,6 +162,7 @@ type dropRequest struct {
 }
 
 type noteSubnetRequest struct {
+	Addr   string `json:"addr,omitempty"`
 	Now    int64  `json:"now"`
 	Subnet string `json:"subnet"`
 }
@@ -226,6 +227,7 @@ type versionRequest struct {
 // --- subnet cell ------------------------------------------------------------
 
 type admitRequest struct {
+	Addr     string `json:"addr,omitempty"`
 	Identity string `json:"identity"`
 	Limit    int    `json:"limit"`
 	Now      int64  `json:"now"`
@@ -235,6 +237,7 @@ type admitRequest struct {
 // --- room cell --------------------------------------------------------------
 
 type roomCreateRequest struct {
+	Addr      string `json:"addr,omitempty"`
 	AppCap    int64  `json:"appCap"`
 	AppSlug   string `json:"appSlug"`
 	At        int64  `json:"at"`

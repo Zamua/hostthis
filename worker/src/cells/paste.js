@@ -275,7 +275,12 @@ export class Paste {
     await this.touchRoom(body.id, body.at);
     const ledger = (await this.state.storage.get("roomLedger")) ?? [];
     if (!ledger.some((entry) => entry.id === body.id)) {
-      ledger.push({ id: body.id, subnet: body.subnet, at: body.at });
+      const entry = { id: body.id, subnet: body.subnet, at: body.at };
+      // The creating client's address, when the caller sent one.
+      if (typeof body.addr === "string" && body.addr !== "" && body.addr.length <= 64) {
+        entry.addr = body.addr;
+      }
+      ledger.push(entry);
       const writes = { roomLedger: ledger };
       // Only a room being created for the first time adds to the lifetime
       // count; a create replayed onto an existing room does not.

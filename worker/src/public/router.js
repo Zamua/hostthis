@@ -3,6 +3,7 @@
 // payload bucket: any call it makes is built from values it parsed.
 
 import { noteRoomResponse } from "../abuse-log.js";
+import { addressText, clientAddress } from "../rooms/policy.js";
 import { serveRooms } from "../rooms/routes.js";
 import { serveSolid } from "../solid/link.js";
 import { byteStringBytes, goText } from "../rooms/wire.js";
@@ -124,5 +125,7 @@ async function route(request, env, host, forwarded, surface) {
     host,
     mount: app.mount,
     flags: queryFlags(url.search.slice(1)),
+    // For the read path's error log only.
+    addr: addressText(clientAddress(request.headers, env.HOSTTHIS_CLIENT_IP_SOURCE, forwarded)),
   });
 }

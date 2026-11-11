@@ -389,8 +389,9 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 			if !ok {
 				return
 			}
-			subnet := domain.SubnetOf(remoteIP(sess))
-			fresh, err := s.KeyGate.Admit(owner, subnet)
+			ip := remoteIP(sess)
+			subnet := domain.SubnetOf(ip)
+			fresh, err := s.KeyGate.AdmitFrom(owner, subnet, domain.AddrText(ip))
 			if err != nil {
 				if ref, ok := errors.AsType[*service.SybilRefusal](err); ok {
 					fmt.Fprintf(sess.Stderr(), "hostthis: too many new keys from this network today\n")                                    //nolint:errcheck

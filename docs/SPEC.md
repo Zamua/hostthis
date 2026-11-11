@@ -2872,8 +2872,10 @@ two ways, and they need opposite key orders:
    introduced to the gate, and is kept for 30 days rather than the
    window: the count above reads only in-window entries, while an
    owner ban ("Owner ban") reports every subnet the key was seen in
-   over the last 30 days. Only the `/24` or `/48` is kept, never a
-   full address.
+   over the last 30 days. Beside the subnets the identity keeps the
+   addresses those introductions came from: the newest 100, for the same
+   30 days. An address is recorded when a key is new to a subnet, not on
+   every session; the SSH command log has every session's address.
 
 On a relational backend one composite primary key
 `(identity, ip_subnet)` serves the second for free (leading-column
@@ -4593,9 +4595,9 @@ headers, whether the failure came before or after they were chosen, so no
 cache stores the error or revalidates it against the content. The body stays
 generic (no internal detail leaks to clients), but the operator can always
 attribute a read 500 from the logs - a read canary failure with no matching
-log line means the request never reached this process. The slug is the only
-request-derived value logged (slugs are public identifiers; no client
-IPs, no headers, no payload).
+log line means the request never reached this process. The line names the
+slug and, on the Worker, the client's address (`addr=`); no headers and no
+payload are logged.
 
 ### Abuse log on the Worker's public surface
 
@@ -5114,7 +5116,7 @@ including the operator routes:
 | `GET /abuse/list` | | `{quarantined: [{slug, owner, reason, actor, at}]}` |
 | `GET /abuse/audit` | | `{entries: [...]}`, newest last |
 | `POST /abuse/room-delete` | `{app, room}` (the room's UUID) | 200 `{app, removed}` (`false`: no such room), 502 when a step could not finish |
-| `POST /abuse/ban-owner` | `{identity}` or `{slug}`, `reason`, optional `retentionDays` | 200 `{banId, owner, slugs, deleteAfter, subnets: [{subnet, at}]}` (the key's subnets over the last 30 days, for the operator to judge), 403 `protected-owner`, 404 `no-such-paste`, 409 `already-banned` with the open ban's `banId` |
+| `POST /abuse/ban-owner` | `{identity}` or `{slug}`, `reason`, optional `retentionDays` | 200 `{banId, owner, slugs, deleteAfter, subnets: [{subnet, at}], addrs: [{addr, at}]}` (the key's subnets over the last 30 days and the addresses it was admitted from, for the operator to judge), 403 `protected-owner`, 404 `no-such-paste`, 409 `already-banned` with the open ban's `banId` |
 | `POST /abuse/unban-owner` | `{banId}` | 200 `{banId, released}`, 404 `no-such-ban`, 409 `already-deleted` |
 | `GET /abuse/bans` | | `{bans: [{banId, owner, reason, at, deleteAfter, state, slugs, quarantined, deleted, failed}]}` |
 
@@ -5127,7 +5129,7 @@ and nowhere else, for an automated abuse watcher:
 | `POST /watcher/ban-key` | `{identity, reason}` (a `SHA256:` fingerprint, `key:` prefix optional), or `{slug, reason}` to ban that slug's owner without the caller ever holding the fingerprint |
 | `POST /watcher/ban-owner` | the same body as `ban-key`; runs the operator's owner ban ("Owner ban") at the default 7-day retention, which the watcher cannot change |
 | `GET /watcher/refused-bans?since=<ISO>&limit=<n>` | read-only; `since` defaults to 24 hours ago, `limit` to 50 (1 to 200); 400 `invalid-request` otherwise. 200 `{now, entries: [{at, action, target, reason, already_banned}]}`, newest first: the key and owner bans the rate cap refused. `target` is the first 10 hex digits of a key's fingerprint or the 16-hex owner hash, never a full key; `already_banned` is true once a later accepted ban covers the key or its owner, or the key is on the live denylist whoever added it. It changes no storage and does not touch the cap |
-| `GET /watcher/key-subnets?window_min=<n>&min_keys=<n>&limit=<n>` | read-only; `window_min` defaults to 60 (1 to 1440), `min_keys` to 3, `limit` to 50 (1 to 200); 400 `invalid-request` otherwise. 200 `{now, groups: [{subnet, first, last, keys: [{key, owner, at, banned}]}]}`: the subnets (`/24`, `/48`) where at least `min_keys` distinct keys were first seen within the last `window_min` minutes, largest group first. `key` is the first 10 hex digits of the fingerprint, `owner` the first 8 of the owner hash, `banned` whether the key is on the denylist now. The data is a ring the Subnet cell feeds when it admits a fresh key: the last 24 hours and at most 2000 events, so it never grows with history; a failed feed costs the ring an event and never the admission |
+| `GET /watcher/key-subnets?window_min=<n>&min_keys=<n>&limit=<n>` | read-only; `window_min` defaults to 60 (1 to 1440), `min_keys` to 3, `limit` to 50 (1 to 200); 400 `invalid-request` otherwise. 200 `{now, groups: [{subnet, first, last, keys: [{key, owner, at, addr, banned}]}]}`: the subnets (`/24`, `/48`) where at least `min_keys` distinct keys were first seen within the last `window_min` minutes, largest group first. `key` is the first 10 hex digits of the fingerprint, `owner` the first 8 of the owner hash, `addr` the address the key came from (null when it was not recorded), `banned` whether the key is on the denylist now. The data is a ring the Subnet cell feeds when it admits a fresh key: the last 24 hours and at most 2000 events, so it never grows with history; a failed feed costs the ring an event and never the admission |
 
 It cannot release, delete directly, lift a ban, or ban a network. Its actions pass two guards the
 operator routes skip:

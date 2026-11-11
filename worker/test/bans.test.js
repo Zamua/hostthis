@@ -238,3 +238,14 @@ test("an unban that arrives during an alarm pass is not overwritten by it", asyn
   const row = await call(paste, "operatorrow");
   assert.equal(Boolean(row.body.quarantine), false, "the slug is served again");
 });
+
+test("a key first seen on a subnet is remembered with its address, and the watcher's feed shows it", async () => {
+  const { abuse } = world();
+  for (const [i, addr] of [["1", "203.0.113.5"], ["2", "203.0.113.6"], ["3", undefined]]) {
+    const res = await call(abuse, "fresh", { subnet: "203.0.113.0/24", identity: `key:SHA256:${String(i).repeat(64)}`, at: NOW, addr });
+    assert.equal(res.status, 200);
+  }
+  const feed = await call(abuse, `keysubnets?now=${NOW + 1}&window_min=60&min_keys=2&limit=10`);
+  assert.equal(feed.status, 200);
+  assert.deepEqual(feed.body.groups[0].keys.map((k) => k.addr), ["203.0.113.5", "203.0.113.6", null]);
+});

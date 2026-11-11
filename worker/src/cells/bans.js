@@ -44,14 +44,16 @@ export async function ownerSlugs(env, identity) {
   return (await res.json()).map((e) => e.slug);
 }
 
-// The /24s and /48s the key was seen in over the index's retention period.
-export async function ownerSubnets(env, identity, now) {
+// The /24s and /48s the key was seen in over the index's retention period, and
+// the addresses it was first admitted from on them.
+export async function ownerNetworks(env, identity, now) {
   const res = await env.IDENTITY.get(env.IDENTITY.idFromName(identity)).fetch(new Request(
     `https://cell/identity/subnetlist?scope=${encodeURIComponent(identity)}&now=${now}`));
   if (!res.ok) {
     throw new Error(`identity subnetlist answered ${res.status}`);
   }
-  return (await res.json()).subnets;
+  const body = await res.json();
+  return { subnets: body.subnets, addrs: body.addrs ?? [] };
 }
 
 export async function openBanId(storage, ownerHash) {

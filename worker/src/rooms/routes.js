@@ -19,7 +19,7 @@ import {
   ROOMS_PER_SUBNET,
   byteStringText,
   clientAddress,
-  clientSubnet,
+  addressText, clientSubnet,
   decodeEndpoint,
   decodeSchedule,
   decodeSubscription,
@@ -214,7 +214,9 @@ async function createRoom(request, env, app, client) {
   if (!(await app.exists())) {
     return notFound();
   }
-  const subnet = clientSubnet(clientAddress(request.headers, env.HOSTTHIS_CLIENT_IP_SOURCE, client.forwarded));
+  const address = clientAddress(request.headers, env.HOSTTHIS_CLIENT_IP_SOURCE, client.forwarded);
+  const subnet = clientSubnet(address);
+  const addr = addressText(address);
   const now = Date.now();
   const counts = await ask(app.paste, "/paste/roomcounts", {
     query: { subnet, now: String(now), window: String(ROOM_CREATE_WINDOW_MS) },
@@ -234,7 +236,8 @@ async function createRoom(request, env, app, client) {
     const created = await ask(app.room(id), "/room/create", {
       method: "POST",
       body: {
-        appSlug: app.slug, id, createdAt: now, updatedAt: now, subnet, at: now, appCap: APP_MAX_ROOM_BYTES,
+        appSlug: app.slug, id, createdAt: now, updatedAt: now, subnet, addr: addr === "unknown" ? undefined : addr,
+        at: now, appCap: APP_MAX_ROOM_BYTES,
         roomLimit: APP_MAX_ROOMS,
       },
     });

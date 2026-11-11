@@ -46,8 +46,10 @@ function sandbox() {
   return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "X-Robots-Tag": ROBOTS_TAG };
 }
 
-function warn(slug, cause) {
-  console.warn(`warn: read 500: slug=${slug} ${cause}`);
+// A failed read names the slug and the client's address, so the operator can
+// attribute it.
+function warn(target, cause) {
+  console.warn(`warn: read 500: slug=${target.slug} addr=${target.addr ?? "unknown"} ${cause}`);
 }
 
 // A read-path 5xx is bare, as hostthisd's: its text, and nothing a cache may
@@ -91,7 +93,7 @@ export function readPath(openBlob) {
     try {
       answer = await resolveAnswer(env, target);
     } catch (error) {
-      warn(target.slug, `metadata resolve: ${error.message}`);
+      warn(target, `metadata resolve: ${error.message}`);
       return failure();
     }
     if (answer.found === false) {
@@ -150,7 +152,7 @@ export function readPath(openBlob) {
       try {
         body = await openBlob(env, entry, ctx);
       } catch (error) {
-        warn(target.slug, `${what} blob read: ${error.message}`);
+        warn(target, `${what} blob read: ${error.message}`);
         return error instanceof StorageOfflineError ? storageOffline() : failure();
       }
       // Held to its recorded decoded length, damage found after the headers
@@ -167,14 +169,14 @@ export function readPath(openBlob) {
         headers["Content-Length"] = String(size);
         body = exactLength(body, size);
       }
-      const reported = reportingErrors(body, (error) => warn(target.slug, `${what} blob read: ${error.message}`));
+      const reported = reportingErrors(body, (error) => warn(target, `${what} blob read: ${error.message}`));
       return new Response(reported, { status, headers });
     };
 
     const shellPage = (shellKind) => {
       const shell = renderShell(shellKind);
       if (!shell) {
-        warn(target.slug, `unsupported stored kind ${JSON.stringify(kind)}`);
+        warn(target, `unsupported stored kind ${JSON.stringify(kind)}`);
         return failure("unsupported kind");
       }
       const headers = content(`"${shell.version}"`);
@@ -209,7 +211,7 @@ export function readPath(openBlob) {
         return new Response(goStringList(answer.files), { headers });
       }
       default:
-        warn(target.slug, `unknown resolve action ${JSON.stringify(answer.action)}`);
+        warn(target, `unknown resolve action ${JSON.stringify(answer.action)}`);
         return failure();
     }
   };

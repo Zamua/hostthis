@@ -6,6 +6,9 @@ import { CREATE_INTENT_GRACE_MS, INTENT_PREFIX, ROOM_CHARGE_PREFIX, artifactAcco
 // How long the identity-side subnet index keeps an entry (docs/SPEC.md "Sybil
 // rate limit"): longer than the gate's window so an owner ban can name them.
 export const SUBNET_RETENTION_MS = 30 * 86_400_000;
+// Addresses kept per identity, and the longest address text a record keeps.
+const ADDRS_MAX = 100;
+const ADDR_MAX = 64;
 
 // Sign-in attempts one pending pod link keeps (docs/SPEC.md "Pod storage").
 const LINK_LOGIN_ATTEMPTS = 8;
@@ -449,24 +452,38 @@ export class Identity {
   }
 
   // The reverse index avoids fan-out across every subnet cell. Each entry
-  // holds the last time its pair was introduced to the gate.
+  // holds the last time its pair was introduced to the gate. `addrs` holds
+  // the addresses those introductions came from, newest ADDRS_MAX of them.
   async noteSubnet(body) {
     const subnets = (await this.state.storage.get("subnets")) ?? {};
+    const writes = {};
     if (subnets[body.subnet] !== body.now) {
       subnets[body.subnet] = Math.max(subnets[body.subnet] ?? 0, body.now);
-      await this.state.storage.put("subnets", subnets);
+      writes.subnets = subnets;
+    }
+    if (typeof body.addr === "string" && body.addr !== "" && body.addr.length <= ADDR_MAX) {
+      const addrs = (await this.state.storage.get("addrs")) ?? {};
+      addrs[body.addr] = Math.max(addrs[body.addr] ?? 0, body.now);
+      const kept = Object.entries(addrs).filter(([, at]) => body.now - at < SUBNET_RETENTION_MS)
+        .sort((a, b) => b[1] - a[1]).slice(0, ADDRS_MAX);
+      writes.addrs = Object.fromEntries(kept);
+    }
+    if (Object.keys(writes).length > 0) {
+      await this.state.storage.put(writes);
     }
     return new Response(null, { status: 204 });
   }
 
-  // The subnets this key was seen in over the retention period, for an
-  // operator's owner ban.
+  // The subnets this key was seen in over the retention period, and the
+  // addresses it was admitted from, for an operator's owner ban.
   async subnetList(url) {
     const now = Number(url.searchParams.get("now"));
-    const subnets = (await this.state.storage.get("subnets")) ?? {};
-    const list = Object.entries(subnets).filter(([, at]) => now - at < SUBNET_RETENTION_MS)
-      .map(([subnet, at]) => ({ subnet, at })).sort((a, b) => b.at - a.at);
-    return Response.json({ subnets: list });
+    const recent = (map, name) => Object.entries(map).filter(([, at]) => now - at < SUBNET_RETENTION_MS)
+      .map(([value, at]) => ({ [name]: value, at })).sort((a, b) => b.at - a.at);
+    return Response.json({
+      subnets: recent((await this.state.storage.get("subnets")) ?? {}, "subnet"),
+      addrs: recent((await this.state.storage.get("addrs")) ?? {}, "addr"),
+    });
   }
 
   async podGet() {

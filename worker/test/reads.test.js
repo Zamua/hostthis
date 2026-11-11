@@ -671,7 +671,7 @@ test("a metadata failure is a 500 with one warning", async () => {
   };
   const warned = await capturingWarnings(async () => assertInternalError(await w.fetch(at("/"))));
   assert.equal(warned.length, 1);
-  assert.match(warned[0], new RegExp(`slug=${SLUG} metadata`));
+  assert.match(warned[0], new RegExp(`slug=${SLUG} addr=\\S+ metadata`));
 });
 
 test("a stored kind with no shell is a 500 naming it", async () => {

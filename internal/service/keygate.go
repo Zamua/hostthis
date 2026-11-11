@@ -86,12 +86,30 @@ func (e *SybilRefusal) NextSlotFreesAt() time.Time {
 	return e.OldestEntryFirstSeen.Add(e.Window)
 }
 
-// Admit gates one session. ipSubnet must be non-empty. fresh reports a key
-// new to the subnet, which the caller may count as a new owner.
-// On refusal returns *SybilRefusal (which is also errors.Is(ErrSybilRateLimit)).
+// addrRecordingKeyGate is a KeyGateRepo that can also record the address a
+// key was admitted from.
+type addrRecordingKeyGate interface {
+	AdmitNewKeyFrom(identity, subnet, addr string, now time.Time, limitPerSubnet int, window time.Duration) (bool, error)
+}
+
+// Admit gates one session by its subnet alone, recording no address.
 func (g *KeyGate) Admit(owner domain.Owner, ipSubnet string) (fresh bool, err error) {
+	return g.AdmitFrom(owner, ipSubnet, "")
+}
+
+// AdmitFrom gates one session. ipSubnet must be non-empty and alone decides
+// admission; addr, the client's address, is recorded beside it when the store
+// keeps addresses. fresh reports a key new to the subnet, which the caller may
+// count as a new owner. On refusal returns *SybilRefusal (which is also
+// errors.Is(ErrSybilRateLimit)).
+func (g *KeyGate) AdmitFrom(owner domain.Owner, ipSubnet, addr string) (fresh bool, err error) {
 	now := g.Now().UTC()
-	known, err := g.Repo.AdmitNewKey(owner.String(), ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window)
+	var known bool
+	if repo, ok := g.Repo.(addrRecordingKeyGate); ok && addr != "" {
+		known, err = repo.AdmitNewKeyFrom(owner.String(), ipSubnet, addr, now, g.MaxFreshKeysPerSubnet, g.Window)
+	} else {
+		known, err = g.Repo.AdmitNewKey(owner.String(), ipSubnet, now, g.MaxFreshKeysPerSubnet, g.Window)
+	}
 	if err != nil {
 		// The sentinel is matched by identity through any wrapping, never by
 		// message text.

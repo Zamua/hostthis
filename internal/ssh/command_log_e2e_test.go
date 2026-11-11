@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -79,5 +83,31 @@ func TestSessionLineNamesKeyMethodAndAddress(t *testing.T) {
 	}
 	if !strings.Contains(got, keyless) || !strings.Contains(got, "key=- auth=password addr=127.0.0.1 subnet=127.0.0.0/24") {
 		t.Fatalf("log = %q, want a keyless password line", got)
+	}
+}
+
+// A key's first session on a network leaves the address it came from on the
+// identity's record, beside the subnet.
+func TestNewKeyRecordsTheAddressItCameFrom(t *testing.T) {
+	s := startStack(t, withKeyGate(5))
+	if _, _, code := s.run("whoami", nil); code != 0 {
+		t.Fatalf("whoami exit %d", code)
+	}
+	target := fmt.Sprintf("%s/identity/subnetlist?scope=%s&now=%d", s.endpoint,
+		url.QueryEscape("key:"+s.keyedOwner), time.Now().UnixMilli())
+	resp, err := http.Get(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	var got struct {
+		Subnets []struct{ Subnet string } `json:"subnets"`
+		Addrs   []struct{ Addr string }   `json:"addrs"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("status %d: %v", resp.StatusCode, err)
+	}
+	if len(got.Addrs) != 1 || got.Addrs[0].Addr != "127.0.0.1" || len(got.Subnets) != 1 || got.Subnets[0].Subnet != "127.0.0.0/24" {
+		t.Fatalf("record = %+v, want addr 127.0.0.1 on 127.0.0.0/24", got)
 	}
 }

@@ -21,7 +21,7 @@ import (
 // /api/rooms endpoints. internal/service.Rooms satisfies it. Optional: when
 // nil the /api/rooms prefix is not served.
 type RoomService interface {
-	Create(appSlug domain.Slug, subnet string) (domain.Room, error)
+	CreateFrom(appSlug domain.Slug, subnet, addr string) (domain.Room, error)
 	Get(appSlug domain.Slug, id domain.RoomID, key string) ([]byte, error)
 	// Scan returns the namespace stamped with the exact per-room sequence its
 	// state reflects: the relay's late-join snapshot fence.
@@ -157,7 +157,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request, appSlug doma
 		return
 	}
 	subnet := clientSubnet(r, s.ClientIP)
-	room, err := s.Rooms.Create(appSlug, subnet)
+	room, err := s.Rooms.CreateFrom(appSlug, subnet, domain.AddrText(clientAddress(r, s.ClientIP)))
 	if err != nil {
 		s.writeRoomError(w, r, "collection", err)
 		return
