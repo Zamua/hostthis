@@ -3,7 +3,7 @@
 // read-check-write sequence cannot interleave; body parses the request JSON;
 // room loads the room document and answers 404 without one. run receives
 // (self, body, url, doc).
-export const read = (run, flags = {}) => ({ run, ...flags });
+export const read = (run, flags = {}) => ({ mutating: false, run, ...flags });
 export const mutation = (run, flags = {}) => ({ mutating: true, body: true, run, ...flags });
 
 export function runOp(self, entry, body, url) {
@@ -24,9 +24,16 @@ export function runOp(self, entry, body, url) {
 // own default. The `op` query names the op when the path cannot: celld's
 // internal `/do/<cell>` route addresses a cell by id and takes no further path,
 // which is how an operator tool reaches a cell without knowing its name.
+// The table entry a request names: by the last path segment, or by the `op`
+// query when the path names none. Undefined for an op the table lacks.
+export function opOf(table, request) {
+  const url = new URL(request.url);
+  return table[url.pathname.split("/").pop()] ?? table[url.searchParams.get("op")];
+}
+
 export async function dispatch(self, table, request) {
   const url = new URL(request.url);
-  const entry = table[url.pathname.split("/").pop()] ?? table[url.searchParams.get("op")];
+  const entry = opOf(table, request);
   if (!entry) {
     return null;
   }
