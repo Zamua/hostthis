@@ -10,7 +10,7 @@ and HTTP remain owned by `hostthisd`.
 | path | holds |
 | --- | --- |
 | `src/index.js` | the entry: host-picked routers, bearer auth, the cell class exports |
-| `src/cells/` | one module per cell class (`identity`, `paste`, `room`, `subnet`, `intentlog`), the op-table machinery (`ops.js`), shared storage records and the allocation fence (`records.js`), and the cell image and restore routes (`image.js`) |
+| `src/cells/` | one module per cell class (`identity`, `paste`, `room`, `subnet`, `denylist`, `abuse`, `feed`, `turn`, `intentlog`), the op-table machinery (`ops.js`), shared storage records and the allocation fence (`records.js`), and the cell image and restore routes (`image.js`) |
 | `src/push.js` | Web Push: encryption, VAPID, subscription and schedule validation, time zones |
 | `src/blobs.js` | the internal `/blob/` payload routes |
 | `src/public/`, `src/read.js` | the public read surface |
@@ -109,6 +109,10 @@ boundaries, routing) without a runtime.
 | Paste | one slug's metadata and versions, or one app's room allocation ledger |
 | Room | one room's metadata, key/value state, sequence, and sockets |
 | Subnet | one subnet's fresh-identity admission window |
+| Denylist | the operator's banned keys and networks, one cell for the deployment |
+| Abuse | quarantines, owner bans, the audit log and the fresh-key ring, one cell |
+| Feed | the change feed an operator's usage scan reads, one cell |
+| Turn | TURN relay credentials and their budget, one cell |
 
 A celld fleet serves one Worker application. Paste and site payloads live in
 the `PAYLOADS` R2 binding (`r2/payloads/` in the fleet bucket), reached through

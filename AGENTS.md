@@ -121,19 +121,35 @@ upgrade while looking like an upstream bug.
 cmd/hostthisd/       single binary entry point
 internal/
   domain/            pure types + invariants (no I/O)
-  worker/             metadata adapters over the Worker
-  workertest/         runs the Worker locally for tests
-  storage/           site view, blob store layers, storage contract tests
-  service/           use cases (upload, manage, deploy, rooms)
-  ssh/               gliderlabs ssh server + verb dispatch
+  service/           use cases (upload, manage, deploy, rooms, admission)
+  ssh/               SSH server (charmbracelet/ssh + wish) + verb dispatch
   http/              apex landing + paste read surface
+  worker/            metadata adapters over the Worker
+  workertest/        runs the Worker locally for tests
+  storage/           site view, blob store layers, storage contract tests
+  archive/           safe untar of site archives
+  zstdenc/           the at-rest compression format
+  mime/              content sniffing
+  screen/            client of the pre-publish screening service
+  cache/             CDN purge on write
+  abuselog/          the abuse log line
+  metrics/           Prometheus metrics
+  drain/             graceful shutdown gate
+  roomwire/          room socket wire constants
+  parity/            response parity suite: hostthisd against the Worker
+  sitevalidation/    serves built demo sites and compares bytes
+worker/              the Worker: cells (Durable Objects), internal routes,
+                     the public read surface; its own README
 e2e/                 Playwright browser suite (Chromium + WebKit)
 web/landing.html     embedded apex landing page
 web/shells/          render shells, their assets and shells.json; read by Go
                      (package web) and the Worker build
+scripts/             smoke.sh (verb surface against a live host), repo checks
+testdata/            vectors shared by the Go and Worker tests
 docs/SPEC.md         product spec; source of truth for behavior
+docs/LANGUAGE.md     the nouns the product uses, and the ones it avoids
 Dockerfile           multi-stage build; distroless static image
-Makefile             build / test / run / docker-up / smoke targets
+Makefile             build / check / test / run / smoke targets
 AGENTS.md            contributor workflow conventions
 README.md            user-facing manpage
 ```
@@ -162,7 +178,7 @@ Worker code with no shared state.
 ```
 make build         # local Go build → ./bin/hostthisd
 make check         # what CI's main job gates on: fmt-check, vet, fix-check, test, vuln
-make test          # run all tests (domain unit + storage + service + ssh/http e2e)
+make test          # Go tests, the parity suite, the Worker tests, repo checks
 make vuln          # govulncheck: fails on a reachable known vulnerability (also a CI job)
 make run           # run locally, no container; ssh :2222 http :8080, path-mode,
                    # beside the Worker under Miniflare (state in ./data/worker)
