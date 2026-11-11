@@ -65,11 +65,12 @@ jobs:
 
       # The image has no make, and the publish step reads JSON with jq. Only
       # noble's main index is fetched (~2 MB, both are in it), not every list
-      # the image configures. Two mirrors, so one that does not resolve does
-      # not fail the job: apt takes the index from whichever answers.
+      # the image configures. Two mirrors under different domains, so one
+      # that does not resolve does not fail the job: apt takes the index from
+      # whichever answers, and verifies it with Ubuntu's key either way.
       - name: Install make and jq
         run: |
-          printf 'deb http://%s/ubuntu noble main\n' archive.ubuntu.com azure.archive.ubuntu.com > /tmp/noble-main.list
+          printf 'deb %s/ubuntu noble main\n' http://archive.ubuntu.com https://mirrors.edge.kernel.org > /tmp/noble-main.list
           apt() { apt-get -o Dir::Etc::SourceList=/tmp/noble-main.list -o Dir::Etc::SourceParts=/dev/null "$@"; }
           apt update -qq
           apt install -y -qq --no-install-recommends make jq
