@@ -2006,8 +2006,10 @@ one line, no trailing whitespace, no formatting - so pipes Just Work:
 cat foo.html | ssh -T hostthis.dev | pbcopy   # → URL only on the clipboard
 ```
 
-Everything else (the QR code, key-onboarding nudge,
-warnings) prints to stderr. Pipes lose it, but the user's terminal still
+Help that was asked for (`help`, `help <verb>`, `<verb> --help`) is the one
+other thing on stdout, so it can be piped and paged; help shown because a
+command was wrong goes to stderr with the error. Everything else (the QR
+code, key-onboarding nudge, warnings) prints to stderr. Pipes lose it, but the user's terminal still
 renders it because stderr is a TTY by default.
 
 An ssh key is required on every session - there is no anonymous mode.
@@ -2029,7 +2031,12 @@ against the key fingerprint. The same format gate the create path uses
 decides paste-vs-site: a gzip-tar archive piped to an OWNED site slug
 re-deploys that SITE in place (see "Static site archives → Reuse →
 Deploy to an existing site slug"); anything else updates a paste as
-described here. The slug and URL are unchanged either way. Failure modes
+described here. The slug and URL are unchanged either way. When an update
+changes what the slug holds (a document piped at a site's slug replaces the
+site), stderr says so and names the undo: `note: <slug> was site and is now
+markdown; "pin <slug> <n>" restores the site.`, where `<n>` is the version
+that was served before. A pinned slug gets its pin note instead, since the
+URL still serves the pinned version. Failure modes
 (exit codes; SSH stderr message in italics):
 
 - *not found* (exit 4): slug doesn't exist OR exists but the connecting

@@ -71,3 +71,21 @@ test('markdown render', async ({ server, page, pageErrors, shot }) => {
   expect.soft([got.tasks, got.tasksDone]).toEqual([2, 1]);
   pageErrors.expectNone();
 });
+
+// A long unbroken token wraps inside the article at phone width instead of
+// widening the page, which would make the browser zoom the whole document out.
+test('markdown long token does not widen a phone page', async ({ server, page, pageErrors }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const paste = server.upload(`# Long token\n\nSee ${'a1b2c3d4'.repeat(20)} for details.\n`, {
+    type: 'md',
+    name: 'markdown long token',
+  });
+  await page.goto(paste.url);
+  await expect(page.locator('#content h1.anchored')).toBeVisible();
+  const widths = await page.evaluate(() => ({
+    page: document.documentElement.scrollWidth,
+    viewport: window.innerWidth,
+  }));
+  expect(widths.page).toBeLessThanOrEqual(widths.viewport);
+  pageErrors.expectNone();
+});

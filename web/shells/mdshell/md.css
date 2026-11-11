@@ -17,6 +17,9 @@ body {
   padding: 2rem 1.4rem 4rem;
   -webkit-text-size-adjust: 100%;
 }
+/* A long unbroken token (a URL, a hash) wraps instead of widening the page;
+   pre and table scroll inside their own box. */
+article { overflow-wrap: anywhere; }
 article > *:first-child { margin-top: 0; }
 h1, h2, h3, h4, h5, h6 {
   font-weight: 600;
