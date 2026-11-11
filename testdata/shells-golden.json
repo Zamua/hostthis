@@ -356,8 +356,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/javascript; charset=utf-8"
     },
-    "size": 21251,
-    "sha256": "833a4bb2049353452eaac19dfe376324c0f11d33b008765f094bfadf4a5501f0"
+    "size": 29828,
+    "sha256": "cd37898f9782adf54820c413191b5691803f0f137c799d6edcfd38523b4c2c31"
   },
   "asset/query.js": {
     "status": 200,
