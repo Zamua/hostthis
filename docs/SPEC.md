@@ -4249,7 +4249,9 @@ and answers 401 without it, compared in constant time. `hostthisd` sends the
 header when its own `HOSTTHIS_WORKER_TOKEN` is set. A deployment whose Worker is
 reachable only inside its cluster may leave both unset and rely on
 NetworkPolicy; a Worker reachable across the internet sets both, and a Worker
-with a public apex (below) must set the token. Worker health and runtime health are
+with a public apex (below) must set the token. "Internal credentials" below
+describes the narrower tokens, the address list for the full one, and how a
+token is replaced without an interruption. Worker health and runtime health are
 separate: `/healthz` checks the hostthis Worker, while
 `/.well-known/worker/health` is the node lifecycle probe.
 
@@ -5115,8 +5117,49 @@ room is dropped and its sockets closed; reads answer 404. A step that cannot
 finish answers 502 with the room left emptied, and calling again completes it.
 The audit log records the room as a hash of its id.
 
-**Two credentials.** The Worker's internal token reaches everything,
-including the operator routes:
+**Internal credentials.** Four secrets open the internal routes, each
+compared in constant time, and every refusal is the same 401
+(`unauthorized`, `WWW-Authenticate: Bearer`) whatever its reason: no token, a
+wrong one, the full token from an address off its list, or a narrower token
+outside its operations. Nothing logs which token a request carried.
+
+- **The full token**, `HOSTTHIS_WORKER_TOKEN`, reaches everything. It is
+  `hostthisd`'s.
+  - *Replacing it.* While `HOSTTHIS_WORKER_TOKEN_NEXT` is set the Worker
+    accepts either value as the full token. A rotation sets the new value as
+    NEXT, moves every client to it, then makes it the main token and unsets
+    NEXT, so no request is refused on the way.
+  - *Binding it to addresses.* `HOSTTHIS_INTERNAL_ALLOW` is a comma separated
+    list of addresses and CIDR prefixes (IPv4 or IPv6). When it is set, the
+    full token is accepted only from a client address on the list; unset, from
+    anywhere. The address is the one `HOSTTHIS_CLIENT_IP_SOURCE` names
+    (`cf-connecting-ip` behind Cloudflare's edge, `xff-rightmost` behind a
+    trusted proxy) and no other header is read. A deployment that names no
+    source has no trustworthy client address, so there a list refuses the full
+    token from everyone: on such a runtime a client sets `CF-Connecting-IP`
+    itself, and a forged one must prove nothing. A list with an entry that does
+    not parse matches nothing. `/healthz` stays open.
+- **The read token**, `HOSTTHIS_READ_TOKEN`, for operator tools that only
+  look: `/paste/{get,versions,resolve,exists,operatorrow,roomindex,head}`,
+  `/identity/{bytes,list,firstSeen,subnetlist}`, `/denylist/list`,
+  `/abuse/{list,audit,bans}`, `/room/{count,meta,get,scan}`, and `GET
+  /blob/<key>`. It reads content and owner identities, so it is still a
+  secret.
+- **The admin token**, `HOSTTHIS_ADMIN_TOKEN`, for the operator's abuse tools:
+  everything the read token opens, plus the operator routes in the table
+  below, `/denylist/{add,remove}`, and the two deletions a takedown makes
+  (`/paste/remove` and `DELETE /blob?prefix=`). It cannot create or change
+  content.
+- **The watcher token**, described after the table.
+
+The narrower tokens are accepted from any address, and name their operation by
+the path alone: a request carrying an `op` query (which a cell would also take
+as the operation) is refused. Either may send a forwarded request (see "Public
+and internal hosts") with GET or HEAD; only the full token may forward
+anything else, since a forwarded request is trusted for the client address it
+names.
+
+The full token reaches everything, including the operator routes:
 
 | route | body | answer |
 | --- | --- | --- |
@@ -5305,6 +5348,10 @@ HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      
 HOSTTHIS_EDGE_CACHE_MAX_BYTES  largest read response the edge cache stores      (8388608)
 HOSTTHIS_BLOB_CACHE_MAX_BYTES  largest decoded payload cached; 0 is off         (0)
 HOSTTHIS_WATCHER_TOKEN         the abuse watcher's token, /watcher/* only        (unset)
+HOSTTHIS_WORKER_TOKEN_NEXT     a second full token, accepted during a rotation    (unset)
+HOSTTHIS_INTERNAL_ALLOW        addresses and CIDRs the full token is accepted from (unset: any)
+HOSTTHIS_READ_TOKEN            read-only token for operator tools                (unset)
+HOSTTHIS_ADMIN_TOKEN           abuse-admin token for operator tools              (unset)
 HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on, and owners
                                the default room rules skip                       (unset)
 HOSTTHIS_DEFAULT_ROOM_RULES    on: small-text rules for other apps' rooms        (off)
