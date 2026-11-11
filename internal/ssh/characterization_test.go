@@ -471,47 +471,60 @@ func TestHelp_Characterization(t *testing.T) {
 
 	t.Run("HelpVerb_NoPty_LF", func(t *testing.T) {
 		// sess.Run() allocates no PTY, so help emits LF-terminated lines.
-		_, stderr, exit := s.run("help", nil)
+		out, _, exit := s.run("help", nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if !strings.Contains(stderr, "Pipe a rendered file in") {
-			t.Fatalf("expected help body, got %q", stderr)
+		if !strings.Contains(out, "Pipe a rendered file in") {
+			t.Fatalf("expected help body, got %q", out)
 		}
-		if strings.Contains(stderr, "\r\n") {
-			t.Fatalf("help over no-PTY session should be LF-only, found CRLF in %q", stderr)
+		if strings.Contains(out, "\r\n") {
+			t.Fatalf("help over no-PTY session should be LF-only, found CRLF in %q", out)
 		}
 	})
 
 	t.Run("HelpVerb_WithPty_CRLF", func(t *testing.T) {
 		// With a PTY, emitHelp translates LF to CRLF so the client's raw
 		// terminal renders without the staircase effect.
-		_, stderr, exit := s.runPty("help")
+		out, _, exit := s.runPty("help")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if !strings.Contains(stderr, "\r\n") {
-			t.Fatalf("help over PTY session should be CRLF, got LF-only %q", stderr)
+		if !strings.Contains(out, "\r\n") {
+			t.Fatalf("help over PTY session should be CRLF, got LF-only %q", out)
+		}
+	})
+
+	t.Run("RequestedHelp_IsOnStdoutOnly", func(t *testing.T) {
+		for _, cmd := range []string{"help", "help list", "list --help"} {
+			out, stderr, exit := s.run(cmd, nil)
+			if exit != 0 || out == "" || stderr != "" {
+				t.Fatalf("%q: exit %d, %d bytes on stdout, stderr %q; want help on stdout alone", cmd, exit, len(out), stderr)
+			}
+		}
+		out, stderr, _ := s.run("totallybogus", nil)
+		if out != "" || !strings.Contains(stderr, "Pipe a rendered file in") {
+			t.Fatalf("help after an error: stdout %q, want it on stderr alone (%d bytes there)", out, len(stderr))
 		}
 	})
 
 	t.Run("DashHelpFlag_SameAsHelp", func(t *testing.T) {
-		_, stderr, exit := s.run("--help", nil)
+		out, _, exit := s.run("--help", nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if !strings.Contains(stderr, "Pipe a rendered file in") {
-			t.Fatalf("expected help body for --help, got %q", stderr)
+		if !strings.Contains(out, "Pipe a rendered file in") {
+			t.Fatalf("expected help body for --help, got %q", out)
 		}
 	})
 
 	t.Run("DashHFlag_SameAsHelp", func(t *testing.T) {
-		_, stderr, exit := s.run("-h", nil)
+		out, _, exit := s.run("-h", nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if !strings.Contains(stderr, "Pipe a rendered file in") {
-			t.Fatalf("expected help body for -h, got %q", stderr)
+		if !strings.Contains(out, "Pipe a rendered file in") {
+			t.Fatalf("expected help body for -h, got %q", out)
 		}
 	})
 
@@ -530,35 +543,35 @@ func TestHelp_Characterization(t *testing.T) {
 
 	t.Run("PtyOnly_NoArgs_ShowsHelp", func(t *testing.T) {
 		// Empty argv WITH a PTY shows help; without a PTY it is an upload.
-		_, stderr, exit := s.runPty("")
+		out, _, exit := s.runPty("")
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if !strings.Contains(stderr, "Pipe a rendered file in") {
-			t.Fatalf("PTY + empty cmd should show help, got %q", stderr)
+		if !strings.Contains(out, "Pipe a rendered file in") {
+			t.Fatalf("PTY + empty cmd should show help, got %q", out)
 		}
 	})
 
 	t.Run("HelpBody_MentionsApex", func(t *testing.T) {
-		_, stderr, _ := s.run("help", nil)
+		out, _, _ := s.run("help", nil)
 		// The fixture's apex is "paste.test": helpTextTemplate must keep
 		// substituting it.
-		if !strings.Contains(stderr, "paste.test") {
-			t.Fatalf("help should mention apex 'paste.test', got %q", stderr)
+		if !strings.Contains(out, "paste.test") {
+			t.Fatalf("help should mention apex 'paste.test', got %q", out)
 		}
 	})
 
 	t.Run("HelpVerb_NoPty_CleanLines", func(t *testing.T) {
 		// The banner ends in exactly one LF and carries no trailing blanks,
 		// which a raw terminal would render as stray padding.
-		_, stderr, exit := s.run("help", nil)
+		out, _, exit := s.run("help", nil)
 		if exit != 0 {
 			t.Fatalf("exit: %d", exit)
 		}
-		if !strings.HasSuffix(stderr, "\n") || strings.HasSuffix(stderr, "\n\n") {
-			t.Fatalf("help should end in exactly one LF, got tail %q", stderr[max(0, len(stderr)-40):])
+		if !strings.HasSuffix(out, "\n") || strings.HasSuffix(out, "\n\n") {
+			t.Fatalf("help should end in exactly one LF, got tail %q", out[max(0, len(out)-40):])
 		}
-		for i, line := range strings.Split(stderr, "\n") {
+		for i, line := range strings.Split(out, "\n") {
 			if strings.TrimRight(line, " \t") != line {
 				t.Fatalf("help line %d has trailing whitespace: %q", i+1, line)
 			}

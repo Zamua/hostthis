@@ -496,3 +496,37 @@ func TestUpload_DashDashAfterSlug(t *testing.T) {
 		t.Fatalf("update with -- after the slug: exit %d, stderr %q", exit, stderr)
 	}
 }
+
+// Piping a document at a site's slug replaces the site; the session says so
+// and names the command that brings the site back. An update that keeps the
+// kind says nothing.
+func TestUpdate_KindChangeIsAnnouncedWithItsUndo(t *testing.T) {
+	g := startStack(t, withSites())
+	arc := makeSiteArchive(t, map[string]string{"index.html": "<h1>site</h1>"})
+	siteURL, stderr, code := g.run("", arc)
+	if code != 0 {
+		t.Fatalf("deploy: exit %d %q", code, stderr)
+	}
+	slug := extractSlug(siteURL)
+
+	_, stderr, code = g.run(slug, []byte("# now a document\n"))
+	if code != 0 {
+		t.Fatalf("update: exit %d %q", code, stderr)
+	}
+	want := fmt.Sprintf("note: %s was site and is now markdown; \"pin %s 1\" restores the site.", slug, slug)
+	if !strings.Contains(stderr, want) {
+		t.Fatalf("stderr = %q, want it to contain %q", stderr, want)
+	}
+
+	_, stderr, code = g.run(slug, []byte("# still a document\n"))
+	if code != 0 || strings.Contains(stderr, "note:") {
+		t.Fatalf("same-kind update: exit %d, stderr %q, want no note", code, stderr)
+	}
+
+	if _, stderr, code = g.run("pin "+slug+" 1", nil); code != 0 {
+		t.Fatalf("pin: exit %d %q", code, stderr)
+	}
+	if status, body := getBody(t, strings.TrimSpace(siteURL)+"/"); status != 200 || !strings.Contains(body, "<h1>site</h1>") {
+		t.Fatalf("site after the named pin: %d %q", status, body)
+	}
+}

@@ -26,21 +26,21 @@ func TestHelpVerb_HelpSpaceVerb(t *testing.T) {
 	s := startStack(t)
 	for _, v := range verbHelpVerbs {
 		t.Run(v, func(t *testing.T) {
-			_, stderr, exit := s.run("help "+v, nil)
+			out, _, exit := s.run("help "+v, nil)
 			if exit != 0 {
-				t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
+				t.Fatalf("exit: %d (stdout: %q)", exit, out)
 			}
-			if !strings.Contains(stderr, "Usage:") || !strings.Contains(stderr, "Examples:") {
-				t.Fatalf("expected Usage: and Examples: sections in verb help, got %q", stderr)
+			if !strings.Contains(out, "Usage:") || !strings.Contains(out, "Examples:") {
+				t.Fatalf("expected Usage: and Examples: sections in verb help, got %q", out)
 			}
 			// The global banner's opening line is the canary: verb help
 			// must not fall through to it.
-			if strings.Contains(stderr, "Pipe a rendered file in") {
-				t.Fatalf("verb help leaked the global banner: %q", stderr)
+			if strings.Contains(out, "Pipe a rendered file in") {
+				t.Fatalf("verb help leaked the global banner: %q", out)
 			}
-			usage, ok := usageLine(stderr)
+			usage, ok := usageLine(out)
 			if !ok {
-				t.Fatalf("no Usage: line in help for %q, got %q", v, stderr)
+				t.Fatalf("no Usage: line in help for %q, got %q", v, out)
 			}
 			// "ssh <apex> <verb> ..."; the verb is the third whitespace token.
 			if fields := strings.Fields(usage); len(fields) < 3 || fields[2] != v {
@@ -62,14 +62,14 @@ func TestHelpVerb_VerbHelpFlags(t *testing.T) {
 				continue
 			}
 			t.Run(v+" "+flag, func(t *testing.T) {
-				_, stderr, exit := s.run(v+" "+flag, nil)
+				out, _, exit := s.run(v+" "+flag, nil)
 				if exit != 0 {
-					t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
+					t.Fatalf("exit: %d (stdout: %q)", exit, out)
 				}
-				_, helpVerbStderr, _ := s.run("help "+v, nil)
-				if stderr != helpVerbStderr || !strings.Contains(stderr, "Usage:") {
+				helpVerbOut, _, _ := s.run("help "+v, nil)
+				if out != helpVerbOut || !strings.Contains(out, "Usage:") {
 					t.Fatalf("`%s %s` diverged from `help %s`:\n got %q\n want %q",
-						v, flag, v, stderr, helpVerbStderr)
+						v, flag, v, out, helpVerbOut)
 				}
 			})
 		}
@@ -98,15 +98,15 @@ func TestHelpVerb_HelpUnknown(t *testing.T) {
 // characterization_test.go; this checks the canary line next to the verb code.
 func TestHelpVerb_BareHelpUnchanged(t *testing.T) {
 	s := startStack(t)
-	_, stderr, exit := s.run("help", nil)
+	out, _, exit := s.run("help", nil)
 	if exit != 0 {
 		t.Fatalf("exit: %d", exit)
 	}
-	if !strings.Contains(stderr, "Pipe a rendered file in") {
-		t.Fatalf("bare `help` must emit global banner, got %q", stderr)
+	if !strings.Contains(out, "Pipe a rendered file in") {
+		t.Fatalf("bare `help` must emit global banner, got %q", out)
 	}
-	if strings.Contains(stderr, "Usage:") {
-		t.Fatalf("bare `help` must NOT emit verb-specific Usage: block, got %q", stderr)
+	if strings.Contains(out, "Usage:") {
+		t.Fatalf("bare `help` must NOT emit verb-specific Usage: block, got %q", out)
 	}
 }
 
@@ -118,24 +118,24 @@ func TestHelpVerb_PtyCrLf(t *testing.T) {
 
 	t.Run("NoPty_LF_Only", func(t *testing.T) {
 		for _, cmd := range cmds {
-			_, stderr, exit := s.run(cmd, nil)
-			if exit != 0 || !strings.Contains(stderr, "Usage:") {
-				t.Fatalf("%q: exit %d stderr %q", cmd, exit, stderr)
+			out, _, exit := s.run(cmd, nil)
+			if exit != 0 || !strings.Contains(out, "Usage:") {
+				t.Fatalf("%q: exit %d stdout %q", cmd, exit, out)
 			}
-			if strings.Contains(stderr, "\r\n") {
-				t.Fatalf("no-PTY %q should be LF-only, found CRLF in %q", cmd, stderr)
+			if strings.Contains(out, "\r\n") {
+				t.Fatalf("no-PTY %q should be LF-only, found CRLF in %q", cmd, out)
 			}
 		}
 	})
 
 	t.Run("WithPty_CRLF", func(t *testing.T) {
 		for _, cmd := range cmds {
-			_, stderr, exit := s.runPty(cmd)
+			out, _, exit := s.runPty(cmd)
 			if exit != 0 {
 				t.Fatalf("%q: exit %d", cmd, exit)
 			}
-			if !strings.Contains(stderr, "\r\n") {
-				t.Fatalf("PTY %q should be CRLF, got LF-only %q", cmd, stderr)
+			if !strings.Contains(out, "\r\n") {
+				t.Fatalf("PTY %q should be CRLF, got LF-only %q", cmd, out)
 			}
 		}
 	})
@@ -158,12 +158,12 @@ func TestHelpVerb_NoSideEffects(t *testing.T) {
 	s := startStack(t)
 	// A slug-shaped string, so the verb's own parser would not reject it on
 	// arg-shape grounds.
-	_, stderr, exit := s.run("delete abcd1234 --help", nil)
+	out, stderr, exit := s.run("delete abcd1234 --help", nil)
 	if exit != 0 {
 		t.Fatalf("exit: %d (stderr: %q)", exit, stderr)
 	}
-	if !strings.Contains(stderr, "Usage:") {
-		t.Fatalf("expected verb help, got %q", stderr)
+	if !strings.Contains(out, "Usage:") {
+		t.Fatalf("expected verb help, got %q", out)
 	}
 	// A real delete would have surfaced `not found` for this unowned slug.
 	if strings.Contains(stderr, "not found") {
