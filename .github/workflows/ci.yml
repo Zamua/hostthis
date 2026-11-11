@@ -81,6 +81,20 @@ jobs:
             exit 1
           fi
 
+  # A known vulnerability reachable from the module's code fails the build.
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: govulncheck
+        run: make vuln
+
   # The Worker suites run in the go job against the Worker under Miniflare, and
   # again here against a real celld node backed by MinIO, the self-hosted shape.
   # A separate operator gate qualifies object-store restore behavior.
