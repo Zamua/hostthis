@@ -249,3 +249,37 @@ test("a key first seen on a subnet is remembered with its address, and the watch
   assert.equal(feed.status, 200);
   assert.deepEqual(feed.body.groups[0].keys.map((k) => k.addr), ["203.0.113.5", "203.0.113.6", null]);
 });
+
+// Cloudflare's purge API answering from a script of statuses, then 200.
+function purgeAPI(t, statuses) {
+  const calls = [];
+  const real = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    calls.push(JSON.parse(init.body).hosts);
+    return new Response("{}", { status: statuses.shift() ?? 200 });
+  };
+  t.after(() => { globalThis.fetch = real; });
+  return calls;
+}
+
+const PURGING = { HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" };
+
+test("a ban's purge the API refuses is tried again until it goes through, then stops", async (t) => {
+  const w = world();
+  Object.assign(w.abuse.env, PURGING);
+  await w.add(OWNER, "aaaa2345");
+  const calls = purgeAPI(t, [429, 503]);
+  assert.equal((await call(w.abuse, "banowner", { identity: OWNER, reason: "r", retentionDays: 30, actor: "operator", now: NOW })).status, 200);
+  await w.runAlarms(NOW + 10 * 60_000);
+  assert.deepEqual(calls, [["aaaa2345.hostthis.dev"], ["aaaa2345.hostthis.dev"], ["aaaa2345.hostthis.dev"]]);
+});
+
+test("a purge the API never admits stops being retried", async (t) => {
+  const w = world();
+  Object.assign(w.abuse.env, PURGING);
+  await w.add(OWNER, "aaaa2345");
+  const calls = purgeAPI(t, Array(500).fill(429));
+  await call(w.abuse, "banowner", { identity: OWNER, reason: "r", retentionDays: 30, actor: "operator", now: NOW });
+  await w.runAlarms(NOW + 60 * 60_000);
+  assert.ok(calls.length >= 20 && calls.length <= 22, `purge calls: ${calls.length}`);
+});

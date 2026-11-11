@@ -5083,8 +5083,9 @@ While a slug is quarantined:
 
 - every public read answers 404, `?raw=1` and `?files=1` included, and the
   slug's host is purged from the edge cache when it is quarantined and again
-  15 seconds later (the "Purged twice" bound), the second purge also
-  retrying a first one the purge API rate-limited;
+  15 seconds later (the "Purged twice" bound). The purge API admits only a
+  few purges a minute for the whole zone, so when it refuses either purge a
+  third follows 13 seconds after the second;
 - the Paste cell's `get` answers 451 `{"error":"quarantined"}`, so every SSH
   verb on it fails with `hostthis: this paste is quarantined by the
   operator` (exit 4) and its owner can neither change nor delete it. 451 is
@@ -5261,6 +5262,11 @@ operator routes skip:
 Every action, accepted or refused, is appended to the audit log. The purge
 uses `HOSTTHIS_CF_PURGE_TOKEN` and `HOSTTHIS_CF_ZONE_ID`; without them the
 answer says `purged: false` and the edge keeps what it held until its TTL.
+`purged` reports the first purge only: `false` with the credential set means
+the API refused it and the later purges are its retries. An owner ban's
+cascade purges each host it quarantines, releases or deletes, and purges again
+every 15 seconds, up to 20 times, any host whose purge the API refused for a
+reason a later call can fix (its rate limit, a server error, no answer).
 
 ---
 

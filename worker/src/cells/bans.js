@@ -1,4 +1,4 @@
-import { purgeSlugs } from "../abuse-routes.js";
+import { purgeHosts } from "../abuse-routes.js";
 import { deleteUploadPrefix } from "../blobs.js";
 
 // Owner bans (docs/SPEC.md "Owner ban"): the Abuse cell's records and the
@@ -12,6 +12,9 @@ const DAY_MS = 86_400_000;
 const FIRST_SWEEP_MS = 60_000;
 const SWEEP_EVERY_MS = 3_600_000;
 const REPURGE_MS = 15_000;
+// How many times in a row a refused purge is tried again: five minutes of the
+// API refusing, after which a later change to the host purges it.
+const PURGE_TRIES_MAX = 20;
 const QUARANTINE_BATCH = 10;
 const DELETE_BATCH = 5;
 const RELEASE_BATCH = 10;
@@ -229,13 +232,15 @@ export async function advance(cell, record, now) {
     }
   }
   purge.push(...fresh);
-  if (purge.length > 0) {
-    await purgeSlugs(cell.env, purge);
-  }
+  const { retry } = purge.length > 0 ? await purgeHosts(cell.env, purge) : { retry: [] };
   // A read that resolved before the change can refill the edge cache for a
-  // few seconds, so freshly changed hosts are purged once more.
-  if (fresh.length > 0) {
-    record.repurge = fresh;
+  // few seconds, so freshly changed hosts are purged once more. A host whose
+  // purge the API refused for now (its rate limit, a server error) is purged
+  // again too, until it goes through or the tries run out.
+  record.purgeTries = retry.length > 0 ? (record.purgeTries ?? 0) + 1 : 0;
+  const again = [...new Set([...fresh, ...(record.purgeTries <= PURGE_TRIES_MAX ? retry : [])])];
+  if (again.length > 0) {
+    record.repurge = again;
     next = Math.min(next ?? Infinity, now + REPURGE_MS);
   }
   return next;
