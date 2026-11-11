@@ -1,4 +1,4 @@
-.PHONY: help build bundle test parity smoke dev run docker-build docker-up docker-down \
+.PHONY: vuln help build bundle test parity smoke dev run docker-build docker-up docker-down \
         e2e e2e-ci \
         fmt vet clean data-dir-perms rebuild-site-fixtures
 
@@ -115,6 +115,10 @@ fmt:
 
 vet:
 	go vet ./...
+
+# Fails when a known vulnerability is reachable from this module's code.
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # Regenerate the committed site-fixture dist/ trees from the demo source
 # (npm ci + vite build for the three framework demos; the plain-static

@@ -162,6 +162,7 @@ Worker code with no shared state.
 ```
 make build         # local Go build → ./bin/hostthisd
 make test          # run all tests (domain unit + storage + service + ssh/http e2e)
+make vuln          # govulncheck: fails on a reachable known vulnerability (also a CI job)
 make run           # run locally, no container; ssh :2222 http :8080, path-mode,
                    # beside the Worker under Miniflare (state in ./data/worker)
 
