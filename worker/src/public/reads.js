@@ -146,6 +146,10 @@ export function readPath(openBlob) {
       }
       headers["Content-Type"] = contentType;
       if (method === "HEAD") {
+        // The length the GET would state, with no payload read.
+        if (sized) {
+          headers["Content-Length"] = String(partial ? range.length : size);
+        }
         return new Response(null, { status, headers });
       }
       let body;
