@@ -2,6 +2,8 @@ package ssh_test
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"testing"
@@ -48,5 +50,34 @@ func TestEverySessionLogsItsCommandWithoutPayloadOrLabel(t *testing.T) {
 	}
 	if strings.Contains(got, "secretlabel") || strings.Contains(got, "private body") {
 		t.Fatalf("log = %q, carries a label or payload", got)
+	}
+}
+
+// The session line says who ran the command and from where: the short hash of
+// the key, how the session logged in, and the client's address and subnet. A
+// session that offered a key without signing and logged in by password has no
+// key hash and names its method.
+func TestSessionLineNamesKeyMethodAndAddress(t *testing.T) {
+	logged := &syncBuffer{}
+	s := startStack(t, withLogOutput(logged))
+	if _, _, code := s.run("whoami", nil); code != 0 {
+		t.Fatalf("whoami exit %d", code)
+	}
+	if _, _, code := s.runAnon("whoami", nil); code != 3 {
+		t.Fatalf("keyless whoami exit %d, want 3", code)
+	}
+	sum := sha256.Sum256([]byte("key:" + s.keyedOwner))
+	keyed := "key=" + hex.EncodeToString(sum[:8]) + " auth=publickey addr=127.0.0.1 subnet=127.0.0.0/24"
+	keyless := "outcome=error_3 ms="
+	deadline := time.Now().Add(2 * time.Second)
+	for strings.Count(logged.String(), "ssh: command") < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	got := logged.String()
+	if !strings.Contains(got, keyed) {
+		t.Fatalf("log = %q, want a line with %q", got, keyed)
+	}
+	if !strings.Contains(got, keyless) || !strings.Contains(got, "key=- auth=password addr=127.0.0.1 subnet=127.0.0.0/24") {
+		t.Fatalf("log = %q, want a keyless password line", got)
 	}
 }

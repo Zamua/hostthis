@@ -4607,20 +4607,19 @@ origin refusal (401, 403) and an oversize write (413). `route` is the room
 route kind (`collection`, `ws`, `push`, ...), never a path, so no slug, room id
 or key reaches the line.
 
-The only network identity in the line is `subnet`: the client address
-truncated to its IPv4 /24 or IPv6 /40 (`203.0.113.0/24`, `2001:db8:ab00::/40`)
-before anything is built, an IPv4-mapped IPv6 address counting as IPv4, and
-`unknown` for an address that does not parse. The logging function takes the
-address only to truncate it; headers and bodies are not parameters, so a caller
-cannot add them. `country` and `asn` are the edge's classification of a direct request (null on
-a forwarded one). The platform's own per-request invocation log, which would
-record the full address, user agent and URL, is disabled in the Worker config.
+The line names the client twice: `addr` is its address in canonical text
+(an IPv4-mapped IPv6 address reads as IPv4, and an address that does not
+parse is `unknown`), and `subnet` is the IPv4 /24 or IPv6 /40 that address
+groups under (`203.0.113.0/24`, `2001:db8:ab00::/40`), so lines from one
+network can be found together. Headers and bodies are not parameters of the
+logging function, so a caller cannot add them. `country` and `asn` are the
+edge's classification of a direct request (null on a forwarded one).
 
 ### Abuse log on hostthisd
 
 `hostthisd` writes the same line for the abuse events it answers itself, and
-nothing for normal traffic: `{"event","route","status","subnet"}`, with no
-`country` or `asn`. The truncation is the Worker's (IPv4 /24, IPv6 /40,
+nothing for normal traffic: `{"event","route","status","addr","subnet"}`, with
+no `country` or `asn`. The subnet grouping is the Worker's (IPv4 /24, IPv6 /40,
 IPv4-mapped IPv6 as IPv4, `unknown` for anything that does not parse), held to
 the same vectors (`testdata/abuse-subnet-vectors.json`). The events are a
 created room (201 on the collection), an SSH key seen for the first time on its
@@ -4635,18 +4634,20 @@ allow-list or the denylist, or without a usable key). `route` is the room route
 kind (`collection`, `room`, `value`, `ws`), `rooms` for the private-API
 refusal, or `ssh`, and `status` is the HTTP status or the SSH exit code.
 
-`hostthisd`'s HTTP server error log never prints a peer address: every
-address-shaped token in a line the server writes ("http: panic serving <addr>")
-is replaced by `<peer>`.
-
 ### Command log on the SSH surface
 
 Every SSH session logs one line when it ends: the verb, the slug it targets
-(`-` for none), its outcome, and its duration. The verb is the registry name
+(`-` for none), its outcome, and its duration, followed by who ran it and
+from where: `key` (the first 16 hex digits of the SHA-256 of the identity,
+the short owner hash the operator tools and the audit log use, or `-` for a
+session that authenticated without a key), `auth` (`publickey`, `password`
+or `keyboard-interactive`), `addr` (the client's address) and `subnet` (the
+/24 or /48 the fresh-key limit counts it under). The verb is the registry name
 (`upload` for the implicit upload, `update` for the bare-slug shortcut,
 `unknown` otherwise) and the slug is logged only when the argument parses as
 one, so no free-form client input reaches the log: no names, labels, flags,
-payload, or key material.
+payload, or key material beyond that hash. These lines are kept as long as
+the deployment keeps its logs.
 
 #### The bare URL always serves the shell (no `Accept` negotiation)
 

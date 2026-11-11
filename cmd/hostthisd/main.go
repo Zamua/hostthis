@@ -297,7 +297,7 @@ func main() {
 		// execution trace legitimately holds the response open far longer than
 		// any public request may.
 		ReadHeaderTimeout: 5 * time.Second,
-		ErrorLog:          httpapi.ServerErrorLog(logger.Printf),
+		ErrorLog:          logger,
 	}
 
 	httpSrv := &http.Server{
@@ -311,7 +311,7 @@ func main() {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    8 << 10, // 8 KiB
-		ErrorLog:          httpapi.ServerErrorLog(logger.Printf),
+		ErrorLog:          logger,
 	}
 
 	// The servers run concurrently; the first signalling event wins and tears

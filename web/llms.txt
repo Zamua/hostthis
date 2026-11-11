@@ -1,6 +1,6 @@
 # hostthis
 
-> hostthis is a free, anonymous drop service for personal use, driven entirely over SSH. Pipe in a document or a static site and get back a public link. There is no account and no login: your SSH key is your identity.
+> hostthis is a free drop service for personal use, driven entirely over SSH. Pipe in a document or a static site and get back a public link. There is no account and no login: your SSH key is your identity.
 
 ## How to use it
 

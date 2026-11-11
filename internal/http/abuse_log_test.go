@@ -58,8 +58,9 @@ func (a *abuseLines) one(t *testing.T) map[string]any {
 
 func wantLine(t *testing.T, got map[string]any, event, route string, status int) {
 	t.Helper()
-	if got["event"] != event || got["route"] != route || got["status"] != float64(status) || got["subnet"] != "203.0.113.0/24" || len(got) != 4 {
-		t.Fatalf("line %v, want event=%s route=%s status=%d subnet=203.0.113.0/24", got, event, route, status)
+	if got["event"] != event || got["route"] != route || got["status"] != float64(status) ||
+		got["addr"] != "203.0.113.5" || got["subnet"] != "203.0.113.0/24" || len(got) != 5 {
+		t.Fatalf("line %v, want event=%s route=%s status=%d addr=203.0.113.5 subnet=203.0.113.0/24", got, event, route, status)
 	}
 }
 
@@ -83,11 +84,6 @@ func TestAbuseLog_RoomCreationAndItsLimit(t *testing.T) {
 	var second map[string]any
 	_ = json.Unmarshal([]byte(all[1]), &second)
 	wantLine(t, second, "rate-limited", "collection", http.StatusTooManyRequests)
-	for _, l := range all {
-		if strings.Contains(l, "203.0.113.5") {
-			t.Fatalf("line carries the full address: %q", l)
-		}
-	}
 }
 
 func TestAbuseLog_NormalTrafficLogsNothing(t *testing.T) {
@@ -197,13 +193,13 @@ func TestAbuseLog_SubnetFollowsTheClientAddressSource(t *testing.T) {
 	lines := withAbuseLog(srv)
 	req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil, from("10.0.0.1:4000"), xff("spoofed, 2001:db8:abcd:1234::77"))
 	got := lines.one(t)
-	if got["subnet"] != "2001:db8:ab00::/40" {
-		t.Fatalf("subnet %v", got["subnet"])
+	if got["subnet"] != "2001:db8:ab00::/40" || got["addr"] != "2001:db8:abcd:1234::77" {
+		t.Fatalf("addr %v subnet %v", got["addr"], got["subnet"])
 	}
 }
 
-// Property: whatever the client address, no line spells it.
-func TestAbuseLog_FullAddressNeverReachesALine(t *testing.T) {
+// Property: whatever the client address, its lines name it in full.
+func TestAbuseLog_EveryLineNamesTheClientAddress(t *testing.T) {
 	srv := buildRoomServer(t)
 	srv.ClientIP = ClientIPForwardedFor
 	srv.Rooms.(*service.Rooms).MaxRoomsPerIP = 1
@@ -223,15 +219,10 @@ func TestAbuseLog_FullAddressNeverReachesALine(t *testing.T) {
 		req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil, from("10.0.0.1:4000"), xff(a))
 		req(t, srv, http.MethodPost, "appz2345", "/api/rooms", nil, from("10.0.0.1:4000"), xff(a))
 	}
-	all := lines.all()
-	if len(all) < len(addrs) {
-		t.Fatalf("only %d lines for %d addresses", len(all), len(addrs))
-	}
+	all := strings.Join(lines.all(), "\n")
 	for _, a := range addrs {
-		for _, l := range all {
-			if strings.Contains(l, a) {
-				t.Fatalf("line %q carries the address %s", l, a)
-			}
+		if !strings.Contains(all, `"addr":"`+a+`"`) {
+			t.Fatalf("no line names the address %s", a)
 		}
 	}
 }
