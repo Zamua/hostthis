@@ -152,6 +152,11 @@ function harness({ room = roomDoc({ kv: {} }), push, service = {}, env: extra = 
       get() {
         return {
           async fetch(request) {
+            // The injected failures are for signing and budget calls; a room's
+            // question about quarantine is answered and not counted.
+            if (new URL(request.url).pathname.endsWith("/roompolicy")) {
+              return paste.fetch(request);
+            }
             transport.calls.push(new URL(request.url).pathname);
             if (transport.failBefore-- > 0) {
               throw new Error("coordinator unavailable");
@@ -552,9 +557,7 @@ test("Room alarm survives a failed VAPID signing and a throwing push service", a
     now: Date.parse("2026-09-05T15:00:00Z"),
     items: [recurring({ id: "sun", days: [0] })],
   });
-  // The fire asks the app cell twice: whether the app is quarantined, then to
-  // sign. Both calls fail here.
-  h.transport.failBefore = 2;
+  h.transport.failBefore = 1;
   await h.room().alarm({ now: Date.parse("2026-09-06T12:00:00Z") });
   assert.equal(h.sends.length, 0);
   assert.equal(h.push().nextFireAt, Date.parse("2026-09-13T12:00:00Z"));
