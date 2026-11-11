@@ -175,3 +175,66 @@ test("the watcher's owner ban runs the cascade at the default retention under th
   const capped = await call(w.abuse, "banowner", { identity: "SHA256:" + "9".repeat(64), reason: "x", actor: "watcher", now: NOW + 9 });
   assert.equal(capped.status, 429);
 });
+
+// A state whose gate runs one callback at a time, as the runtime's does.
+function gatedState(storage) {
+  let tail = Promise.resolve();
+  return {
+    ...state(storage),
+    blockConcurrencyWhile(callback) {
+      const run = tail.then(callback);
+      tail = run.catch(() => {});
+      return run;
+    },
+  };
+}
+
+test("an unban that arrives during an alarm pass is not overwritten by it", async () => {
+  const paste = await pasteCell(OWNER, "aaaaaaaa");
+  const denylist = new Denylist(state(new FakeStorage()));
+  let hold = null; // while set, calls to the paste cell wait on it
+  const env = {
+    PASTES: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: async (req) => { await hold; return paste.fetch(req); } }),
+    },
+    DENYLIST: { idFromName: (name) => name, get: () => denylist },
+    IDENTITY: {
+      idFromName: (name) => name,
+      get: () => ({
+        fetch: async (req) => (new URL(req.url).pathname.endsWith("/subnetlist")
+          ? Response.json({ subnets: [] }) : Response.json([{ slug: "aaaaaaaa" }])),
+      }),
+    },
+    PAYLOADS: { list: async () => ({ objects: [], truncated: false }), delete: async () => {} },
+  };
+  const storage = new FakeStorage();
+  const abuse = new Abuse(gatedState(storage), env);
+  let now = NOW;
+  abuse.now = () => now;
+  const ban = await call(abuse, "banowner", { actor: "operator", now: NOW, identity: OWNER, reason: "mistake" });
+  assert.equal(ban.status, 200);
+
+  // The pass starts and waits on its first call to the paste cell.
+  let open;
+  hold = new Promise((resolve) => { open = resolve; });
+  const pass = abuse.alarm();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const unban = call(abuse, "unbanowner", { actor: "operator", now: NOW + 1, banId: ban.body.banId });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  hold = null;
+  open();
+  await pass;
+  assert.equal((await unban).status, 200);
+  assert.equal((await storage.get(`b:${ban.body.banId}`)).state, "lifting");
+
+  for (let i = 0; i < 50 && storage.alarm !== null && (await storage.get(`b:${ban.body.banId}`)).state !== "lifted"; i++) {
+    now = Math.max(now, storage.alarm);
+    await abuse.alarm();
+  }
+  const record = await storage.get(`b:${ban.body.banId}`);
+  assert.equal(record.state, "lifted");
+  assert.deepEqual(record.slugs, { aaaaaaaa: "released" });
+  const row = await call(paste, "operatorrow");
+  assert.equal(Boolean(row.body.quarantine), false, "the slug is served again");
+});
