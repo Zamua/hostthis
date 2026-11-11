@@ -501,7 +501,7 @@ func (s *Server) handleSession(sess gossh.Session) {
 			return
 		}
 		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
-		emitHelp(sess, s.apex())
+		emitHelp(sess.Stderr(), sess, s.apex())
 		_ = sess.Exit(ExitUsage)
 	}
 }
@@ -573,6 +573,9 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 			}
 		}
 		_, _ = fmt.Fprintf(sess.Stderr(), "v%d saved.\n", res.NewVer)
+		if note := kindChangeNote(slug, res); note != "" {
+			_, _ = fmt.Fprintln(sess.Stderr(), note)
+		}
 		if res.WasPinned {
 			fmt.Fprintf(sess.Stderr(),
 				"note: this paste is pinned to v%d, so the URL still serves v%d, not v%d.\n",
@@ -1077,11 +1080,12 @@ func (s *Server) verbWhoami(sess gossh.Session, owner domain.Owner, argv []strin
 
 // verbHelp dispatches help requests. No args emits the global banner, which
 // characterization tests pin byte-exact. One arg naming a known verb emits verb
-// help; anything else prefixes an `unknown verb` line and falls back to the
-// banner, still exiting 0 because help is what was asked for.
+// help; both go to stdout. Anything else prefixes an `unknown verb` line and
+// falls back to the banner on stderr, still exiting 0 because help is what was
+// asked for.
 func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 	if len(rest) == 0 {
-		emitHelp(sess, s.apex())
+		emitHelp(sess, sess, s.apex())
 		_ = sess.Exit(ExitOK)
 		return
 	}
@@ -1097,7 +1101,7 @@ func (s *Server) verbHelp(sess gossh.Session, rest []string) {
 		prefix = strings.ReplaceAll(prefix, "\n", "\r\n")
 	}
 	fmt.Fprint(sess.Stderr(), prefix) //nolint:errcheck
-	emitHelp(sess, s.apex())
+	emitHelp(sess.Stderr(), sess, s.apex())
 	_ = sess.Exit(ExitOK)
 }
 
@@ -1110,14 +1114,16 @@ func (s *Server) apex() string { return s.ApexDomain }
 // session has a PTY. A client PTY is in raw mode and expects \r\n; a bare \n
 // staircases the output (the cursor advances without returning to column 0).
 // Interactive `ssh <apex>` allocates a PTY, `ssh <apex> help` does not.
-func emitHelp(sess gossh.Session, apex string) {
+// emitHelp writes the banner to w: the session's stdout when help was asked
+// for, so it can be piped and paged, and its stderr when it follows an error.
+func emitHelp(w io.Writer, sess gossh.Session, apex string) {
 	text := helpText(apex)
 	if _, _, hasPty := sess.Pty(); hasPty {
 		text = strings.ReplaceAll(text, "\n", "\r\n")
-		fmt.Fprint(sess.Stderr(), text, "\r\n") //nolint:errcheck
+		fmt.Fprint(w, text, "\r\n") //nolint:errcheck
 		return
 	}
-	fmt.Fprintln(sess.Stderr(), text)
+	fmt.Fprintln(w, text) //nolint:errcheck
 }
 
 // helpTextTemplate is the canonical user-facing help. {{apex}} and {{quota}}
@@ -1222,6 +1228,17 @@ func requireSlug(argv []string) (domain.Slug, error) {
 		return "", errors.New("missing slug")
 	}
 	return domain.ParseSlug(argv[0])
+}
+
+// kindChangeNote tells the owner that an update replaced one kind of content
+// with another (a site with a document, say) and how to get the old one back,
+// or "" when the kind is unchanged or a pin still serves the old version.
+func kindChangeNote(slug domain.Slug, res service.UpdateResult) string {
+	if res.WasPinned || res.PrevKind == res.Paste.Kind || res.NewVer < 2 {
+		return ""
+	}
+	return fmt.Sprintf("note: %s was %s and is now %s; \"pin %s %d\" restores the %s.",
+		slug, res.PrevKind, res.Paste.Kind, slug, res.NewVer-1, res.PrevKind)
 }
 
 // emitUsageErr reports a bad-argument or parser failure on stderr and exits

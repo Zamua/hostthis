@@ -146,6 +146,7 @@ func (m *Manage) Show(slug domain.Slug, owner domain.Owner) (domain.Paste, io.Re
 // time, in which case the new version was saved but is not being served.
 type UpdateResult struct {
 	Paste     domain.Paste
+	PrevKind  domain.ContentKind // the kind the slug held before this update
 	NewVer    int
 	WasPinned bool
 	PinnedAt  int // ver_num of the still-served version if WasPinned
@@ -214,6 +215,7 @@ func (m *Manage) Update(slug domain.Slug, owner domain.Owner, body io.Reader, ty
 	}
 	return UpdateResult{
 		Paste:     p,
+		PrevKind:  existing.Kind,
 		NewVer:    res.NewVer,
 		WasPinned: res.WasPinned,
 		PinnedAt:  existing.PinnedVersion,

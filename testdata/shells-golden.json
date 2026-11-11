@@ -266,8 +266,8 @@
       "Cache-Control": "public, max-age=31536000, immutable",
       "Content-Type": "text/css; charset=utf-8"
     },
-    "size": 5312,
-    "sha256": "e51ce71bfb1d98578f2e84ef3b3fa426db0ba1e2626f43985e5f25303f8959fe"
+    "size": 5475,
+    "sha256": "3062ea261345610d61597b9bf5d7e0b3d1ce4a1207ec674ab3560f08ccb0cd21"
   },
   "asset/md.js": {
     "status": 200,

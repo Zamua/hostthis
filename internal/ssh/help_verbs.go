@@ -202,17 +202,16 @@ func renderVerbHelp(d verbDescriptor, apex string) string {
 	return b.String()
 }
 
-// emitVerbHelp writes the verb-help body to stderr with the same PTY-aware
-// CRLF discipline as emitHelp. The rendered text already ends in a newline, so
-// no extra CRLF is emitted and the output matches renderVerbHelp byte for byte.
+// emitVerbHelp writes the verb-help body to stdout (it is only ever asked for)
+// with the same PTY-aware CRLF discipline as emitHelp. The rendered text
+// already ends in a newline, so no extra CRLF is emitted and the output matches
+// renderVerbHelp byte for byte.
 func emitVerbHelp(sess gossh.Session, apex string, d verbDescriptor) {
 	text := renderVerbHelp(d, apex)
 	if _, _, hasPty := sess.Pty(); hasPty {
 		text = strings.ReplaceAll(text, "\n", "\r\n")
-		fmt.Fprint(sess.Stderr(), text) //nolint:errcheck
-		return
 	}
-	_, _ = fmt.Fprint(sess.Stderr(), text)
+	_, _ = fmt.Fprint(sess, text)
 }
 
 // argvWantsHelp reports whether argv carries `--help` or `-h` after argv[0],
