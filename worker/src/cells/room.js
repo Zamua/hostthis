@@ -222,7 +222,7 @@ export class Room {
 
   async recordRoomCreated(body, fresh) {
     const ledger = await this.appCall(body.appSlug, "roomcreated", {
-      id: body.id, subnet: body.subnet, at: body.at, fresh,
+      id: body.id, subnet: body.subnet, addr: body.addr, at: body.at, fresh,
     });
     return ledger.ok;
   }

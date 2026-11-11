@@ -1,17 +1,4 @@
-import { clientAddress, formatIPv6, ipv4Subnet, isIPv4Mapped, parseIP, roomsRoute } from "./rooms/policy.js";
-
-// The client address in its canonical text, as hostthisd writes it: an
-// IPv4-mapped IPv6 address reads as IPv4. "unknown" when the text is no address.
-export function logAddr(address) {
-  const groups = typeof address === "string" ? parseIP(address.trim()) : null;
-  if (!groups) {
-    return "unknown";
-  }
-  if (isIPv4Mapped(groups)) {
-    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
-  }
-  return formatIPv6(groups);
-}
+import { addressText, clientAddress, formatIPv6, ipv4Subnet, isIPv4Mapped, parseIP, roomsRoute } from "./rooms/policy.js";
 
 // The subnet a log line groups an address under: the IPv4 /24 or IPv6 /40.
 // "unknown" when the text is no address.
@@ -34,7 +21,7 @@ export function abuseLog(event, { route, status, ip, country, asn }) {
     event,
     route,
     status,
-    addr: logAddr(ip),
+    addr: addressText(ip),
     subnet: logSubnet(ip),
     country: typeof country === "string" && /^[A-Za-z0-9]{2}$/.test(country) ? country.toUpperCase() : null,
     asn: Number.isSafeInteger(asn) && asn > 0 ? asn : null,

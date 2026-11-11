@@ -203,6 +203,19 @@ export function formatIPv6(groups) {
   return out;
 }
 
+// A client address in its canonical text, as hostthisd writes it: an
+// IPv4-mapped IPv6 address reads as IPv4. "unknown" when the text is no address.
+export function addressText(address) {
+  const groups = typeof address === "string" ? parseIP(address.trim()) : null;
+  if (!groups) {
+    return "unknown";
+  }
+  if (isIPv4Mapped(groups)) {
+    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
+  }
+  return formatIPv6(groups);
+}
+
 // hostthisd's ipSubnet: the /24 of an IPv4 (or IPv4-mapped) address, the /48
 // of an IPv6 one, "unknown" for none.
 export function ipSubnet(groups) {
