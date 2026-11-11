@@ -82,17 +82,21 @@ test("a quarantine purges the slug's host now and again after the race window", 
   ]);
 });
 
-test("a rate-limited first purge is retried after the race window", async () => {
-  const { env: e } = env({ HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" });
-  const statuses = [429, 200];
-  const fetcher = async () => new Response("{}", { status: statuses.shift() });
-  const waits = [];
-  const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e,
-    { waitUntil: (p) => waits.push(p) }, new URL(ORIGIN + "/abuse/quarantine"), "operator",
-    { fetcher, sleep: async () => {} });
-  assert.equal((await res.json()).purged, false);
-  await Promise.all(waits);
-  assert.deepEqual(statuses, []);
+test("a purge the API refused is followed by a third, one rate-limit interval after the second", async () => {
+  for (const refused of [[429, 200, 200], [200, 429, 200], [429, 429, 200], [503, 200, 200]]) {
+    const { env: e } = env({ HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" });
+    const statuses = [...refused];
+    const fetcher = async () => new Response("{}", { status: statuses.shift() });
+    const waits = [];
+    const slept = [];
+    const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e,
+      { waitUntil: (p) => waits.push(p) }, new URL(ORIGIN + "/abuse/quarantine"), "operator",
+      { fetcher, sleep: async (ms) => { slept.push(ms); } });
+    assert.equal((await res.json()).purged, refused[0] === 200, String(refused));
+    await Promise.all(waits);
+    assert.deepEqual(statuses, [], String(refused));
+    assert.deepEqual(slept, [15_000, 13_000], String(refused));
+  }
 });
 
 test("without a purge credential the answer says so", async () => {
