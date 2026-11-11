@@ -25,17 +25,21 @@ type line struct {
 	Event  domain.AbuseEvent `json:"event"`
 	Route  string            `json:"route"`
 	Status int               `json:"status"`
+	Addr   string            `json:"addr"`
 	Subnet string            `json:"subnet"`
 }
 
-// Log records one abuse event. addr is a parameter only so it can be
-// truncated here: the line holds its subnet and nothing else of the request.
-// route is a bounded kind such as "collection" or "ssh", never a path.
+// Log records one abuse event with the client's address and the subnet it
+// groups under. route is a bounded kind such as "collection" or "ssh", never
+// a path.
 func (l *Logger) Log(event domain.AbuseEvent, route string, status int, addr net.IP) {
 	if l == nil || l.printf == nil {
 		return
 	}
-	b, err := json.Marshal(line{Event: event, Route: route, Status: status, Subnet: domain.AbuseSubnet(addr)})
+	b, err := json.Marshal(line{
+		Event: event, Route: route, Status: status,
+		Addr: domain.AddrText(addr), Subnet: domain.AbuseSubnet(addr),
+	})
 	if err != nil {
 		return
 	}

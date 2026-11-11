@@ -28,9 +28,9 @@ function prng(seed) {
   };
 }
 
-const KEYS = ["event", "route", "status", "subnet", "country", "asn"];
+const KEYS = ["event", "route", "status", "addr", "subnet", "country", "asn"];
 
-test("an abuse line carries the six fields and never the input address or its host bits", () => {
+test("an abuse line carries the seven fields: the address in canonical text and the subnet it groups under", () => {
   const rand = prng(20261103);
   const int = (n) => Math.floor(rand() * n);
   for (let i = 0; i < 600; i++) {
@@ -52,7 +52,8 @@ test("an abuse line carries the six fields and never the input address or its ho
     for (const ip of inputs) {
       const [line] = logged(() => abuseLog("rate-limited", { route: "collection", status: 429, ip, country: "US", asn: 64500 }));
       assert.deepEqual(Object.keys(JSON.parse(line)), KEYS, `seed run ${i}: ${ip}`);
-      assert.ok(!line.includes(ip), `the line contains the input ${ip}: ${line}`);
+      assert.deepEqual(parseIP(JSON.parse(line).addr), parseIP(ip), `${ip}: ${line}`);
+      assert.equal(JSON.parse(line).addr, JSON.parse(line).addr.toLowerCase(), `${ip}: ${line}`);
       const [subnet, length] = JSON.parse(line).subnet.split("/");
       assert.equal(Number(length), prefix, `${ip}: ${line}`);
       // Parsed back, the logged address is the input's first `prefix` bits and zeros after.

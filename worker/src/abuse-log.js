@@ -1,7 +1,20 @@
 import { clientAddress, formatIPv6, ipv4Subnet, isIPv4Mapped, parseIP, roomsRoute } from "./rooms/policy.js";
 
-// The only network identity that reaches a log line: the IPv4 /24 or IPv6 /40,
-// cut before anything else is built. "unknown" when the text is no address.
+// The client address in its canonical text, as hostthisd writes it: an
+// IPv4-mapped IPv6 address reads as IPv4. "unknown" when the text is no address.
+export function logAddr(address) {
+  const groups = typeof address === "string" ? parseIP(address.trim()) : null;
+  if (!groups) {
+    return "unknown";
+  }
+  if (isIPv4Mapped(groups)) {
+    return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
+  }
+  return formatIPv6(groups);
+}
+
+// The subnet a log line groups an address under: the IPv4 /24 or IPv6 /40.
+// "unknown" when the text is no address.
 export function logSubnet(address) {
   const groups = typeof address === "string" ? parseIP(address.trim()) : null;
   if (!groups) {
@@ -13,13 +26,15 @@ export function logSubnet(address) {
   return `${formatIPv6([groups[0], groups[1], groups[2] & 0xff00, 0, 0, 0, 0, 0])}/40`;
 }
 
-// One line per abuse event. The address, headers and bodies are not
-// parameters, so a caller cannot put them in the line.
+// One line per abuse event, with the client's address and the subnet it
+// groups under. Headers and bodies are not parameters, so a caller cannot put
+// them in the line.
 export function abuseLog(event, { route, status, ip, country, asn }) {
   console.log(JSON.stringify({
     event,
     route,
     status,
+    addr: logAddr(ip),
     subnet: logSubnet(ip),
     country: typeof country === "string" && /^[A-Za-z0-9]{2}$/.test(country) ? country.toUpperCase() : null,
     asn: Number.isSafeInteger(asn) && asn > 0 ? asn : null,
