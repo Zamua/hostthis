@@ -5,7 +5,7 @@ import { normalizeHost } from "./public/host.js";
 
 const REPURGE_MS = 15_000;
 
-const ROUTES = {
+export const ROUTES = {
   operator: {
     "/abuse/quarantine": { op: "quarantine", fields: ["slug", "reason"], purge: true },
     "/abuse/release": { op: "release", fields: ["slug"], purge: true },

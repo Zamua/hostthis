@@ -17,7 +17,7 @@ const hidden = (entry) => ({
   run: async (self, body, url, doc) => (await self.hiddenAnswer(doc)) ?? entry.run(self, body, url, doc),
 });
 
-const ROOM_OPS = {
+export const ROOM_OPS = {
   count: read((self) => Response.json({ sockets: self.state.getWebSockets().length })),
   meta: hidden(read((self, _body, _url, doc) => Response.json(doc.meta), { room: true })),
   get: hidden(read((self, _body, url, doc) => self.getValue(doc, url.searchParams.get("key")), { room: true })),
