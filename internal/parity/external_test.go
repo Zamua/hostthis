@@ -15,6 +15,11 @@ import (
 //
 //	PARITY_HOSTTHISD_URL  hostthisd's public URL, scheme://<apex>[:port]; reads
 //	                      go to <slug>.<apex>
+//	PARITY_HOSTTHISD_ADDR optional host:port every hostthisd request dials
+//	                      instead of resolving <slug>.<apex>, to compare the
+//	                      origin itself when a CDN fronts the public hosts
+//	PARITY_HOSTTHISD_UNVERIFIED  1 with PARITY_HOSTTHISD_ADDR when that origin's
+//	                      certificate is one only its CDN accepts
 //	PARITY_WORKER_URL     the Worker's internal endpoint, reached in forwarded
 //	                      mode
 //	PARITY_TOKEN_FILE     a file holding the Worker's token
@@ -34,6 +39,8 @@ type externalConfig struct {
 	previous  bool
 	// pin, when set, is the address every hostthisd request dials.
 	pin string
+	// unverified skips certificate verification for the pinned address.
+	unverified bool
 }
 
 func readExternalConfig(t *testing.T) (externalConfig, bool) {
@@ -76,6 +83,13 @@ func readExternalConfig(t *testing.T) (externalConfig, bool) {
 			t.Fatal("PARITY_ALLOW_WRITES=1 needs PARITY_WRITE_SLUG naming the test paste")
 		}
 	}
+	if addr := os.Getenv("PARITY_HOSTTHISD_ADDR"); addr != "" {
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			t.Fatalf("PARITY_HOSTTHISD_ADDR %q is not host:port", addr)
+		}
+		cfg.pin = addr
+		cfg.unverified = os.Getenv("PARITY_HOSTTHISD_UNVERIFIED") == "1"
+	}
 	switch ref := os.Getenv("PARITY_REFERENCE"); ref {
 	case "":
 	case "previous":
@@ -104,6 +118,7 @@ func externalWorld(t *testing.T, cfg externalConfig) *world {
 		apex: strings.ToLower(cfg.hostthisd.Hostname()),
 		hostthisd: &server{
 			name: "hostthisd", via: viaHostthisd, addr: cfg.pin, port: port(cfg.hostthisd), tls: cfg.hostthisd.Scheme == "https",
+			unverified: cfg.unverified,
 		},
 		workers: []*server{{
 			name: "worker (forwarded)", via: viaForwarded, token: cfg.token,

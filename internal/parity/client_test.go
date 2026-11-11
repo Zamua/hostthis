@@ -90,11 +90,14 @@ type server struct {
 	via  kind
 	// addr is the address every request dials; empty dials the request's own
 	// public host at port.
-	addr   string
-	port   string
-	tls    bool
-	token  string
-	trusts bool // takes X-Forwarded-For as the client address
+	addr string
+	port string
+	tls  bool
+	// unverified skips certificate verification, for an origin dialed at addr
+	// whose certificate only its CDN is meant to see.
+	unverified bool
+	token      string
+	trusts     bool // takes X-Forwarded-For as the client address
 
 	mu   sync.Mutex
 	idle map[string][]*pooled
@@ -128,7 +131,9 @@ func (s *server) conn(addr string) (c *pooled, reused bool, err error) {
 	var nc net.Conn
 	if s.tls {
 		name, _, _ := net.SplitHostPort(addr)
-		nc, err = tls.DialWithDialer(d, "tcp", addr, &tls.Config{ServerName: name, NextProtos: []string{"http/1.1"}})
+		nc, err = tls.DialWithDialer(d, "tcp", addr, &tls.Config{
+			ServerName: name, NextProtos: []string{"http/1.1"}, InsecureSkipVerify: s.unverified, //nolint:gosec // opt-in, for a pinned origin
+		})
 	} else {
 		nc, err = d.Dial("tcp", addr)
 	}
