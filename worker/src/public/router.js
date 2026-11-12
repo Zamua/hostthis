@@ -12,17 +12,9 @@ import { serveHealth } from "./health.js";
 import { FORWARDED_HOST, normalizeHost, parseSlug, slugOfHost } from "./host.js";
 import { cleanRedirect, decodePath, subtreeRedirect } from "./path.js";
 import { queryFlags } from "./request.js";
+import { notFound } from "./responses.js";
 
-// Go's http.NotFound, so a 404 reads the same from hostthisd and the Worker.
-export function notFound() {
-  return new Response("404 page not found\n", {
-    status: 404,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "X-Content-Type-Options": "nosniff",
-    },
-  });
-}
+export { notFound };
 
 // The answer Go's server gives a request line it cannot parse.
 function badRequest() {
