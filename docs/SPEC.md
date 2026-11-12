@@ -4428,6 +4428,11 @@ case:
 | a kind with no shell | 500 `unsupported kind` |
 | a metadata or blob failure | 500 `internal error` |
 
+Opening an object in the payload bucket is tried up to three times (after
+50 ms, then 200 ms) while the bucket fails the call, before any byte is sent;
+each retry logs a warning. An object that is not there is not retried. Once a
+body is flowing, an error ends it.
+
 Content responses carry the sandbox headers (see "HTML sandboxing"),
 `Cache-Control: public, no-cache`, `ETag` and `Last-Modified`, and answer
 conditional requests before any payload is read (see "Cache-Control

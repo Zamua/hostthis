@@ -673,6 +673,38 @@ test("a runtime's FixedLengthStream carries a body that states its length", asyn
   assert.deepEqual(made, [RAW_SOURCE.length, Buffer.byteLength(shell)], "a shell states its length too; a HEAD is sent as it is");
 });
 
+test("a bucket read that fails once is tried again: the reader gets the bytes, a missing object stays a 500", async () => {
+  const w = world();
+  w.row(SLUG, documentRow("markdown", "ready", RAW_SOURCE.length));
+  w.blob("uploads/a/0", RAW_SOURCE);
+  const get = w.env.PAYLOADS.get.bind(w.env.PAYLOADS);
+  let failures = 1;
+  let gets = 0;
+  w.env.PAYLOADS.get = async (...args) => {
+    gets += 1;
+    if (failures > 0) {
+      failures -= 1;
+      throw new Error("We encountered an internal error. Please try again. (10001)");
+    }
+    return get(...args);
+  };
+  let res;
+  const warned = await capturingWarnings(async () => {
+    res = await w.fetch(at("/?raw"));
+  });
+  assert.equal(res.status, 200);
+  assert.equal(await res.text(), RAW_SOURCE, "the bytes arrive once, whole");
+  assert.equal(gets, 2);
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /bucket get retry: uploads\/a\/0/);
+
+  // The object is gone: one get, no retry, the same 500 as before.
+  const missing = world();
+  missing.row(SLUG, documentRow("markdown", "ready", RAW_SOURCE.length));
+  await capturingWarnings(async () => assertInternalError(await missing.fetch(at("/?raw"))));
+  assert.deepEqual(missing.payloadCalls, ["get uploads/a/0"]);
+});
+
 test("a metadata failure is a 500 with one warning", async () => {
   const w = world();
   w.env.PASTES = {
