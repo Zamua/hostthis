@@ -1,5 +1,6 @@
 // The payload store: the PAYLOADS bucket, or the owner's pod when an object's
 // upload id names a pod link (docs/SPEC.md "Pod storage").
+import { bucketGet } from "../bucket.js";
 import { agentHeaders, solidEnabled } from "./identity.js";
 
 const POD_UPLOAD = /^uploads\/pod_([a-f0-9]{16})_[A-Za-z0-9]+\//;
@@ -149,7 +150,7 @@ export const payloads = {
   async get(env, key, range) {
     const linkId = podLinkOfKey(key);
     if (!linkId) {
-      const object = await env.PAYLOADS.get(key, range ? { range } : undefined);
+      const object = await bucketGet(env.PAYLOADS, key, range ? { range } : undefined);
       return object && { body: object.body, size: object.size };
     }
     return podGet(env, await podBase(env, linkId), key, range);

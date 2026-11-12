@@ -2,6 +2,7 @@
 // static assets layer answers a known name before the Worker runs; what
 // reaches here is an unknown name, a name under a deeper path, or an asset too
 // large for static assets.
+import { bucketGet } from "../bucket.js";
 import { decodePath } from "./path.js";
 import { baseName } from "./request.js";
 import { internalError, methodNotAllowed, notFound } from "./responses.js";
@@ -43,7 +44,7 @@ export async function serveAsset(request, env, decodedPath) {
     return new Response(null, { headers });
   }
   // Stored as is by the deploy, not in the at-rest format.
-  const object = await env.PAYLOADS.get(found.key);
+  const object = await bucketGet(env.PAYLOADS, found.key);
   if (object === null) {
     console.warn(`warn: asset 500: ${name}: object ${found.key} missing`);
     return internalError();
