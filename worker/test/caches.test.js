@@ -307,7 +307,7 @@ test("an edge fill is capped by the response's size", async () => {
   w.blob("uploads/a/0", "<h1>hi</h1>");
   w.row("xyz23456", { ...hiRow(), manifest: { Files: { "/": { Key: "uploads/b/0", Size: 12, DecodedSize: 12 } } } });
   w.blob("uploads/b/0", "<h1>hi!</h1>");
-  // A shell states no size, and is far over the cap.
+  // A shell states its size, and is far over the cap.
   w.row("mnp23456", documentRow("markdown"));
   await withCaches(cache, async () => {
     for (const slug of [SLUG, "xyz23456", "mnp23456"]) {
@@ -315,8 +315,8 @@ test("an edge fill is capped by the response's size", async () => {
       await settle(w);
     }
   });
-  // A stated size over the cap starts no fill; an unstated one is abandoned past it.
-  assert.deepEqual(putHosts(cache), [`${SLUG}.paste.test`, "mnp23456.paste.test"]);
+  // A stated size over the cap starts no fill.
+  assert.deepEqual(putHosts(cache), [`${SLUG}.paste.test`]);
   assert.deepEqual([...cache.entries.keys()].map((k) => new URL(k).hostname), [`${SLUG}.paste.test`]);
 });
 

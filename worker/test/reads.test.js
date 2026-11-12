@@ -197,7 +197,8 @@ for (const v of vectors.vectors) {
       if (want.golden) await assertGolden(await w.fetch(vectorURL(v)), want.golden);
       else if (want.json) assert.deepEqual(JSON.parse(body), want.json);
       else assert.equal(body, want.body);
-      assert.equal(res.headers.get("content-length"), want.length ?? null, "stored bytes carry their decoded size, nothing else does");
+      const own = want.blob ? null : String(Buffer.byteLength(body));
+      assert.equal(res.headers.get("content-length"), want.length ?? own, "stored bytes carry their decoded size, a generated answer its own");
       assert.deepEqual(w.payloadCalls, want.blob ? [`get ${want.blob}`] : []);
     }
   });
@@ -593,7 +594,7 @@ test("stored bytes carry their manifest size, and a body that disagrees ends sho
   }
 });
 
-test("stored bytes carry their decoded size, generated pages none, and an entry without one streams whole without one", async () => {
+test("stored bytes carry their decoded size, generated pages their own, and an entry without one streams whole without one", async () => {
   const w = world();
   const legacy = "a file whose Size is not its length\n";
   w.row(SLUG, {
@@ -613,12 +614,12 @@ test("stored bytes carry their decoded size, generated pages none, and an entry 
   for (const [path, length, body] of [
     ["/empty.txt", null, ""], ["/doc.md?raw", "6", "# doc\n"], ["/negative.txt", null, "negative"],
     ["/size-zero.txt", null, legacy], ["/stored-size.txt", null, legacy], ["/size-only.txt", null, legacy],
-    ["/doc.md", null, null], ["/?files", null, null],
+    ["/doc.md", "own", null], ["/?files", "own", null],
   ]) {
     const res = await w.fetch(at(path));
     assert.equal(res.status, 200, path);
-    assert.equal(res.headers.get("Content-Length"), length, path);
     const text = await res.text();
+    assert.equal(res.headers.get("Content-Length"), length === "own" ? String(Buffer.byteLength(text)) : length, path);
     if (body !== null) assert.equal(text, body, path);
   }
   // A HEAD states the length its GET would, a ranged one the range's.
@@ -667,9 +668,9 @@ test("a runtime's FixedLengthStream carries a body that states its length", asyn
   assert.equal(raw.headers.get("Content-Length"), String(RAW_SOURCE.length));
   assert.equal(await raw.text(), RAW_SOURCE);
   assert.deepEqual(made, [RAW_SOURCE.length]);
-  await (await read(request("/"), w.env, w.ctx, target("/", false))).text();
+  const shell = await (await read(request("/"), w.env, w.ctx, target("/", false))).text();
   await read(request("/?raw", "HEAD"), w.env, w.ctx, target("/", true));
-  assert.deepEqual(made, [RAW_SOURCE.length], "a shell or a HEAD is sent as it is");
+  assert.deepEqual(made, [RAW_SOURCE.length, Buffer.byteLength(shell)], "a shell states its length too; a HEAD is sent as it is");
 });
 
 test("a metadata failure is a 500 with one warning", async () => {

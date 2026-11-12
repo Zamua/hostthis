@@ -8,7 +8,7 @@ import { formatHTTPDate } from "./httpdate.js";
 import { exactLength } from "./length.js";
 import { FAILED_PAGE, LOADING_PAGE } from "./pages.js";
 import { parseRange, sliceStream } from "./range.js";
-import { goError, methodNotAllowed, notFound } from "./responses.js";
+import { goError, methodNotAllowed, notFound, sized } from "./responses.js";
 import { rawContentType, renderShell } from "./shells.js";
 
 // Every content response's: stored by any cache, revalidated before each reuse.
@@ -78,7 +78,7 @@ async function resolveAnswer(env, { slug, path, flags }) {
 
 function statusPage(status, page, extra) {
   const headers = { ...sandbox(), "Content-Type": HTML, "Cache-Control": "no-store", ...extra };
-  return new Response(page, { status, headers });
+  return sized(page, { status, headers });
 }
 
 // openBlob(env, entry, ctx) returns the entry's decoded bytes as a stream, or
@@ -189,7 +189,7 @@ export function readPath(openBlob) {
       }
       headers["Content-Security-Policy"] = shell.csp;
       headers["Content-Type"] = HTML;
-      return new Response(shell.body, { headers });
+      return sized(shell.body, { headers });
     };
 
     switch (answer.action) {
@@ -212,7 +212,7 @@ export function readPath(openBlob) {
           return new Response(null, { status: 304, headers });
         }
         headers["Content-Type"] = "application/json; charset=utf-8";
-        return new Response(goStringList(answer.files), { headers });
+        return sized(goStringList(answer.files), { headers });
       }
       default:
         warn(target, `unknown resolve action ${JSON.stringify(answer.action)}`);

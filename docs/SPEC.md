@@ -4542,8 +4542,10 @@ off unless configured, and used only where the runtime has a Cache API
   content posture is stored: never a 5xx, a 404, or a pending or failed page.
   A fill is capped by `HOSTTHIS_EDGE_CACHE_MAX_BYTES` (default 8 MiB): a
   response whose `Content-Length` (the entry's decoded size) is over it starts
-  no fill, and one that states none (a shell, a file list, an entry without a
-  decoded size) is abandoned once it runs past it. A write purges the slug's
+  no fill, and one that states none (an entry without a decoded size) is
+  abandoned once it runs past it. A generated answer (a shell, a file list, a
+  pending or failed page, an error) states its own byte length, on GET and
+  HEAD alike. A write purges the slug's
   host (see "Active invalidation"), which also drops these entries; the TTL
   bounds a missed purge. A read that
   began before a write can still be filling when the purge lands, so a fill
