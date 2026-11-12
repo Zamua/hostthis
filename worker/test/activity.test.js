@@ -70,6 +70,16 @@ test("without a dataset, a salt or an owner nothing is written, and a failing wr
   await broken.settle();
 });
 
+test("a listed owner's publishes are test traffic and write nothing", async () => {
+  const other = "key:SHA256:" + "cd".repeat(32);
+  const w = world({ HOSTTHIS_ACTIVITY_SKIP_OWNERS: ` ${other}, ${OWNER} ` });
+  notePublish(w.env, w.waiter, OWNER, "html");
+  notePublish(w.env, w.waiter, other, "site");
+  notePublish(w.env, w.waiter, OWNER + "0", "html");
+  await w.settle();
+  assert.deepEqual(w.points.map((p) => p.indexes[0]), [want(OWNER + "0"), `${want(OWNER + "0")}:publish`]);
+});
+
 const get = (headers = {}, method = "GET") => new Request("https://abcd2345.apex.example/", { method, headers: { "User-Agent": "Mozilla/5.0", ...headers } });
 const html = (status = 200, headers = {}) => new Response(status === 304 ? null : "x", {
   status, headers: { "Cache-Control": CONTENT, ...(status === 304 ? {} : { "Content-Type": "text/html; charset=utf-8" }), ...headers },
@@ -82,6 +92,8 @@ test("a page read is a person's GET of a paste's HTML", () => {
     [get({ "Sec-Fetch-Dest": "document" }), html(304), true],
     [get(), html(304), false],
     [get({ "Sec-Fetch-Dest": "iframe" }), html(), false],
+    [get({ "X-Activity-Skip": "1" }), html(), false],
+    [get({ "X-Activity-Skip": "0" }), html(), true],
     [get({}, "HEAD"), html(), false],
     [get(), html(200, { "Cache-Control": "no-store" }), false],
     [get(), html(200, { "Content-Type": "text/css" }), false],

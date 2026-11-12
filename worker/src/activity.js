@@ -6,6 +6,7 @@
 const APP = "hostthis";
 const NO_ACTOR = "-";
 const HASH_HEX = 16;
+export const SKIP_HEADER = "X-Activity-Skip";
 
 const encoder = new TextEncoder();
 let keyed = { salt: null, key: null };
@@ -63,9 +64,17 @@ function note(env, waiter, actor, events) {
 
 const DIRECTORY_KINDS = new Set(["site", "knowledgebase"]);
 
+// Owners whose publishes are test traffic (HOSTTHIS_ACTIVITY_SKIP_OWNERS,
+// comma separated). A publish arrives over SSH and can carry no header, so a
+// deploy check is told apart by the key it publishes with.
+function skippedOwner(env, owner) {
+  const listed = env?.HOSTTHIS_ACTIVITY_SKIP_OWNERS;
+  return typeof listed === "string" && listed.split(",").some((entry) => entry.trim() === owner);
+}
+
 // A publish by an owner: the owner is active, and published one thing.
 export function notePublish(env, waiter, owner, kind) {
-  if (typeof owner !== "string" || owner === "") {
+  if (typeof owner !== "string" || owner === "" || skippedOwner(env, owner)) {
     return;
   }
   note(env, waiter, owner, [["active"], ["publish", DIRECTORY_KINDS.has(kind) ? "site" : "paste"]]);
@@ -81,6 +90,10 @@ const AUTOMATED = /bot|crawl|spider|slurp|preview|monitor|headless|curl|wget|pyt
 // Whether a response is a person's page view: a GET that answered a paste's
 // HTML, not a status page, a subresource or an automated client.
 export function isPageRead(request, res, contentCacheControl) {
+  // A scripted check names itself so its reads are not counted.
+  if (request.headers.get(SKIP_HEADER) === "1") {
+    return false;
+  }
   if (request.method !== "GET" || res.headers.get("Cache-Control") !== contentCacheControl) {
     return false;
   }
