@@ -3011,9 +3011,23 @@ integer, answers 400 `invalid-entry`. The cap is 1000 entries
 **Operator path.** Entries change through the Worker's internal API with its
 bearer token, so a ban needs no deploy and no restart.
 
+**Polls read a snapshot.** The cell writes the list to the payload bucket,
+at `internal/denylist/<cell id>.json` as `{writtenAt, entries}`, inside every
+add and remove, before it answers. `GET /denylist/list` is answered from that
+object, so a poll does not call the cell. The Worker goes to the cell instead,
+which rewrites the snapshot (`POST /denylist/snapshot`), whenever the object
+is missing, cannot be read or parsed, lacks either field, or is five minutes
+old or dated in the future: a poll is never answered with a list the cell did
+not write, and never with an empty one in place of a failed read. Entries past
+their `expiresAt` are filtered from a snapshot when it is served. If the cell
+cannot write the snapshot it deletes it, so polls reach the cell; if it can do
+neither, the add or remove answers with an error although the entry is stored,
+and repeating it writes the snapshot. Only in that case can a poll see the
+earlier list, for at most five minutes.
+
 **Admission reads a cached copy.** Each hostthisd replica refreshes the list
 every 30 seconds and checks sessions against its last good copy, so admission
-costs no Worker call and a ban takes effect within one refresh. A failed
+costs no Worker call and a ban or an unban takes effect within one refresh. A failed
 refresh keeps the last good copy. Before the first successful refresh the list
 is empty: the denylist fails open, because refusing every session while the
 Worker is unreachable would turn a metadata outage into a full SSH outage,

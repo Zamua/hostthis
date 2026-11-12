@@ -4,6 +4,7 @@ import { abuseRoute } from "./abuse-routes.js";
 import { countingPageReads } from "./activity.js";
 import { bearerIs, credentialScope, scopePermits } from "./auth.js";
 import { BLOB_PATH, handleBlob } from "./blobs.js";
+import { DENYLIST_CELL, denylistPoll } from "./cells/denylist.js";
 import { TURN_CELL } from "./cells/turn.js";
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { CONTENT_CACHE_CONTROL } from "./public/reads.js";
@@ -84,8 +85,12 @@ const internalRouter = {
       return env.TURN.get(env.TURN.idFromName(TURN_CELL)).fetch(request);
     }
     if (url.pathname.startsWith("/denylist/")) {
-      // One cell holds the whole list.
-      return env.DENYLIST.get(env.DENYLIST.idFromName("denylist")).fetch(request);
+      // hostthisd's poll reads the list's snapshot; every other operation
+      // goes to the one cell that holds the list.
+      if (request.method === "GET" && url.pathname === "/denylist/list") {
+        return denylistPoll(env);
+      }
+      return env.DENYLIST.get(env.DENYLIST.idFromName(DENYLIST_CELL)).fetch(request);
     }
     if (url.pathname.startsWith("/paste/")) {
       const slug = url.searchParams.get("slug");

@@ -1,9 +1,24 @@
+import { bucketGet } from "../bucket.js";
 import { cellRoute } from "./image.js";
 import { dispatch, mutation, read } from "./ops.js";
 
 // The DENYLIST cell: the operator's banned keys and networks
 // (docs/SPEC.md "Operator denylist"). One cell holds the whole list; hostthisd
 // replicas poll `list` and check SSH sessions against their copy.
+//
+// The poll is answered from a snapshot of the list in the payload bucket,
+// which the cell rewrites inside every add and remove, so a poll reaches the
+// cell only when the snapshot is missing, unreadable or old.
+
+export const DENYLIST_CELL = "denylist";
+// The snapshot's bucket key, named by the cell's id so that two lists sharing
+// a bucket never read each other's.
+export function snapshotKey(env) {
+  return `internal/denylist/${env.DENYLIST.idFromName(DENYLIST_CELL)}.json`;
+}
+// A snapshot older than this is rebuilt from the cell. It bounds how long a
+// snapshot the cell failed to rewrite can stand in for the list.
+export const SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 
 export const DENYLIST_CAP = 1000;
 const REASON_MAX = 200;
@@ -94,13 +109,37 @@ export function canonicalEntry(text) {
 
 export const DENYLIST_OPS = {
   list: read((self) => self.list()),
+  // list, and the snapshot rewritten from it. Mutating, so it cannot write an
+  // older list over the snapshot of an add or remove that ran beside it.
+  snapshot: mutation((self) => self.snapshot(), { body: false }),
   add: mutation((self, body) => self.add(body)),
   remove: mutation((self, body) => self.remove(body)),
 };
 
+// The list a poll is answered with, from the snapshot when it is usable, else
+// from the cell, which rewrites the snapshot. Anything wrong with the
+// snapshot (a failed read, a missing or malformed object, one past its age)
+// goes to the cell: a poll is never answered with a list the cell did not
+// write.
+export async function denylistPoll(env, now = Date.now()) {
+  try {
+    const object = await bucketGet(env.PAYLOADS, snapshotKey(env));
+    const snap = object && JSON.parse(await new Response(object.body).text());
+    if (snap && Array.isArray(snap.entries) && Number.isSafeInteger(snap.writtenAt)
+      && now - snap.writtenAt >= 0 && now - snap.writtenAt < SNAPSHOT_MAX_AGE_MS) {
+      return Response.json({ entries: snap.entries.filter((row) => !expired(row, now)) });
+    }
+  } catch (error) {
+    console.warn(`warn: denylist snapshot read: ${error.message}`);
+  }
+  return env.DENYLIST.get(env.DENYLIST.idFromName(DENYLIST_CELL))
+    .fetch(new Request("https://cell/denylist/snapshot", { method: "POST" }));
+}
+
 export class Denylist {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
     this.now = () => Date.now();
   }
 
@@ -110,13 +149,43 @@ export class Denylist {
       ?? new Response("unknown op\n", { status: 404 });
   }
 
-  async list() {
-    const now = this.now();
+  async entries(now) {
     const rows = await this.state.storage.list({ prefix: ENTRY });
     const entries = [...rows].filter(([, row]) => !expired(row, now))
       .map(([key, row]) => ({ entry: key.slice(ENTRY.length), ...row }));
     entries.sort((a, b) => a.addedAt - b.addedAt);
-    return Response.json({ entries });
+    return entries;
+  }
+
+  async list() {
+    return Response.json({ entries: await this.entries(this.now()) });
+  }
+
+  // Writes the list to the bucket for polls to read. A failed write removes
+  // the snapshot, so polls reach the cell; if that fails too the error stands
+  // and the caller's operation reports it.
+  async writeSnapshot() {
+    const now = this.now();
+    const entries = await this.entries(now);
+    const key = snapshotKey(this.env);
+    try {
+      await this.env.PAYLOADS.put(key, JSON.stringify({ writtenAt: now, entries }));
+    } catch (error) {
+      console.warn(`warn: denylist snapshot write: ${error.message}`);
+      await this.env.PAYLOADS.delete(key);
+    }
+    return entries;
+  }
+
+  // A poll that reached the cell gets the list even when the snapshot cannot
+  // be written; the next poll comes here again.
+  async snapshot() {
+    try {
+      return Response.json({ entries: await this.writeSnapshot() });
+    } catch (error) {
+      console.warn(`warn: denylist snapshot remove: ${error.message}`);
+      return this.list();
+    }
   }
 
   async add(body) {
@@ -140,6 +209,7 @@ export class Denylist {
       row.expiresAt = expiresAt;
     }
     await this.state.storage.put(key, row);
+    await this.writeSnapshot();
     return Response.json({ entry, ...row });
   }
 
@@ -163,6 +233,9 @@ export class Denylist {
     if (removed) {
       await this.state.storage.delete(key);
     }
+    // Also when nothing was removed: a retry after a failed snapshot write
+    // must still leave a current snapshot.
+    await this.writeSnapshot();
     return Response.json({ entry, removed });
   }
 }

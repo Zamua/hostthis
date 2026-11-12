@@ -158,3 +158,21 @@ export function putBody(text, appCap = 10) {
     now: 9,
   };
 }
+
+// The env a Denylist cell needs for its snapshot: a bucket holding text, and
+// the namespace that names the cell.
+export function denylistEnv() {
+  const objects = new Map();
+  return {
+    DENYLIST: { idFromName: (name) => name },
+    PAYLOADS: {
+      objects,
+      async get(key) {
+        const text = objects.get(key);
+        return text === undefined ? null : { body: new Response(text).body };
+      },
+      async put(key, text) { objects.set(key, text); },
+      async delete(key) { objects.delete(key); },
+    },
+  };
+}
