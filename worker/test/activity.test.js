@@ -32,7 +32,7 @@ test("an actor is written as 16 hex characters of a keyed hash, never as itself"
   await w.settle();
   assert.deepEqual(w.points, [
     { indexes: [want(OWNER)], blobs: ["hostthis", "active", ""], doubles: [1] },
-    { indexes: [want(OWNER)], blobs: ["hostthis", "publish", "site"], doubles: [1] },
+    { indexes: [`${want(OWNER)}:publish`], blobs: ["hostthis", "publish", "site"], doubles: [1] },
   ]);
   assert.equal(JSON.stringify(w.points).includes("SHA256"), false);
 });
@@ -46,8 +46,8 @@ test("a publish names a paste or a site; a room has no actor", async () => {
   await w.settle();
   // The room's point needs no hash, so it may land first.
   assert.deepEqual(w.points.filter((p) => p.blobs[1] === "publish").map((p) => `${p.indexes[0]} ${p.blobs[2]}`).sort(),
-    ["- room", `${want(OWNER)} paste`, `${want(OWNER)} paste`, `${want(OWNER)} paste`, `${want(OWNER)} site`].sort());
-  assert.equal(w.points.filter((p) => p.blobs[1] === "active").length, 4);
+    ["-:publish room", `${want(OWNER)}:publish paste`, `${want(OWNER)}:publish paste`, `${want(OWNER)}:publish paste`, `${want(OWNER)}:publish site`].sort());
+  assert.deepEqual(w.points.filter((p) => p.blobs[1] === "active").map((p) => p.indexes[0]), Array(4).fill(want(OWNER)));
 });
 
 test("without a dataset, a salt or an owner nothing is written, and a failing write is silent", async () => {
@@ -70,6 +70,16 @@ test("without a dataset, a salt or an owner nothing is written, and a failing wr
   await broken.settle();
 });
 
+test("a listed owner's publishes are test traffic and write nothing", async () => {
+  const other = "key:SHA256:" + "cd".repeat(32);
+  const w = world({ HOSTTHIS_ACTIVITY_SKIP_OWNERS: ` ${other}, ${OWNER} ` });
+  notePublish(w.env, w.waiter, OWNER, "html");
+  notePublish(w.env, w.waiter, other, "site");
+  notePublish(w.env, w.waiter, OWNER + "0", "html");
+  await w.settle();
+  assert.deepEqual(w.points.map((p) => p.indexes[0]), [want(OWNER + "0"), `${want(OWNER + "0")}:publish`]);
+});
+
 const get = (headers = {}, method = "GET") => new Request("https://abcd2345.apex.example/", { method, headers: { "User-Agent": "Mozilla/5.0", ...headers } });
 const html = (status = 200, headers = {}) => new Response(status === 304 ? null : "x", {
   status, headers: { "Cache-Control": CONTENT, ...(status === 304 ? {} : { "Content-Type": "text/html; charset=utf-8" }), ...headers },
@@ -82,6 +92,8 @@ test("a page read is a person's GET of a paste's HTML", () => {
     [get({ "Sec-Fetch-Dest": "document" }), html(304), true],
     [get(), html(304), false],
     [get({ "Sec-Fetch-Dest": "iframe" }), html(), false],
+    [get({ "X-Activity-Skip": "1" }), html(), false],
+    [get({ "X-Activity-Skip": "0" }), html(), true],
     [get({}, "HEAD"), html(), false],
     [get(), html(200, { "Cache-Control": "no-store" }), false],
     [get(), html(200, { "Content-Type": "text/css" }), false],
@@ -101,7 +113,7 @@ test("the counted read path answers as the bare one and writes one point per pag
   assert.equal(await first.text(), "x");
   await read(get(), w.env, w.waiter, {});
   await w.settle();
-  assert.deepEqual(w.points, [{ indexes: ["-"], blobs: ["hostthis", "page_read", ""], doubles: [1] }]);
+  assert.deepEqual(w.points, [{ indexes: ["-:page_read"], blobs: ["hostthis", "page_read", ""], doubles: [1] }]);
 });
 
 async function call(cell, op, body) {

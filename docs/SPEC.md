@@ -4675,11 +4675,14 @@ active publishing keys and usage without keeping who did what:
 | event | written when | index | blobs |
 | --- | --- | --- | --- |
 | `active` | with every `publish` that has an owner | owner hash | `hostthis`, `active`, empty |
-| `publish` | a paste or site first turns ready, or a new version of one is published | owner hash | `hostthis`, `publish`, `paste` or `site` |
-| `publish` | a room is created for the first time | `-` | `hostthis`, `publish`, `room` |
-| `page_read` | the Worker answers a page view on a public host | `-` | `hostthis`, `page_read`, empty |
+| `publish` | a paste or site first turns ready, or a new version of one is published | owner hash, then `:publish` | `hostthis`, `publish`, `paste` or `site` |
+| `publish` | a room is created for the first time | `-:publish` | `hostthis`, `publish`, `room` |
+| `page_read` | the Worker answers a page view on a public host | `-:page_read` | `hostthis`, `page_read`, empty |
 
-Every point carries one double, `1`. A directory upload (a site or a
+Every point carries one double, `1`. The dataset samples per index value, so
+only `active`, which is counted by distinct owners, has the bare owner hash as
+its index; every other event appends its name, and a burst of one event
+cannot sample another away. A directory upload (a site or a
 knowledge base) is a `site`; every other kind is a `paste`. A replayed create
 or a repeated status change writes nothing.
 
@@ -4695,6 +4698,13 @@ HTML (200), or revalidated on a navigation (304). Status pages, subresources,
 HEAD requests, a request with no User-Agent and one naming an automated client
 are not counted. Only reads the Worker answers directly are counted: a read
 hostthisd answers, itself or by forwarding to the Worker, is not.
+
+Test traffic writes nothing. A read that carries `X-Activity-Skip: 1` is not
+counted; the header is no secret, it only hides the caller's own reads. A
+publish arrives over SSH and can carry no header, so
+`HOSTTHIS_ACTIVITY_SKIP_OWNERS` lists, comma separated, the owner identities
+(`key:SHA256:...`) whose publishes write no event: the keys a deploy check
+publishes with. `scripts/smoke.sh` sends the header on every read.
 
 A write is never awaited and its failure is dropped, so an event can be lost
 and none can fail or delay the request it describes.

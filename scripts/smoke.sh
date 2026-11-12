@@ -42,6 +42,10 @@ KEY="${HOSTTHIS_SMOKE_KEY:-$HOME/.config/hostthis/smoke_id_ed25519}"
 SSH_PORT="${HOSTTHIS_SSH_PORT:-22}"
 SSH="ssh -p $SSH_PORT -i $KEY -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
 
+# Every read here is a check, not a visit: the header keeps it out of the
+# instance's activity events (docs/SPEC.md "Activity events").
+curl() { command curl -H 'X-Activity-Skip: 1' "$@"; }
+
 # slug_from_url extracts the 8-char slug from a hostthis URL. Handles
 # both URL shapes the server can emit:
 #   subdomain mode: https://<slug>.apex.tld/      → take chars before first dot
