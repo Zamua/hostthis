@@ -150,6 +150,8 @@ func (p *slugPurger) PurgePaste(slug domain.Slug) error {
 	return nil
 }
 
+func (p *slugPurger) PurgeRemoved(slug domain.Slug) error { return p.PurgePaste(slug) }
+
 func (p *slugPurger) take() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()

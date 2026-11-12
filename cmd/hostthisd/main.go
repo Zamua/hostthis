@@ -184,13 +184,17 @@ func main() {
 	// Decorators, so a write invalidates the edge cache for its slug while the
 	// verb and deploy services stay cache-unaware (SPEC "Active invalidation:
 	// CachePurger"). Noop unless a CDN is configured.
-	cachePurger, purgerShutdown := buildCachePurger(logger, *apexDomain, *urlMode)
+	cachePurger, purgerShutdown, err := buildCachePurger(logger)
+	if err != nil {
+		logger.Fatalf("%v", err)
+	}
 	cdnTTL, err := parseCDNTTL(os.Getenv("HOSTTHIS_CDN_TTL"), cachePurger)
 	if err != nil {
 		logger.Fatalf("%v", err)
 	}
-	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger)
-	siteDeployer := service.NewSiteCacheInvalidating(deploySvc, cachePurger)
+	exempt := purgeExempt(os.Getenv("HOSTTHIS_CACHE_SKIP_OWNERS"))
+	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger, exempt)
+	siteDeployer := service.NewSiteCacheInvalidating(deploySvc, cachePurger, exempt)
 
 	// Own registry rather than the default one, so no collector arrives via a
 	// dependency's init().
@@ -425,28 +429,43 @@ func buildBlobStore(logger *log.Logger) (*storage.CompressedBlobStore, error) {
 
 // buildCachePurger reads HOSTTHIS_CACHE_BACKEND and returns the configured
 // CachePurger, defaulting to Noop, and the shutdown that sends what it still
-// has queued. apex/mode let the cloudflare adapter name a slug's host (or path
-// prefix), so a purge covers every URL the slug answers.
-func buildCachePurger(logger *log.Logger, apex, mode string) (service.CachePurger, func(context.Context) error) {
+// holds. The worker backend hands every purge to the Worker's purge queue at
+// HOSTTHIS_WORKER_ENDPOINT (docs/SPEC.md "Purge queue").
+func buildCachePurger(logger *log.Logger) (service.CachePurger, func(context.Context) error, error) {
 	backend := strings.ToLower(envOr("HOSTTHIS_CACHE_BACKEND", "noop"))
 	switch backend {
 	case "", "noop":
-		return cache.Noop{}, func(context.Context) error { return nil }
-	case "cloudflare":
-		zone := os.Getenv("HOSTTHIS_CF_ZONE_ID")
-		token := os.Getenv("HOSTTHIS_CF_PURGE_TOKEN")
-		if zone == "" || token == "" {
-			logger.Fatalf("HOSTTHIS_CACHE_BACKEND=cloudflare requires HOSTTHIS_CF_ZONE_ID and HOSTTHIS_CF_PURGE_TOKEN")
+		return cache.Noop{}, func(context.Context) error { return nil }, nil
+	case "worker":
+		base := envOr("HOSTTHIS_WORKER_ENDPOINT", "")
+		if base == "" {
+			return nil, nil, errors.New("HOSTTHIS_CACHE_BACKEND=worker requires HOSTTHIS_WORKER_ENDPOINT")
 		}
-		logger.Printf("cache: cloudflare purger enabled for zone %s", zone)
-		cf := &cache.Cloudflare{ZoneID: zone, Token: token, Apex: apex, Mode: mode, Logger: logger}
-		// The Worker's edge cache can be refilled by a read racing the purge.
-		rp := cache.NewRepurging(cf, cache.RepurgeDelay)
-		return rp, rp.Shutdown
+		rt, err := workerTransport(base, http.DefaultTransport)
+		if err != nil {
+			return nil, nil, err
+		}
+		logger.Printf("cache: purges go to the worker's queue at %s", base)
+		q := &cache.Queue{Endpoint: base, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: rt}, Logger: logger}
+		return q, q.Shutdown, nil
 	default:
-		logger.Fatalf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|cloudflare)", backend)
-		return nil, nil
+		return nil, nil, fmt.Errorf("unknown HOSTTHIS_CACHE_BACKEND %q (want noop|worker)", backend)
 	}
+}
+
+// purgeExempt reads HOSTTHIS_CACHE_SKIP_OWNERS, the comma-separated owner
+// identities whose writes purge nothing (service.PurgeExempt).
+func purgeExempt(raw string) service.PurgeExempt {
+	listed := map[string]bool{}
+	for id := range strings.SplitSeq(raw, ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			listed[id] = true
+		}
+	}
+	if len(listed) == 0 {
+		return nil
+	}
+	return func(owner domain.Owner) bool { return listed[owner.String()] }
 }
 
 // parseCDNTTL reads how long a CDN may keep a site file without asking. A CDN

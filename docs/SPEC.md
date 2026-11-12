@@ -4570,8 +4570,8 @@ off unless configured, and used only where the runtime has a Cache API
   began before a write can still be filling when the purge lands, so a fill
   must end within 10 s of its read beginning (timed from before the read's
   cell call), and one that would end later is abandoned and stores nothing:
-  `hostthisd` purges the slug a second time 15 s after each purge, and that
-  second purge then finds every entry such a read stored.
+  the purge queue purges the slug a second time 15 s after each purge, and
+  that second purge then finds every entry such a read stored.
 - `HOSTTHIS_BLOB_CACHE_MAX_BYTES` (default `0`, off) caches the decoded bytes
   of each object whose entry carries a decoded size (`DecodedSize`) of at most
   that many bytes, keyed by the object key; an entry without one is not
@@ -4852,9 +4852,14 @@ front, or that one is in front at all:
 
 ```go
 type CachePurger interface {
-    PurgePaste(slug domain.Slug) error
+    PurgePaste(slug domain.Slug) error   // the slug's content changed
+    PurgeRemoved(slug domain.Slug) error // the slug no longer serves
 }
 ```
+
+`PurgeRemoved` is a delete's purge. Where purges queue it goes ahead of
+every `PurgePaste`: a stale edge entry of a changed paste shows old
+content, one of a deleted paste shows content its owner removed.
 
 Invalidation is **transparent to the business logic.** The verb service
 (`Manage`) performs the mutation and knows nothing about caching - it has
@@ -4862,7 +4867,8 @@ no `CachePurger` field and no purge calls. A thin `CacheInvalidating`
 decorator wraps the verb service at the composition root
 (`cmd/hostthisd`): it delegates every verb to the inner service and,
 after an `Update` / `Delete` / `Pin` / `Unpin` that succeeded or may have
-(see above), fires `PurgePaste(slug)`. A `SiteCacheInvalidating` decorator
+(see above), fires `PurgePaste(slug)`, or `PurgeRemoved(slug)` for a
+`Delete`. A `SiteCacheInvalidating` decorator
 does the same around the site deploy service for `DeployToSlug` and its
 `Delete`, by the same rule. The mutation use-cases stay pure; cache
 invalidation is a cross-cutting concern layered on by composition, not
@@ -4871,86 +4877,108 @@ woven into the domain logic. `rename` / `versions` / `list` / `whoami` / `get` /
 bytes served at the public URL (`deleteVersion` is refused outright when
 the target is the currently-served version).
 
-The purge is best-effort: a purge error is logged but never fails the
-underlying operation (the paste IS updated/deleted on origin; the CDN
-just keeps stale content until its TTL ends).
+A purge never fails the underlying operation (the paste IS updated or
+deleted on origin), and a write never waits for its purge.
 
-**Purged twice.** A read that started before a write can resolve with the
-old state and store that response in the edge cache after the write's
-purge went out. The Worker abandons any such store that completes more
-than 10 seconds after its read resolved, so a second purge of the slug 15
-seconds after its last purge drops whatever raced the first. A
-`Repurging` decorator around the CDN adapter, wired at the composition
-root, does this for every purge: it purges at once and arms a 15-second
-timer per slug, which a further purge of the same slug re-arms, so a burst
-of writes costs one delayed purge, timed from the last. The bound this
-gives: **a stale edge entry can survive a write by at most about 15
-seconds** (plus the purge's own pacing and propagation), not until the
-edge TTL ends. Shutdown cancels the timers still armed; a write in its
-last 15 seconds before a restart keeps only its first purge.
+**Exempt owners.** `HOSTTHIS_CACHE_SKIP_OWNERS` lists owner identities
+(`key:SHA256:...`, comma separated) whose writes purge nothing. It is for
+test traffic whose reads are all conditional, so nothing of theirs is ever
+stored at the edge: `scripts/smoke.sh` reads that way, and a deployment that
+lists the smoke key spends no purge budget on a smoke run. Do not list an
+owner whose pastes anyone reads unconditionally.
 
-Three implementations ship:
+Two implementations ship:
 
 | Impl | When used | Behavior |
 | --- | --- | --- |
 | `noop` (default) | No CDN, or one that revalidates every request | No-op |
-| `cloudflare` | Cloudflare in front | Queues the slug's hostname and POSTs batches to `/zones/<id>/purge_cache` |
-| `fastly` (not shipped, easy add) | Fastly in front | POSTs to Fastly's purge API |
+| `worker` | The Worker's edge cache, or a CDN, in front | Hands the slug to the Worker's purge queue |
 
-**Purge the slug's whole host.** A slug answers at many cache keys: the
-bare URL, `?raw=1` (the bytes a render shell fetches), `?files=1` (a knowledge
-base's file list), every file of a site or knowledge base, and any other
-query a client sends. The Cloudflare adapter purges them all by naming the
-slug's hostname:
+The `worker` backend (`internal/cache.Queue`) POSTs slugs to the Worker's
+`/purge/enqueue` with the Worker token, removals ahead of changes, at most
+100 a call. It holds a purge only until the Worker has stored it: an enqueue
+the Worker refuses or that fails is offered again, with backoff doubling
+from 1 second to 30, until it is taken. At shutdown what is waiting is sent
+within the process's shutdown bound (see "Process shutdown"); what is left
+at the deadline is logged and dropped. That in-memory hop is the only place
+a purge can be lost, and the edge TTL bounds it.
 
-```
-{"hosts": ["<slug>.<apex>", ...]}
-```
+### Purge queue
 
-so no list of variants has to stay in step with what the shells fetch. A
-hostname purge also reaches responses a Worker stored with the Cache API under
-that host. In path mode (dev only) a slug has no host of its own, so the
-adapter purges the path prefix `<apex>/p/<slug>` instead
-(`{"prefixes": [...]}`); slugs have a fixed length, so that prefix names one
-slug. A port on the apex is dropped: purges name hosts, not origins. The
-scope policy lives in the adapter (which owns the apex and URL-mode config);
-the service layer only ever names the slug.
+Every edge-cache purge of a deployment goes through one queue, the `Purge`
+cell (`worker/src/cells/purge.js`): `hostthisd`'s writes and an operator's
+takedown through `/purge/enqueue` (`{"slugs": [...], "urgent": bool}`, at
+most 100 slugs, answered `{configured, queued, sent}`), and the Worker's own
+quarantine, release and ban paths directly. The purge API admits only a few calls a minute for a whole
+account (5 a minute with a burst of 25 on the smallest plan), shared by
+every deployment and tool that purges with it, so the queue's job is to
+make that budget cover every purge without losing one.
 
-**Coalesced and paced.** Below the enterprise plan, hostname and prefix
-purges have tighter API rate limits than URL purges and take at most 30
-entries per call. So a purge only queues the slug's hostname (once, however
-many writes name it before it is sent), and one loop sends the queue in
-calls of at most 30 entries, at most one call every 2 seconds; a call after
-an idle spell goes out at once. A 429, a 5xx or a transport failure is
-retried with backoff doubling from 1 second (longer when `Retry-After` asks),
-for at most 5 calls; a batch still failing, or refused outright (another
-4xx), is logged and dropped, bounded by the edge TTL. Every call is logged
-with its hosts and its outcome. A write never waits for its purge. At
-shutdown the queue is sent within the process's shutdown bound (see
-"Process shutdown"); what is left at the deadline is dropped.
+- **Durable, and never dropped.** A queued slug is a row in the cell's
+  storage. It stays until a purge call carrying it succeeds, however often
+  the API refuses; a restart of `hostthisd` or of the Worker loses nothing
+  the cell has acknowledged. The queue holds at most 5,000 slugs; past
+  that an enqueue is refused with 507 `purge-queue-full` and the caller
+  keeps it.
+- **Batched by host.** One call names up to 100 hosts,
+  `{"hosts": ["<slug>.<apex>", ...]}`, the API's limit, so a burst of
+  changes costs one call. Calls are at least 1 second apart. Purging the
+  host covers every cache key the slug answers at (the bare URL, `?raw=1`,
+  `?files=1`, every site file) and everything the Worker stored under that
+  host, so no list of variants has to stay in step with the shells. The
+  queue purges hosts only: a path-mode deployment (dev) has no edge cache.
+- **Paced under a budget of its own.** `HOSTTHIS_PURGE_BUDGET` is two token
+  buckets, `<per minute>/<burst>,<per minute>/<burst>`: ordinary, then
+  urgent (default `3/15,1/5`). A call is made only when a bucket can pay for
+  it. Deployments that share an account each get their own budget, and the
+  budgets must sum to less than the account's limit, so one deployment's
+  traffic cannot starve another's.
+- **Urgent first.** A purge is urgent when it follows a delete, a
+  quarantine, a release, a ban or an unban. Urgent slugs fill a call before
+  ordinary ones, oldest first within each, and the urgent bucket pays only
+  for calls that carry an urgent slug: republishes can empty the ordinary
+  bucket and a takedown still goes out at once.
+- **Purged twice.** A read that started before a change can resolve with
+  the old state and store it in the edge cache after the first purge went
+  out. The Worker abandons any such store that ends more than 10 seconds
+  after its read began, so each slug is purged again 15 seconds after its
+  first purge went out. Second purges that fall due together share a call,
+  and one with nothing else to ride with waits up to 3 seconds for company.
+- **Refusals.** A 429 means the account's budget is spent, by this queue or
+  by something else purging on the account: both buckets are emptied and
+  the queue waits for the `Retry-After` the API names. Any other failure
+  (a server error, a rejected credential, no answer within 10 seconds)
+  waits 15 seconds. Nothing leaves the queue either way.
 
-Env vars when `HOSTTHIS_CACHE_BACKEND=cloudflare`:
+The bound this gives: with budget in hand, **a change is purged from the
+edge within about a second, and whatever raced that purge within about 18
+seconds more**. With the buckets empty, a purge waits for the next token:
+at most a minute divided by the bucket's rate.
 
-```
-HOSTTHIS_CF_PURGE_TOKEN  CF API token, scoped ONLY to 'Cache Purge' on the zone
-HOSTTHIS_CF_ZONE_ID      zone id of the apex domain
-```
+`GET /purge/status` (the read token suffices) answers
+`{configured, writtenAt, pending, urgent, second, oldestAt}`: slugs whose
+first purge has not gone out, how many of those are urgent, second purges
+not yet out, and when the longest-waiting purge became due (ms since the
+epoch, or null). A monitor alerts when `oldestAt` is older than its
+threshold. The cell rewrites the answer to the payload bucket
+(`internal/purge/<cell id>.json`) whenever the queue changes, and the route
+serves that copy while it is under 5 minutes old, so polling costs no cell
+request.
 
-The adapter derives a slug's host (or path prefix) from the apex domain and
-URL mode hostthis is already configured with (`HOSTTHIS_APEX_DOMAIN` /
-`HOSTTHIS_URL_MODE`), so no separate base-URL var is needed. The zone's plan
-must accept purges by hostname (and by prefix, for path mode).
-
-The purge token is the only long-lived credential hostthis needs for
-the CDN; it's narrowly scoped (zone-level cache-purge only) so leakage
-worst-case is "attacker can purge our cache (slowing us down briefly)".
+The purge credential lives only in the Worker (`HOSTTHIS_CF_PURGE_TOKEN`,
+`HOSTTHIS_CF_ZONE_ID`); `hostthisd` holds none. It is narrowly scoped
+(zone-level cache purge only), so its leak costs at worst purges of our own
+cache. A deployment that names no credential queues nothing and answers an
+enqueue `{"configured": false}`.
 
 ### Switching CDN providers
 
 Replacing Cloudflare with Fastly / Bunny.net / a different provider is:
 
-1. Add an `internal/cache/<provider>.go` implementing `CachePurger`.
-2. Wire it in `cmd/hostthisd/main.go` by extending the `HOSTTHIS_CACHE_BACKEND` switch.
+1. Teach the purge queue's one call (`Purge.call`) the provider's purge API,
+   or add an `internal/cache/<provider>.go` implementing `CachePurger` and
+   extend the `HOSTTHIS_CACHE_BACKEND` switch in `cmd/hostthisd/main.go`.
+2. Set the queue's budget to the provider's rate limit.
 3. Change nameservers / DNS at the registrar.
 4. Reconfigure cache rules in the new provider's dashboard.
 
@@ -5148,10 +5176,8 @@ reversible: release restores the slug exactly as it was.
 While a slug is quarantined:
 
 - every public read answers 404, `?raw=1` and `?files=1` included, and the
-  slug's host is purged from the edge cache when it is quarantined and again
-  15 seconds later (the "Purged twice" bound). The purge API admits only a
-  few purges a minute for the whole zone, so when it refuses either purge a
-  third follows 13 seconds after the second;
+  slug's host is queued for an urgent purge from the edge cache (see "Purge
+  queue"): at once when the budget allows, and again 15 seconds later;
 - the Paste cell's `get` answers 451 `{"error":"quarantined"}`, so every SSH
   verb on it fails with `hostthis: this paste is quarantined by the
   operator` (exit 4) and its owner can neither change nor delete it. 451 is
@@ -5272,14 +5298,15 @@ outside its operations. Nothing logs which token a request carried.
 - **The read token**, `HOSTTHIS_READ_TOKEN`, for operator tools that only
   look: `/paste/{get,versions,resolve,exists,operatorrow,roomindex,head}`,
   `/identity/{bytes,list,firstSeen,subnetlist}`, `/denylist/list`,
-  `/abuse/{list,audit,bans}`, `/room/{count,meta,get,scan}`, and `GET
-  /blob/<key>`. It reads content and owner identities, so it is still a
+  `/abuse/{list,audit,bans}`, `/room/{count,meta,get,scan}`,
+  `/purge/status`, and `GET /blob/<key>`. It reads content and owner identities, so it is still a
   secret.
 - **The admin token**, `HOSTTHIS_ADMIN_TOKEN`, for the operator's abuse tools:
   everything the read token opens, plus the operator routes in the table
-  below, `/denylist/{add,remove}`, and the two deletions a takedown makes
-  (`/paste/remove` and `DELETE /blob?prefix=`). It cannot create or change
-  content.
+  below, `/denylist/{add,remove}`, the two deletions a takedown makes
+  (`/paste/remove` and `DELETE /blob?prefix=`), and `/purge/enqueue`, so a
+  takedown's purge goes through the purge queue like every other. It cannot
+  create or change content.
 - **The watcher token**, described after the table.
 
 The narrower tokens are accepted from any address, and name their operation by
@@ -5325,14 +5352,16 @@ operator routes skip:
   escalates to a person instead. Quarantines are not capped: they are
   reversible and keep everything.
 
-Every action, accepted or refused, is appended to the audit log. The purge
-uses `HOSTTHIS_CF_PURGE_TOKEN` and `HOSTTHIS_CF_ZONE_ID`; without them the
-answer says `purged: false` and the edge keeps what it held until its TTL.
-`purged` reports the first purge only: `false` with the credential set means
-the API refused it and the later purges are its retries. An owner ban's
-cascade purges each host it quarantines, releases or deletes, and purges again
-every 15 seconds, up to 20 times, any host whose purge the API refused for a
-reason a later call can fix (its rate limit, a server error, no answer).
+Every action, accepted or refused, is appended to the audit log. A
+quarantine or release answers with two purge fields. `purgeQueued` is true
+once the purge queue holds the slug: from then the purge cannot be lost.
+`purged` is true when the first purge call had already gone out by the time
+of the answer; false with `purgeQueued` true means it is waiting for budget.
+Both are false when the deployment names no purge credential (the edge keeps
+what it held until its TTL) or the queue could not be reached, which is
+logged; the change itself stands. An owner ban's cascade queues an urgent
+purge of each host it quarantines, releases or deletes, and offers the queue
+again every 15 seconds any it could not hand over.
 
 ---
 
@@ -5452,9 +5481,8 @@ file). Defaults in parens:
                          / HOSTTHIS_SSH_MAX_SESSION         longest an SSH connection may last       (2h)
 
 # CDN / cache purger
-                         / HOSTTHIS_CACHE_BACKEND           noop | cloudflare                       (noop)
-                         / HOSTTHIS_CF_PURGE_TOKEN          CF token (Cache:Purge scope only)       (required if cloudflare)
-                         / HOSTTHIS_CF_ZONE_ID              CF zone id for the apex                 (required if cloudflare)
+                         / HOSTTHIS_CACHE_BACKEND           noop | worker (the Worker's purge queue) (noop)
+                         / HOSTTHIS_CACHE_SKIP_OWNERS       owners whose writes purge nothing        (unset)
                          / HOSTTHIS_CDN_TTL                 CDN-only freshness of small site files  (off; needs a purging backend)
 
 # Admission and screening
@@ -5492,8 +5520,10 @@ HOSTTHIS_ADMIN_TOKEN           abuse-admin token for operator tools             
 HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on, and owners
                                the default room rules skip                       (unset)
 HOSTTHIS_DEFAULT_ROOM_RULES    on: small-text rules for other apps' rooms        (off)
-HOSTTHIS_CF_PURGE_TOKEN        cache-purge token for quarantine                  (unset: no purge)
+HOSTTHIS_CF_PURGE_TOKEN        cache-purge token of the purge queue              (unset: no purge)
 HOSTTHIS_CF_ZONE_ID            zone that token purges                            (unset)
+HOSTTHIS_PURGE_BUDGET          purge calls: "<per min>/<burst>,<per min>/<burst>",
+                               ordinary then urgent                              (3/15,1/5)
 ```
 
 See "Public and internal hosts". A deployment runs the bundled Worker,

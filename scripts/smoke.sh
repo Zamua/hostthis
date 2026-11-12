@@ -42,9 +42,13 @@ KEY="${HOSTTHIS_SMOKE_KEY:-$HOME/.config/hostthis/smoke_id_ed25519}"
 SSH_PORT="${HOSTTHIS_SSH_PORT:-22}"
 SSH="ssh -p $SSH_PORT -i $KEY -o StrictHostKeyChecking=no -o IdentitiesOnly=yes"
 
-# Every read here is a check, not a visit: the header keeps it out of the
-# instance's activity events (docs/SPEC.md "Activity events").
-curl() { command curl -H 'X-Activity-Skip: 1' "$@"; }
+# Every read here is a check, not a visit: the first header keeps it out of
+# the instance's activity events (docs/SPEC.md "Activity events"). The second
+# makes it conditional on a validator nothing has, so it is answered in full
+# and never stored at the edge (docs/SPEC.md "Caches"): the suite's writes
+# then need no purge, and an instance can exempt the smoke key from purging
+# (HOSTTHIS_CACHE_SKIP_OWNERS) so a run spends none of the purge budget.
+curl() { command curl -H 'X-Activity-Skip: 1' -H 'If-None-Match: "smoke-no-fill"' "$@"; }
 
 # slug_from_url extracts the 8-char slug from a hostthis URL. Handles
 # both URL shapes the server can emit:

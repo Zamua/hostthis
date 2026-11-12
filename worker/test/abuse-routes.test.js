@@ -64,46 +64,59 @@ test("the actor and time come from the route, never the body", async () => {
   assert.deepEqual(calls[0].body, { actor: "watcher", now: 42, slug: "abcd2345", reason: "r" });
 });
 
-test("a quarantine purges the slug's host now and again after the race window", async () => {
-  const { env: e } = env({ HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" });
-  const purges = [];
-  const fetcher = async (url, init) => { purges.push([url, JSON.parse(init.body).hosts]); return new Response("{}"); };
-  const waits = [];
-  const ctx = { waitUntil: (p) => waits.push(p) };
-  let slept = 0;
-  const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e, ctx,
-    new URL(ORIGIN + "/abuse/quarantine"), "operator", { fetcher, sleep: async (ms) => { slept = ms; } });
-  assert.equal((await res.json()).purged, true);
-  await Promise.all(waits);
-  assert.equal(slept, 15_000);
-  assert.deepEqual(purges, [
-    ["https://api.cloudflare.com/client/v4/zones/z/purge_cache", ["abcd2345.hostthis.dev"]],
-    ["https://api.cloudflare.com/client/v4/zones/z/purge_cache", ["abcd2345.hostthis.dev"]],
-  ]);
+const PURGING = { HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" };
+
+// A PURGE namespace recording each enqueue and answering as told.
+function purgeQueue(answer) {
+  const asked = [];
+  const cell = {
+    async fetch(request) {
+      asked.push(await request.json());
+      return answer();
+    },
+  };
+  return { asked, ns: { idFromName: (id) => id, get: () => cell } };
+}
+
+test("a quarantine and a release queue an urgent purge of the slug", async () => {
+  for (const [path, sent] of [["/abuse/quarantine", true], ["/abuse/release", false], ["/watcher/quarantine", true]]) {
+    const queue = purgeQueue(() => Response.json({ configured: true, queued: 1, sent }));
+    const { env: e } = env({ ...PURGING, PURGE: queue.ns });
+    const actor = path.startsWith("/watcher/") ? "watcher" : "operator";
+    const res = await abuseRoute(req(path, FULL, { slug: "abcd2345", reason: "r" }), e, null, new URL(ORIGIN + path), actor);
+    const body = await res.json();
+    assert.deepEqual([body.purged, body.purgeQueued], [sent, true], path);
+    assert.deepEqual(queue.asked, [{ slugs: ["abcd2345"], urgent: true }], path);
+  }
 });
 
-test("a purge the API refused is followed by a third, one rate-limit interval after the second", async () => {
-  for (const refused of [[429, 200, 200], [200, 429, 200], [429, 429, 200], [503, 200, 200]]) {
-    const { env: e } = env({ HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" });
-    const statuses = [...refused];
-    const fetcher = async () => new Response("{}", { status: statuses.shift() });
-    const waits = [];
-    const slept = [];
-    const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e,
-      { waitUntil: (p) => waits.push(p) }, new URL(ORIGIN + "/abuse/quarantine"), "operator",
-      { fetcher, sleep: async (ms) => { slept.push(ms); } });
-    assert.equal((await res.json()).purged, refused[0] === 200, String(refused));
-    await Promise.all(waits);
-    assert.deepEqual(statuses, [], String(refused));
-    assert.deepEqual(slept, [15_000, 13_000], String(refused));
-  }
+test("a change whose purge could not be queued still answers, and says so", async () => {
+  const queue = purgeQueue(() => new Response("down\n", { status: 500 }));
+  const { env: e, calls } = env({ ...PURGING, PURGE: queue.ns });
+  const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e, null,
+    new URL(ORIGIN + "/abuse/quarantine"), "operator");
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.deepEqual([body.ok, body.purged, body.purgeQueued], [true, false, false]);
+  assert.equal(calls.length, 1, "the quarantine itself was made");
+});
+
+test("a refused change queues no purge", async () => {
+  const queue = purgeQueue(() => Response.json({ configured: true, queued: 1, sent: true }));
+  const { env: e } = env({ ...PURGING, PURGE: queue.ns });
+  e.ABUSE = { idFromName: (id) => id, get: () => ({ fetch: async () => Response.json({ error: "no-such-paste" }, { status: 404 }) }) };
+  const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e, null,
+    new URL(ORIGIN + "/abuse/quarantine"), "operator");
+  assert.equal(res.status, 404);
+  assert.deepEqual(queue.asked, []);
 });
 
 test("without a purge credential the answer says so", async () => {
   const { env: e } = env();
   const res = await abuseRoute(req("/abuse/quarantine", FULL, { slug: "abcd2345", reason: "r" }), e, null,
     new URL(ORIGIN + "/abuse/quarantine"), "operator");
-  assert.equal((await res.json()).purged, false);
+  const body = await res.json();
+  assert.deepEqual([body.purged, body.purgeQueued], [false, false]);
 });
 
 test("GET /watcher/refused-bans validates its query and answers ISO times, GET only", async () => {

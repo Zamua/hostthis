@@ -139,15 +139,18 @@ const READ_SCOPE = {
   paste: ["get", "versions", "resolve", "exists", "operatorrow", "roomindex", "head"],
   identity: ["bytes", "list", "firstSeen", "subnetlist"],
   denylist: ["list"],
+  purge: ["status"],
   abuse: ["list", "audit", "bans"],
   room: ["count", "meta", "get", "scan"],
 };
 
 // What the admin token may call beyond that: the operator's abuse actions,
-// the denylist, and the two deletions a takedown makes.
+// the denylist, and the two deletions a takedown makes with the purge that
+// follows them.
 const ADMIN_SCOPE = {
   paste: ["remove"],
   denylist: ["add", "remove"],
+  purge: ["enqueue"],
   abuse: ["quarantine", "release", "room-delete", "ban-owner", "unban-owner"],
 };
 

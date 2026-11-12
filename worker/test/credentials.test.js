@@ -6,6 +6,7 @@ import { SCOPED_OPS } from "../src/auth.js";
 import { DENYLIST_OPS } from "../src/cells/denylist.js";
 import { IDENTITY_OPS } from "../src/cells/identity.js";
 import { PASTE_OPS } from "../src/cells/paste.js";
+import { PURGE_OPS } from "../src/cells/purge.js";
 import { ROOM_OPS } from "../src/cells/room.js";
 import worker from "../src/index.js";
 
@@ -140,6 +141,34 @@ test("the read token reads and nothing else, from any address", async () => {
   }
 });
 
+test("the purge queue's status reads with any token, and the read token cannot enqueue", async () => {
+  const purging = { HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "example.test" };
+  const calls = [];
+  const e = env({ HOSTTHIS_READ_TOKEN: READ, HOSTTHIS_ADMIN_TOKEN: ADMIN, ...purging }, calls);
+  e.PURGE = {
+    idFromName: (id) => id,
+    get: () => ({
+      async fetch(request) {
+        calls.push(`PURGE ${new URL(request.url).pathname}`);
+        return Response.json({});
+      },
+    }),
+  };
+  for (const token of [READ, ADMIN, FULL]) {
+    assert.equal((await call(e, "/purge/status", { token })).status, 200, token);
+  }
+  assert.deepEqual(await call(e, "/purge/status"), REFUSED);
+  calls.length = 0;
+  for (const token of [READ, undefined]) {
+    assert.deepEqual(await call(e, "/purge/enqueue", { method: "POST", token, body: '{"slugs":["abcd2345"]}' }), REFUSED);
+  }
+  assert.deepEqual(calls, []);
+  for (const token of [ADMIN, FULL]) {
+    assert.equal((await call(e, "/purge/enqueue", { method: "POST", token, body: '{"slugs":["abcd2345"]}' })).status, 200);
+  }
+  assert.deepEqual(calls, ["PURGE /purge/enqueue", "PURGE /purge/enqueue"]);
+});
+
 test("the admin token adds the abuse actions, the denylist and a takedown's deletions, and no more", async () => {
   const e = (calls) => env({ HOSTTHIS_READ_TOKEN: READ, HOSTTHIS_ADMIN_TOKEN: ADMIN }, calls);
   const allowed = [
@@ -183,11 +212,16 @@ test("a narrower token forwards reads to the public surface, and only the full t
 });
 
 test("every scoped operation is an operation of its cell, and every read-scope one is a read there", () => {
-  const tables = { paste: PASTE_OPS, identity: IDENTITY_OPS, denylist: DENYLIST_OPS, room: ROOM_OPS };
+  const tables = { paste: PASTE_OPS, identity: IDENTITY_OPS, denylist: DENYLIST_OPS, room: ROOM_OPS, purge: PURGE_OPS };
   for (const [family, ops] of Object.entries(SCOPED_OPS.read)) {
     for (const op of ops) {
       if (family === "abuse") {
         assert.ok(ABUSE_ROUTES.operator[`/abuse/${op}`] && !ABUSE_ROUTES.operator[`/abuse/${op}`].fields, `abuse ${op} is not a read route`);
+        continue;
+      }
+      if (family === "purge") {
+        // The router answers it itself, on GET only (purgeRoute).
+        assert.equal(op, "status");
         continue;
       }
       assert.ok(tables[family][op], `${family} has no op ${op}`);
