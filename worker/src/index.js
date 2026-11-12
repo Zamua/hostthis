@@ -1,10 +1,12 @@
 // The Worker entry: the host-picked routers, and the cell classes the runtime
 // binds by name (wrangler.jsonc durable_objects).
 import { abuseRoute } from "./abuse-routes.js";
+import { countingPageReads } from "./activity.js";
 import { bearerIs, credentialScope, scopePermits } from "./auth.js";
 import { BLOB_PATH, handleBlob } from "./blobs.js";
 import { TURN_CELL } from "./cells/turn.js";
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
+import { CONTENT_CACHE_CONTROL } from "./public/reads.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
 
@@ -118,7 +120,8 @@ export default {
     }
     const host = normalizeHost(new URL(request.url).hostname);
     if (withinApex(host, apex)) {
-      return publicRouter(request, env, host, false, { ctx, reads: publicReads(env) });
+      // Direct reads only: hostthisd answers a forwarded read's reader itself.
+      return publicRouter(request, env, host, false, { ctx, reads: countingPageReads(publicReads(env), CONTENT_CACHE_CONTROL) });
     }
     if (!env.HOSTTHIS_WORKER_TOKEN) {
       return new Response("internal routes need HOSTTHIS_WORKER_TOKEN\n", { status: 503 });

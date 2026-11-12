@@ -1,3 +1,4 @@
+import { notePublish, noteRoomCreated } from "../activity.js";
 import { b64url } from "../solid/jose.js";
 import { ECDSA_P256, VAPID_KEY, VAPID_TTL_MS, httpsOrigin, rawPoint, signVapid } from "../push.js";
 import { decodeServedManifest, manifestObjects, resolveRead } from "../read.js";
@@ -278,6 +279,9 @@ export class Paste {
         updates.set(manifestKey(1), body.row.manifest);
       }
       await tx.put(Object.fromEntries(updates));
+      if (body.row.status === "ready") {
+        notePublish(this.env, this.state, body.row.identity, body.row.kind);
+      }
       return new Response(null, { status: 204 });
     });
   }
@@ -327,6 +331,9 @@ export class Paste {
         writes.roomTotal = (await this.roomTotal()) + 1;
       }
       await this.state.storage.put(writes);
+      if (body.fresh) {
+        noteRoomCreated(this.env, this.state);
+      }
     }
     return new Response(null, { status: 204 });
   }
@@ -919,11 +926,13 @@ export class Paste {
   }
 
   async publishAppend(pending) {
+    let published = false;
     await this.state.storage.transaction(async (tx) => {
       const current = await tx.get(ARTIFACT_PENDING);
       if (!samePending(current, pending, DECIDE)) {
         return;
       }
+      published = true;
       await splitLegacyVersions(tx);
       const row = await tx.get("row");
       const { manifest, ...version } = pending.mutation;
@@ -955,6 +964,9 @@ export class Paste {
       }
       await tx.put(Object.fromEntries(updates));
     });
+    if (published) {
+      notePublish(this.env, this.state, pending.owner, pending.mutation.kind);
+    }
   }
 
   // The grant already stands at pending.version, so the release is the next
@@ -1503,6 +1515,7 @@ export class Paste {
     if (!await this.queueProjection(row, ["status"])) {
       return Response.json({ changed: false, reason: "projection-unavailable" }, { status: 502 });
     }
+    notePublish(this.env, this.state, row.identity, row.kind);
     return Response.json({ changed: true, status: row.status });
   }
 }
