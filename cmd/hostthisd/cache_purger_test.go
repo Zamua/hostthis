@@ -7,69 +7,79 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
-	"sync"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/cache"
+	"github.com/Zamua/hostthis/internal/domain"
 	"github.com/Zamua/hostthis/internal/service"
 )
 
-type purgeRecorder struct {
-	mu    sync.Mutex
-	calls []*http.Request
-	files [][]string
-}
+// The worker backend enqueues a slug's purge at the Worker with the Worker
+// token, shutdown sends what is waiting, and purges after shutdown are refused.
+func TestBuildCachePurgerEnqueuesAtTheWorker(t *testing.T) {
+	type call struct {
+		path, auth string
+		body       struct {
+			Slugs  []string `json:"slugs"`
+			Urgent bool     `json:"urgent"`
+		}
+	}
+	calls := make(chan call, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := call{path: r.URL.Path, auth: r.Header.Get("Authorization")}
+		_ = json.NewDecoder(r.Body).Decode(&c.body)
+		calls <- c
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("HOSTTHIS_CACHE_BACKEND", "worker")
+	t.Setenv("HOSTTHIS_WORKER_ENDPOINT", srv.URL)
+	t.Setenv("HOSTTHIS_WORKER_TOKEN", "token")
+	purger, shutdown, err := buildCachePurger(log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
 
-func (p *purgeRecorder) RoundTrip(r *http.Request) (*http.Response, error) {
-	var body map[string][]string
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	p.mu.Lock()
-	p.calls = append(p.calls, r)
-	p.files = append(p.files, append(body["hosts"], body["prefixes"]...))
-	p.mu.Unlock()
-	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"success":true}`)), Header: http.Header{}}, nil
-}
-
-// The cloudflare backend purges a slug's host through the zone's API with the
-// token, shutdown sends what is queued, and purges after shutdown are refused.
-func TestBuildCachePurgerSendsCloudflarePurges(t *testing.T) {
-	rec := &purgeRecorder{}
-	orig := http.DefaultTransport
-	http.DefaultTransport = rec
-	t.Cleanup(func() { http.DefaultTransport = orig })
-	t.Setenv("HOSTTHIS_CACHE_BACKEND", "cloudflare")
-	t.Setenv("HOSTTHIS_CF_ZONE_ID", "zone")
-	t.Setenv("HOSTTHIS_CF_PURGE_TOKEN", "token")
-	purger, shutdown := buildCachePurger(log.New(io.Discard, "", 0), "paste.test", "subdomain")
-
-	if err := purger.PurgePaste("abcd2345"); err != nil {
+	if err := purger.PurgeRemoved("abcd2345"); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 	if err := shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown: %v", err)
 	}
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if len(rec.calls) != 1 {
-		t.Fatalf("purge requests = %d, want 1", len(rec.calls))
+	c := <-calls
+	if c.path != "/purge/enqueue" || c.auth != "Bearer token" {
+		t.Fatalf("enqueue sent to %s with %q", c.path, c.auth)
 	}
-	r := rec.calls[0]
-	if r.URL.String() != "https://api.cloudflare.com/client/v4/zones/zone/purge_cache" || r.Header.Get("Authorization") != "Bearer token" {
-		t.Fatalf("purge sent to %s with %q", r.URL, r.Header.Get("Authorization"))
-	}
-	if got := rec.files[0]; len(got) != 1 || got[0] != "abcd2345.paste.test" {
-		t.Fatalf("purged %v, want the slug's host", got)
+	if len(c.body.Slugs) != 1 || c.body.Slugs[0] != "abcd2345" || !c.body.Urgent {
+		t.Fatalf("enqueued %+v, want the slug, urgent", c.body)
 	}
 	if err := purger.PurgePaste("abcd2345"); !errors.Is(err, cache.ErrClosed) {
 		t.Fatalf("purge after shutdown = %v, want ErrClosed", err)
 	}
 }
 
+func TestBuildCachePurgerRefusesUnknownBackends(t *testing.T) {
+	t.Setenv("HOSTTHIS_CACHE_BACKEND", "cloudflare")
+	if _, _, err := buildCachePurger(log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("an unknown backend was accepted")
+	}
+}
+
+func TestPurgeExempt(t *testing.T) {
+	if purgeExempt(" , ") != nil {
+		t.Fatal("an empty list exempts someone")
+	}
+	listed, _ := domain.OwnerFromKeyFingerprint("SHA256:aaaa")
+	other, _ := domain.OwnerFromKeyFingerprint("SHA256:bbbb")
+	exempt := purgeExempt("key:SHA256:cccc, key:SHA256:aaaa")
+	if !exempt(listed) || exempt(other) {
+		t.Fatalf("exempt(listed)=%v exempt(other)=%v", exempt(listed), exempt(other))
+	}
+}
+
 func TestParseCDNTTL(t *testing.T) {
-	purging := cache.NewRepurging(cache.Noop{}, time.Hour)
-	t.Cleanup(func() { _ = purging.Shutdown(context.Background()) })
+	purging := &cache.Queue{}
 	cases := []struct {
 		name    string
 		raw     string

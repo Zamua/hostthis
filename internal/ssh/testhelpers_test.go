@@ -176,7 +176,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	sshSrv := &hostssh.Server{
 		ApexDomain: "paste.test",
 		Upload:     upload,
-		Manage:     service.NewCacheInvalidating(manage, o.purger),
+		Manage:     service.NewCacheInvalidating(manage, o.purger, nil),
 		Pastes:     repo,
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
@@ -193,7 +193,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		httpSrv.ApexDomain = "paste.test"
 		deploy := service.NewDeploySite(sites, repo, blobUnit)
 		deploy.Screen = o.screen
-		sshSrv.Deploy = service.NewSiteCacheInvalidating(deploy, o.purger)
+		sshSrv.Deploy = service.NewSiteCacheInvalidating(deploy, o.purger, nil)
 	}
 	var keyGate *service.KeyGate
 	if o.keyGateCap > 0 {

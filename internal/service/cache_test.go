@@ -16,6 +16,7 @@ import (
 type recordingPurger struct {
 	mu       sync.Mutex
 	slugs    []domain.Slug
+	removed  []domain.Slug
 	failNext bool
 }
 
@@ -30,6 +31,14 @@ func (r *recordingPurger) PurgePaste(slug domain.Slug) error {
 	return nil
 }
 
+// PurgeRemoved records the slug as PurgePaste does, and as a removal.
+func (r *recordingPurger) PurgeRemoved(slug domain.Slug) error {
+	r.mu.Lock()
+	r.removed = append(r.removed, slug)
+	r.mu.Unlock()
+	return r.PurgePaste(slug)
+}
+
 func (r *recordingPurger) calls() []domain.Slug {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -39,7 +48,7 @@ func (r *recordingPurger) calls() []domain.Slug {
 func (r *recordingPurger) reset() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.slugs = nil
+	r.slugs, r.removed = nil, nil
 }
 
 type assertErr string
@@ -63,7 +72,7 @@ func newPaste(t *testing.T, upload *Upload) domain.Slug {
 func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
-	mgr := NewCacheInvalidating(manage, purger)
+	mgr := NewCacheInvalidating(manage, purger, nil)
 
 	t.Run("update", func(t *testing.T) {
 		purger.reset()
@@ -97,12 +106,63 @@ func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	})
 }
 
+// A delete is purged as a removal, which queues ahead of content changes; an
+// update is not.
+func TestCacheInvalidating_DeleteIsARemoval(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	purger := &recordingPurger{}
+	mgr := NewCacheInvalidating(manage, purger, nil)
+	slug := newPaste(t, upload)
+	if _, err := mgr.Update(slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(purger.removed) != 0 {
+		t.Fatalf("an update purged as a removal: %v", purger.removed)
+	}
+	if err := mgr.Delete(slug, ownerOf(testOwner)); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(purger.removed) != 1 || purger.removed[0] != slug {
+		t.Fatalf("removals = %v, want [%s]", purger.removed, slug)
+	}
+}
+
+// An exempt owner's writes purge nothing; everyone else's still do.
+func TestCacheInvalidating_ExemptOwnersPurgeNothing(t *testing.T) {
+	upload, manage, _ := newStack(t)
+	purger := &recordingPurger{}
+	exempt := ownerOf(testOwner)
+	mgr := NewCacheInvalidating(manage, purger, func(o domain.Owner) bool { return o == exempt })
+	slug := newPaste(t, upload)
+	if _, err := mgr.Update(slug, exempt, bytes.NewReader(htmlBody(300)), ""); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if err := mgr.Delete(slug, exempt); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := purger.calls(); len(got) != 0 {
+		t.Fatalf("an exempt owner's writes purged %v", got)
+	}
+
+	other := ownerOf("key:someone-else")
+	res, err := upload.Create(bytes.NewReader(htmlBody(200)), other, "", "")
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if err := mgr.Delete(res.Paste.Slug, other); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if got := purger.calls(); len(got) != 1 {
+		t.Fatalf("another owner's delete purged %v", got)
+	}
+}
+
 // rename never changes the bytes served at the public URL, so it must NOT
 // purge.
 func TestCacheInvalidating_RenameDoesNotPurge(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
-	mgr := NewCacheInvalidating(manage, purger)
+	mgr := NewCacheInvalidating(manage, purger, nil)
 
 	slug := newPaste(t, upload)
 	if err := mgr.Rename(slug, ownerOf(testOwner), "a-label"); err != nil {
@@ -118,7 +178,7 @@ func TestCacheInvalidating_RenameDoesNotPurge(t *testing.T) {
 func TestCacheInvalidating_PurgeErrorDoesNotFailOp(t *testing.T) {
 	upload, manage, repo := newStack(t)
 	purger := &recordingPurger{failNext: true}
-	mgr := NewCacheInvalidating(manage, purger)
+	mgr := NewCacheInvalidating(manage, purger, nil)
 
 	slug := newPaste(t, upload)
 	if err := mgr.Delete(slug, ownerOf(testOwner)); err != nil {
@@ -137,7 +197,7 @@ func TestCacheInvalidating_NilPurgerServesMutations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	m := NewCacheInvalidating(manage, nil)
+	m := NewCacheInvalidating(manage, nil, nil)
 	if err := m.Rename(res.Paste.Slug, owner, "renamed"); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
@@ -198,7 +258,7 @@ func TestMutationsPurgeUnlessNothingWasTouched(t *testing.T) {
 		} {
 			t.Run(name+"/"+tc.name, func(t *testing.T) {
 				purger := &recordingPurger{}
-				mgr := NewCacheInvalidating(stubManager{err: tc.err}, purger)
+				mgr := NewCacheInvalidating(stubManager{err: tc.err}, purger, nil)
 				if got := call(mgr, "abc12345"); got != tc.err {
 					t.Fatalf("error passthrough: got %v, want %v", got, tc.err)
 				}
@@ -216,7 +276,7 @@ func TestMutationsPurgeUnlessNothingWasTouched(t *testing.T) {
 func TestUpdateOfAnotherOwnersPasteDoesNotPurge(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
-	mgr := NewCacheInvalidating(manage, purger)
+	mgr := NewCacheInvalidating(manage, purger, nil)
 	slug := newPaste(t, upload)
 	for name, body := range map[string]io.Reader{
 		"html":      bytes.NewReader(htmlBody(300)),
@@ -264,7 +324,7 @@ func TestDeletePurgesUnlessNothingWasTouched(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			purger := &recordingPurger{}
-			mgr := NewCacheInvalidating(stubManager{err: tc.err}, purger)
+			mgr := NewCacheInvalidating(stubManager{err: tc.err}, purger, nil)
 
 			if got := mgr.Delete(domain.Slug("abc12345"), ownerOf(testOwner)); got != tc.err {
 				t.Fatalf("error passthrough: got %v, want %v", got, tc.err)
@@ -283,7 +343,7 @@ func TestDeletePurgesUnlessNothingWasTouched(t *testing.T) {
 func TestDeletePurgeExclusionsMatchRealServiceErrors(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	purger := &recordingPurger{}
-	mgr := NewCacheInvalidating(manage, purger)
+	mgr := NewCacheInvalidating(manage, purger, nil)
 
 	t.Run("own paste purges", func(t *testing.T) {
 		purger.reset()

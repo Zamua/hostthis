@@ -10,4 +10,5 @@ import "github.com/Zamua/hostthis/internal/domain"
 // the operator wants to rely solely on Cache-Control TTL expiry.
 type Noop struct{}
 
-func (Noop) PurgePaste(slug domain.Slug) error { return nil }
+func (Noop) PurgePaste(domain.Slug) error   { return nil }
+func (Noop) PurgeRemoved(domain.Slug) error { return nil }

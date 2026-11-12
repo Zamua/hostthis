@@ -250,36 +250,42 @@ test("a key first seen on a subnet is remembered with its address, and the watch
   assert.deepEqual(feed.body.groups[0].keys.map((k) => k.addr), ["203.0.113.5", "203.0.113.6", null]);
 });
 
-// Cloudflare's purge API answering from a script of statuses, then 200.
-function purgeAPI(t, statuses) {
-  const calls = [];
-  const real = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    calls.push(JSON.parse(init.body).hosts);
-    return new Response("{}", { status: statuses.shift() ?? 200 });
-  };
-  t.after(() => { globalThis.fetch = real; });
-  return calls;
-}
-
 const PURGING = { HOSTTHIS_CF_PURGE_TOKEN: "p", HOSTTHIS_CF_ZONE_ID: "z", HOSTTHIS_APEX_DOMAIN: "hostthis.dev" };
 
-test("a ban's purge the API refuses is tried again until it goes through, then stops", async (t) => {
+// Gives the world a PURGE namespace recording each enqueue; while `down` is
+// set the queue cannot be reached.
+function purgeQueue(w) {
+  const queue = { asked: [], down: false };
+  const cell = {
+    async fetch(request) {
+      if (queue.down) return new Response("down\n", { status: 500 });
+      queue.asked.push(await request.json());
+      return Response.json({ configured: true, queued: 1, sent: true });
+    },
+  };
+  Object.assign(w.abuse.env, PURGING, { PURGE: { idFromName: (id) => id, get: () => cell } });
+  return queue;
+}
+
+test("a ban queues an urgent purge of every slug it quarantines, once", async () => {
   const w = world();
-  Object.assign(w.abuse.env, PURGING);
+  const queue = purgeQueue(w);
   await w.add(OWNER, "aaaa2345");
-  const calls = purgeAPI(t, [429, 503]);
+  await w.add(OWNER, "bbbb2345");
   assert.equal((await call(w.abuse, "banowner", { identity: OWNER, reason: "r", retentionDays: 30, actor: "operator", now: NOW })).status, 200);
   await w.runAlarms(NOW + 10 * 60_000);
-  assert.deepEqual(calls, [["aaaa2345.hostthis.dev"], ["aaaa2345.hostthis.dev"], ["aaaa2345.hostthis.dev"]]);
+  assert.deepEqual(queue.asked, [{ slugs: ["aaaa2345", "bbbb2345"], urgent: true }]);
 });
 
-test("a purge the API never admits stops being retried", async (t) => {
+test("purges a ban could not queue are offered again until the queue takes them", async () => {
   const w = world();
-  Object.assign(w.abuse.env, PURGING);
+  const queue = purgeQueue(w);
+  queue.down = true;
   await w.add(OWNER, "aaaa2345");
-  const calls = purgeAPI(t, Array(500).fill(429));
   await call(w.abuse, "banowner", { identity: OWNER, reason: "r", retentionDays: 30, actor: "operator", now: NOW });
-  await w.runAlarms(NOW + 60 * 60_000);
-  assert.ok(calls.length >= 20 && calls.length <= 22, `purge calls: ${calls.length}`);
+  await w.runAlarms(NOW + 60_000);
+  assert.deepEqual(queue.asked, []);
+  queue.down = false;
+  await w.runAlarms(NOW + 10 * 60_000);
+  assert.deepEqual(queue.asked, [{ slugs: ["aaaa2345"], urgent: true }]);
 });

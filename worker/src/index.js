@@ -5,6 +5,7 @@ import { countingPageReads } from "./activity.js";
 import { bearerIs, credentialScope, scopePermits } from "./auth.js";
 import { BLOB_PATH, handleBlob } from "./blobs.js";
 import { DENYLIST_CELL, denylistPoll } from "./cells/denylist.js";
+import { purgeRoute } from "./cells/purge.js";
 import { TURN_CELL } from "./cells/turn.js";
 import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
 import { CONTENT_CACHE_CONTROL } from "./public/reads.js";
@@ -17,6 +18,7 @@ export { Feed } from "./cells/feed.js";
 export { Identity } from "./cells/identity.js";
 export { IntentLog } from "./cells/intentlog.js";
 export { Paste } from "./cells/paste.js";
+export { Purge } from "./cells/purge.js";
 export { Room } from "./cells/room.js";
 export { Subnet } from "./cells/subnet.js";
 export { Turn } from "./cells/turn.js";
@@ -91,6 +93,9 @@ const internalRouter = {
         return denylistPoll(env);
       }
       return env.DENYLIST.get(env.DENYLIST.idFromName(DENYLIST_CELL)).fetch(request);
+    }
+    if (url.pathname.startsWith("/purge/")) {
+      return purgeRoute(request, env, url);
     }
     if (url.pathname.startsWith("/paste/")) {
       const slug = url.searchParams.get("slug");

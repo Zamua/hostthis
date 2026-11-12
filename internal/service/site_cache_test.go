@@ -45,7 +45,7 @@ func TestSiteWritesPurgeUnlessNothingWasTouched(t *testing.T) {
 		} {
 			t.Run(name+"/"+tc.name, func(t *testing.T) {
 				purger := &recordingPurger{}
-				d := NewSiteCacheInvalidating(stubSites{err: tc.err}, purger)
+				d := NewSiteCacheInvalidating(stubSites{err: tc.err}, purger, nil)
 				if got := call(d, "abc12345"); got != tc.err {
 					t.Fatalf("error passthrough: got %v, want %v", got, tc.err)
 				}
@@ -62,7 +62,7 @@ func TestSiteWritesPurgeUnlessNothingWasTouched(t *testing.T) {
 func TestSiteCacheInvalidating_RealService(t *testing.T) {
 	inner, _, _ := deployFixture(t)
 	purger := &recordingPurger{}
-	d := NewSiteCacheInvalidating(inner, purger)
+	d := NewSiteCacheInvalidating(inner, purger, nil)
 	arc := func(body string) io.Reader {
 		return bytes.NewReader(gzipTar(t, map[string]string{"index.html": body}))
 	}
@@ -101,7 +101,7 @@ func TestSiteCacheInvalidating_RealService(t *testing.T) {
 // An unconfigured CDN (nil purger) still serves every mutation.
 func TestSiteCacheInvalidating_NilPurgerServesMutations(t *testing.T) {
 	inner, _, _ := deployFixture(t)
-	d := NewSiteCacheInvalidating(inner, nil)
+	d := NewSiteCacheInvalidating(inner, nil, nil)
 	owner := ownerOf("key:nil-purger")
 	res, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), owner)
 	if err != nil {

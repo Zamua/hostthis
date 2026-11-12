@@ -37,51 +37,41 @@ var _ PasteManager = (*Manage)(nil)
 // transient CDN issue never turns a mutation into a failure.
 type CacheInvalidating struct {
 	PasteManager
-	purger CachePurger
+	purges
 }
 
 // NewCacheInvalidating wraps inner so its mutating verbs also purge the CDN. A
 // nil purger means no CDN in front and returns inner unwrapped, so the
 // composition root can call this unconditionally.
-func NewCacheInvalidating(inner PasteManager, purger CachePurger) PasteManager {
+func NewCacheInvalidating(inner PasteManager, purger CachePurger, exempt PurgeExempt) PasteManager {
 	if purger == nil {
 		return inner
 	}
-	return &CacheInvalidating{PasteManager: inner, purger: purger}
+	return &CacheInvalidating{PasteManager: inner, purges: purges{purger, exempt}}
 }
 
 func (c *CacheInvalidating) Update(slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error) {
 	res, err := c.PasteManager.Update(slug, owner, body, typeHint)
-	purgeUnlessUntouched(c.purger, slug, err)
+	c.changed(slug, owner, err)
 	return res, err
 }
 
 func (c *CacheInvalidating) Delete(slug domain.Slug, owner domain.Owner) error {
 	err := c.PasteManager.Delete(slug, owner)
-	purgeUnlessUntouched(c.purger, slug, err)
+	c.removed(slug, owner, err)
 	return err
 }
 
 func (c *CacheInvalidating) Pin(slug domain.Slug, owner domain.Owner, verNum int) (domain.Version, error) {
 	ver, err := c.PasteManager.Pin(slug, owner, verNum)
-	purgeUnlessUntouched(c.purger, slug, err)
+	c.changed(slug, owner, err)
 	return ver, err
 }
 
 func (c *CacheInvalidating) Unpin(slug domain.Slug, owner domain.Owner) error {
 	err := c.PasteManager.Unpin(slug, owner)
-	purgeUnlessUntouched(c.purger, slug, err)
+	c.changed(slug, owner, err)
 	return err
-}
-
-// purgeUnlessUntouched purges after a mutation that succeeded or may have. A
-// write can commit and the call still fail (a lost response), leaving the edge
-// serving the old state until its TTL ends; purging a slug that did not change
-// is harmless, so the ambiguous case resolves toward purging.
-func purgeUnlessUntouched(purger CachePurger, slug domain.Slug, err error) {
-	if err == nil || mayHaveMutated(err) {
-		_ = purger.PurgePaste(slug)
-	}
 }
 
 // mayHaveMutated reports whether an error leaves it unknown that nothing was

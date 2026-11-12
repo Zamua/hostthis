@@ -19,6 +19,7 @@
       { "name": "ABUSE", "class_name": "Abuse" },
       { "name": "FEED", "class_name": "Feed" },
       { "name": "TURN", "class_name": "Turn" },
+      { "name": "PURGE", "class_name": "Purge" },
       // Unused by the Worker; celld registers only bound classes, so leftover
       // IntentLog cells need it to activate.
       { "name": "INTENT_LOGS", "class_name": "IntentLog" }
@@ -34,6 +35,7 @@
     { "tag": "v4", "new_sqlite_classes": ["Denylist"] },
     { "tag": "v5", "new_sqlite_classes": ["Abuse"] },
     { "tag": "v6", "new_sqlite_classes": ["Feed"] },
-    { "tag": "v7", "new_sqlite_classes": ["Turn"] }
+    { "tag": "v7", "new_sqlite_classes": ["Turn"] },
+    { "tag": "v8", "new_sqlite_classes": ["Purge"] }
   ]
 }
