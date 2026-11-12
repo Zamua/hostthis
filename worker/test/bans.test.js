@@ -4,7 +4,7 @@ import test from "node:test";
 import { Abuse } from "../src/cells/abuse.js";
 import { Denylist } from "../src/cells/denylist.js";
 import { Paste } from "../src/cells/paste.js";
-import { FakeStorage, state } from "./harness.js";
+import { FakeStorage, denylistEnv, state } from "./harness.js";
 
 const FP = "SHA256:" + "ab".repeat(32);
 const OWNER = "key:" + FP;
@@ -40,7 +40,7 @@ async function pasteCell(identity, slug) {
 function world({ protectedOwners = "" } = {}) {
   const pastes = new Map();
   const index = new Map();
-  const denylist = new Denylist(state(new FakeStorage()));
+  const denylist = new Denylist(state(new FakeStorage()), denylistEnv());
   const deleted = [];
   const ns = (lookup) => ({ idFromName: (name) => name, get: (name) => ({ fetch: (req) => lookup(name).fetch(req) }) });
   const env = {
@@ -191,7 +191,7 @@ function gatedState(storage) {
 
 test("an unban that arrives during an alarm pass is not overwritten by it", async () => {
   const paste = await pasteCell(OWNER, "aaaaaaaa");
-  const denylist = new Denylist(state(new FakeStorage()));
+  const denylist = new Denylist(state(new FakeStorage()), denylistEnv());
   let hold = null; // while set, calls to the paste cell wait on it
   const env = {
     PASTES: {

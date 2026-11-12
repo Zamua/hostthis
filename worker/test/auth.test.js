@@ -48,7 +48,9 @@ const ROUTES = [
   { path: "/paste/get?slug=abc12345", ns: "PASTES" },
   { path: "/room/get?room=app12345%2Fr1", ns: "ROOMS" },
   { path: "/subnet/admit?subnet=10.0.0.0", ns: "SUBNETS" },
-  { path: "/denylist/list", ns: "DENYLIST" },
+  // A poll reads the list's snapshot in the bucket before any cell.
+  { path: "/denylist/list", ns: "PAYLOADS" },
+  { path: "/denylist/remove", ns: "DENYLIST", method: "POST" },
   { path: "/abuse/list", ns: "ABUSE" },
   { path: `/blob/uploads/${"a".repeat(32)}/0`, ns: "PAYLOADS" },
   { path: `/blob?prefix=uploads/${"a".repeat(32)}/`, ns: "PAYLOADS", method: "DELETE" },
