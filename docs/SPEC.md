@@ -4675,11 +4675,14 @@ active publishing keys and usage without keeping who did what:
 | event | written when | index | blobs |
 | --- | --- | --- | --- |
 | `active` | with every `publish` that has an owner | owner hash | `hostthis`, `active`, empty |
-| `publish` | a paste or site first turns ready, or a new version of one is published | owner hash | `hostthis`, `publish`, `paste` or `site` |
-| `publish` | a room is created for the first time | `-` | `hostthis`, `publish`, `room` |
-| `page_read` | the Worker answers a page view on a public host | `-` | `hostthis`, `page_read`, empty |
+| `publish` | a paste or site first turns ready, or a new version of one is published | owner hash, then `:publish` | `hostthis`, `publish`, `paste` or `site` |
+| `publish` | a room is created for the first time | `-:publish` | `hostthis`, `publish`, `room` |
+| `page_read` | the Worker answers a page view on a public host | `-:page_read` | `hostthis`, `page_read`, empty |
 
-Every point carries one double, `1`. A directory upload (a site or a
+Every point carries one double, `1`. The dataset samples per index value, so
+only `active`, which is counted by distinct owners, has the bare owner hash as
+its index; every other event appends its name, and a burst of one event
+cannot sample another away. A directory upload (a site or a
 knowledge base) is a `site`; every other kind is a `paste`. A replayed create
 or a repeated status change writes nothing.
 

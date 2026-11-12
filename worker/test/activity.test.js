@@ -32,7 +32,7 @@ test("an actor is written as 16 hex characters of a keyed hash, never as itself"
   await w.settle();
   assert.deepEqual(w.points, [
     { indexes: [want(OWNER)], blobs: ["hostthis", "active", ""], doubles: [1] },
-    { indexes: [want(OWNER)], blobs: ["hostthis", "publish", "site"], doubles: [1] },
+    { indexes: [`${want(OWNER)}:publish`], blobs: ["hostthis", "publish", "site"], doubles: [1] },
   ]);
   assert.equal(JSON.stringify(w.points).includes("SHA256"), false);
 });
@@ -46,8 +46,8 @@ test("a publish names a paste or a site; a room has no actor", async () => {
   await w.settle();
   // The room's point needs no hash, so it may land first.
   assert.deepEqual(w.points.filter((p) => p.blobs[1] === "publish").map((p) => `${p.indexes[0]} ${p.blobs[2]}`).sort(),
-    ["- room", `${want(OWNER)} paste`, `${want(OWNER)} paste`, `${want(OWNER)} paste`, `${want(OWNER)} site`].sort());
-  assert.equal(w.points.filter((p) => p.blobs[1] === "active").length, 4);
+    ["-:publish room", `${want(OWNER)}:publish paste`, `${want(OWNER)}:publish paste`, `${want(OWNER)}:publish paste`, `${want(OWNER)}:publish site`].sort());
+  assert.deepEqual(w.points.filter((p) => p.blobs[1] === "active").map((p) => p.indexes[0]), Array(4).fill(want(OWNER)));
 });
 
 test("without a dataset, a salt or an owner nothing is written, and a failing write is silent", async () => {
@@ -101,7 +101,7 @@ test("the counted read path answers as the bare one and writes one point per pag
   assert.equal(await first.text(), "x");
   await read(get(), w.env, w.waiter, {});
   await w.settle();
-  assert.deepEqual(w.points, [{ indexes: ["-"], blobs: ["hostthis", "page_read", ""], doubles: [1] }]);
+  assert.deepEqual(w.points, [{ indexes: ["-:page_read"], blobs: ["hostthis", "page_read", ""], doubles: [1] }]);
 });
 
 async function call(cell, op, body) {

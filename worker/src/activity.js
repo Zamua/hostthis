@@ -24,7 +24,11 @@ export async function actorHash(salt, id) {
   return [...new Uint8Array(mac, 0, HASH_HEX / 2)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-function write(dataset, index, action, detail) {
+// The dataset samples per index value. Only `active` is counted by distinct
+// actors, so it alone keeps the bare actor; every other action has an index
+// value of its own, and a burst of one cannot sample another away.
+function write(dataset, actor, action, detail) {
+  const index = action === "active" ? actor : `${actor}:${action}`;
   dataset.writeDataPoint({ indexes: [index], blobs: [APP, action, detail], doubles: [1] });
 }
 
