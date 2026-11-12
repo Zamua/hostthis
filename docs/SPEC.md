@@ -4666,6 +4666,39 @@ log line means the request never reached this process. The line names the
 slug and, on the Worker, the client's address (`addr=`); no headers and no
 payload are logged.
 
+### Activity events
+
+Optional, and off unless the Worker has an Analytics Engine dataset bound as
+`ACTIVITY`. The Worker then writes one data point per event, for counting
+active publishing keys and usage without keeping who did what:
+
+| event | written when | index | blobs |
+| --- | --- | --- | --- |
+| `active` | with every `publish` that has an owner | owner hash | `hostthis`, `active`, empty |
+| `publish` | a paste or site first turns ready, or a new version of one is published | owner hash | `hostthis`, `publish`, `paste` or `site` |
+| `publish` | a room is created for the first time | `-` | `hostthis`, `publish`, `room` |
+| `page_read` | the Worker answers a page view on a public host | `-` | `hostthis`, `page_read`, empty |
+
+Every point carries one double, `1`. A directory upload (a site or a
+knowledge base) is a `site`; every other kind is a `paste`. A replayed create
+or a repeated status change writes nothing.
+
+The owner hash is the first 16 hex characters of HMAC-SHA256 keyed by the
+`ACTIVITY_SALT` secret over `hostthis:` followed by the owner identity. The
+identity itself, a slug, a room id, a path and a client address are never
+written. Without the salt no owner event is written; events with no actor
+still are. A room's creator is a visitor with no key, so that event has no
+actor and writes no `active`.
+
+A page view is a GET by a browser that the Worker answered with a paste's
+HTML (200), or revalidated on a navigation (304). Status pages, subresources,
+HEAD requests, a request with no User-Agent and one naming an automated client
+are not counted. Only reads the Worker answers directly are counted: a read
+hostthisd answers, itself or by forwarding to the Worker, is not.
+
+A write is never awaited and its failure is dropped, so an event can be lost
+and none can fail or delay the request it describes.
+
 ### Abuse log on the Worker's public surface
 
 The Worker logs one JSON line per abuse event on the rooms surface, and
