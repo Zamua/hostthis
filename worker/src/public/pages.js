@@ -38,11 +38,9 @@ export const LOADING_PAGE = statusPage("preparing your paste",
   .dot:nth-child(2) { animation-delay: .15s; }
   .dot:nth-child(3) { animation-delay: .3s; }
   @keyframes pulse { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
-  .muted { color: #8a8a8a; margin-top: .75rem; font-size: 13px; }
 `,
   `    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
     <p>preparing your paste</p>
-    <p class="muted">this page refreshes automatically</p>
 `);
 
 export const FAILED_PAGE = statusPage("paste unavailable", "",
@@ -51,5 +49,5 @@ export const FAILED_PAGE = statusPage("paste unavailable", "",
   .muted { color: #8a8a8a; font-size: 13px; }
 `,
   `    <h1>this paste could not be saved</h1>
-    <p class="muted">the upload did not finish writing to storage. try uploading it again.</p>
+    <p class="muted">upload it again.</p>
 `);

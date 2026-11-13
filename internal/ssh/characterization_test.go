@@ -624,15 +624,14 @@ func TestSybilGate_Characterization(t *testing.T) {
 				t.Fatalf("expected %q in refusal, got %q", want, stderr)
 			}
 		}
-		// "(b) wait until <YYYY-MM-DD HH:MM UTC> - the oldest entry ages out
-		// then": the prefix (2-space indent included) byte-exact, the
+		// "(b) wait until <YYYY-MM-DD HH:MM UTC>": the prefix (2-space indent included) byte-exact, the
 		// timestamp by shape since it is now+window.
 		_, after, ok := strings.Cut(stderr, "  (b) wait until ")
 		if !ok {
 			t.Fatalf("missing '(b) wait until ' line in refusal:\n%q", stderr)
 		}
 		line, _, _ := strings.Cut(after, "\n")
-		wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC - the oldest entry ages out then$`)
+		wantTail := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC$`)
 		if !wantTail.MatchString(line) {
 			t.Fatalf("'(b) wait until ' tail drift:\n got: %q\nwant pattern: %q", line, wantTail.String())
 		}

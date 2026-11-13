@@ -301,7 +301,7 @@
   var db = null;
   async function initDuck(statusEl) {
     if (db) return db;
-    statusEl.textContent = "loading engine (~7 MB, once)…";
+    statusEl.textContent = "loading SQL engine…";
     var duckdb = await import("/_hostthis/duckdb-browser.mjs");
     var bundle = {
       mainModule: "/_hostthis/duckdb-eh.wasm",

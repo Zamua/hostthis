@@ -29,18 +29,16 @@ var verbDescriptors = map[string]verbDescriptor{
 		Name:      "get",
 		Signature: "ssh {{apex}} get <slug>",
 		Description: "Streams the stored content for one of your pastes to " +
-			"stdout. Owner-only; foreign slugs return `not found` (no " +
-			"existence-probing).",
+			"stdout. Owner-only; another key's slug returns `not found`.",
 		Examples: []string{
 			"ssh {{apex}} get abc12345",
 			"ssh {{apex}} get abc12345 | less",
 		},
 	},
 	"list": {
-		Name:      "list",
-		Signature: "ssh {{apex}} list [-o json]",
-		Description: "List your pastes, most recently updated first. Empty list " +
-			"prints `no active pastes` on stderr.",
+		Name:        "list",
+		Signature:   "ssh {{apex}} list [-o json]",
+		Description: "List your pastes, most recently updated first.",
 		Examples: []string{
 			"ssh {{apex}} list",
 			"ssh {{apex}} list -o json | jq -r '.[].slug'",
@@ -49,11 +47,9 @@ var verbDescriptors = map[string]verbDescriptor{
 	"url": {
 		Name:      "url",
 		Signature: "ssh {{apex}} url <slug>",
-		Description: "Print just the shareable URL for an existing paste (or " +
-			"deployed site) on stdout - handy for re-copying a link without " +
-			"re-uploading. No ownership check (the URL is a public " +
-			"capability), but an unknown slug returns `not found` " +
-			"(exit 4).",
+		Description: "Print the shareable URL for an existing paste or site on " +
+			"stdout. Works for any slug, not only yours; an unknown slug " +
+			"returns `not found` (exit 4).",
 		Examples: []string{
 			"ssh {{apex}} url abc12345",
 			"ssh {{apex}} url abc12345 | pbcopy",
@@ -84,8 +80,7 @@ var verbDescriptors = map[string]verbDescriptor{
 		Name:      "delete",
 		Signature: "ssh {{apex}} delete <slug> [<ver>]",
 		Description: "One-arg form wipes the whole paste (all versions). Two-arg " +
-			"form deletes a single historical version's bytes and leaves " +
-			"a tombstone row so the version number isn't reused. Cannot " +
+			"form deletes one earlier version's bytes. Cannot " +
 			"delete the currently-served version; pin a different version " +
 			"first.",
 		Examples: []string{
@@ -105,12 +100,9 @@ var verbDescriptors = map[string]verbDescriptor{
 		},
 	},
 	"versions": {
-		Name:      "versions",
-		Signature: "ssh {{apex}} versions <slug> [-o json]",
-		Description: "Show the version timeline for one paste, newest first. The " +
-			"middle column marks the currently-served version and any " +
-			"tombstoned (deleted) versions. Footer on stderr shows pin " +
-			"state.",
+		Name:        "versions",
+		Signature:   "ssh {{apex}} versions <slug> [-o json]",
+		Description: "Show the version timeline for one paste, newest first.",
 		Examples: []string{
 			"ssh {{apex}} versions abc12345",
 			"ssh {{apex}} versions abc12345 -o json | jq '.versions'",
@@ -155,8 +147,8 @@ var verbDescriptors = map[string]verbDescriptor{
 		Signature: "ssh {{apex}} whoami [-o json]",
 		Description: "Show the identity the server sees for this session (the " +
 			"SHA256 fingerprint of the connecting ssh key), the active " +
-			"paste count, the quota in use, and the current Sybil-gate " +
-			"subnet budget.",
+			"paste count, the quota in use, and how many new keys your " +
+			"network can still register today.",
 		Examples: []string{
 			"ssh {{apex}} whoami",
 			"ssh {{apex}} whoami -o json | jq .quota_bytes",
@@ -169,9 +161,9 @@ var verbDescriptors = map[string]verbDescriptor{
 			"profile URL your provider shows (https://<you>.solidcommunity.net/profile/card#me). " +
 			"`pod link` prints a URL, valid for 15 minutes, that a person must open: they " +
 			"sign in to the pod provider and approve, and the link takes effect then. " +
-			"hostthis gets read and write on <pod>/hostthis/ only. Only bytes move: every " +
-			"upload made while linked, new versions included, is stored in the pod, and " +
-			"slugs, URLs and quota work the same. `pod unlink` sends new uploads back to " +
+			"hostthis gets read and write on <pod>/hostthis/ only. Every " +
+			"upload made while linked, new versions included, is stored in the pod; " +
+			"slugs, URLs and quota stay on hostthis. `pod unlink` sends new uploads back to " +
 			"hostthis; versions in the pod keep serving while the folder stays shared.",
 		Examples: []string{
 			"ssh {{apex}} pod link https://alice.example/profile/card#me",
