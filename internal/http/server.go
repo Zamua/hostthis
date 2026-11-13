@@ -382,11 +382,9 @@ var loadingPageHTML = statusPage("preparing your paste",
   .dot:nth-child(2) { animation-delay: .15s; }
   .dot:nth-child(3) { animation-delay: .3s; }
   @keyframes pulse { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
-  .muted { color: #8a8a8a; margin-top: .75rem; font-size: 13px; }
 `,
 	`    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
     <p>preparing your paste</p>
-    <p class="muted">this page refreshes automatically</p>
 `)
 
 // failedPageHTML is the body served for a failed paste, one whose blob write
@@ -397,7 +395,7 @@ var failedPageHTML = statusPage("paste unavailable", "",
   .muted { color: #8a8a8a; font-size: 13px; }
 `,
 	`    <h1>this paste could not be saved</h1>
-    <p class="muted">the upload did not finish writing to storage. try uploading it again.</p>
+    <p class="muted">upload it again.</p>
 `)
 
 // servePending serves the loading page for a pending paste. no-store is

@@ -642,17 +642,10 @@
     }
     // The reasons are independent and can both hold, so they are reported from
     // what actually stopped the walk rather than inferred from the count.
-    var why = [];
-    if (st.bounded) {
-      why.push("the index stops at " + st.maxFiles + " documents or " +
-        Math.round(st.maxBytes / (1024 * 1024)) + " MiB of markdown");
-    }
-    if (st.failures) {
-      why.push(st.failures + " document(s) could not be read");
-    }
     noteEl.hidden = false;
-    noteEl.textContent = "Partial index: text and headings cover " + st.indexed + " of " +
-      st.total + " documents, because " + why.join(" and ") + ". File names still match across the whole base.";
+    noteEl.textContent = "Text search covers " + st.indexed + " of " + st.total + " documents" +
+      (st.failures ? "; " + st.failures + " document(s) could not be read" : "") +
+      ". File names match across the whole base.";
   }
 
   function hideResults() {

@@ -486,7 +486,7 @@ With* options. Refusal behavior is pinned by
   compress under the cap, the server stops reading after 100 MiB of
   INPUT regardless of how well it compresses. Anything that requires
   reading more than that is "too big to evaluate" and rejected with
-  `upload too large to consider`. Generous enough that no legitimate
+  `upload exceeds 100 MiB before compression`. Generous enough that no legitimate
   text payload ever hits this; tight enough to bound the read. It
   binds single-file pastes only; a site archive has its own input cap
   (see "Safe-untar").
@@ -533,7 +533,7 @@ With* options. Refusal behavior is pinned by
   spill file's size is compared against the 10 MiB cap. If it fits, the
   file streams to the configured `BlobStore` under the upload's own
   prefix (see "Blob storage backends → Object keys"). If not, the upload
-  is rejected with `upload exceeds 10 MiB compressed cap; your bytes
+  is rejected with `upload exceeds the 10 MiB cap after compression; your bytes
   compress to <actual> - try removing binary data` and the spill file is
   discarded.
 - **Storage backend**: the Worker's payload binding, under the
@@ -735,7 +735,7 @@ extractor enforces three guards while it STREAMS the archive (never
   1 GiB max site size plus 64 MiB of framing headroom. The uncompressed
   bound alone does not bound the read: gzip members and deflate blocks
   that inflate to nothing can stream forever. Crossing it fails with
-  *site archive too large to consider*, never as a corrupt stream. A
+  *site archive exceeds the 1088 MiB cap*, never as a corrupt stream. A
   site is NOT held to the 100 MiB raw-byte fast-fail for single-file
   pastes; that cap applies only once the upload sniffs as a paste.
 
@@ -2044,11 +2044,11 @@ URL still serves the pinned version. Failure modes
   ssh key isn't its owner. Indistinguishable on purpose - the owner-check
   fail surfaces as "not found" so a non-owner can't probe for the
   existence of slugs they don't own.
-- *upload exceeds 10 MiB compressed cap* (exit 1): payload too large
+- *upload exceeds the 10 MiB cap after compression* (exit 1): payload too large
   even after zstd compression; rejected before any bytes hit the
   blob store. Stderr surfaces the actual compressed size so the
   caller knows how far over they were.
-- *upload too large to consider* (exit 1): raw input exceeded the
+- *upload exceeds 100 MiB before compression* (exit 1): raw input exceeded the
   100 MiB hard-fast-fail. No compressed-size check was attempted.
 - *usage error* (exit 2): malformed args, bad flag value.
 - *another change to this paste is still settling; retry shortly* (exit 1):
@@ -2119,7 +2119,7 @@ Lists BOTH text pastes AND deployed **directories** (a directory shows its
 own kind - `site` or `knowledgebase` - its stored byte total, and its
 served version like any paste). This matters because a site counts against the
 same 1 GiB per-identity quota as pastes: if `list` omitted sites, an owner
-could hit `would exceed your 1 GiB total quota` with no visible way to see
+could hit `would exceed your 1 GiB quota` with no visible way to see
 or free what is using it (deleting the visible text pastes reclaims almost
 nothing). Listing sites makes the quota legible and the slugs copyable for
 `delete`. Sorted most recently updated first. `NAME` column shows the user-supplied
@@ -2497,7 +2497,6 @@ rooms:   12.0k of that in your apps' rooms
 
 session:
   subnet:        203.0.113.0/24
-  seen subnets:  1  (this one + 0 other in the last 24h)
   subnet budget: 3 of 20 fresh keys used here today
 ```
 The `rooms:` line appears only when the owner's apps hold room bytes, and the
@@ -2536,10 +2535,8 @@ README, and the landing page.
 ```
 Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
-UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
-         -- is required before an UPLOAD flag, or ssh parses it as its
-         own; verb flags like -o json are already safe;
-         a QR code of the URL also prints to stderr on success)
+UPLOAD  (-T silences the ssh pseudo-terminal warning; put -- before an
+         upload flag, or ssh parses it as its own)
 
     cat foo.html   | ssh -T hostthis.dev
     cat doc.md     | ssh -T hostthis.dev -- --name "design notes"
@@ -2561,7 +2558,7 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
     ssh hostthis.dev url <slug>                 re-show the URL (no QR)
     ssh hostthis.dev qr <slug>                  re-show the URL + QR code
     ssh hostthis.dev rename <slug> "label"      set / change owner label
-    ssh hostthis.dev delete <slug> [<ver>]      wipe the paste, or tombstone one version
+    ssh hostthis.dev delete <slug> [<ver>]      delete the paste, or one version
     ssh hostthis.dev rooms <slug>               list an app's rooms (rooms <slug> rm deletes)
     ssh hostthis.dev whoami                     identity + active count + quota
     ssh hostthis.dev pod link <webid>           store new uploads in your Solid pod
@@ -2586,9 +2583,7 @@ LINK TO A PLACE INSIDE A PASTE
                             is just a link
 
     Clicking a heading, row, page, diff line number, or flame frame updates
-    the URL, so the address bar always holds a link you can copy. To select
-    a range of diff lines: shift-click a second line number, or on a touch
-    screen just tap it.
+    the URL, so the address bar always holds a link you can copy.
 
 OUTPUT
 
@@ -2833,7 +2828,7 @@ EVERY non-deleted version of an updated paste) cannot exceed
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
 get deleted, or have older versions explicitly
 deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
-error with `would exceed your 1 GiB total quota`.
+error with `would exceed your 1 GiB quota`.
 
 The per-identity quota and per-paste cap are distinct: 1 GiB total and
 10 MiB for one paste. The per-paste cap bounds one request's compressed

@@ -77,7 +77,7 @@ type DeploySite struct {
 
 // ErrSiteArchiveTooLarge is returned when the compressed archive itself
 // exceeded the site archive cap, whatever it would have expanded to.
-var ErrSiteArchiveTooLarge = fmt.Errorf("service: site archive too large to consider (input exceeded %d MiB cap)", domain.MaxSiteArchiveBytes>>20)
+var ErrSiteArchiveTooLarge = fmt.Errorf("site archive exceeds the %d MiB cap", domain.MaxSiteArchiveBytes>>20)
 
 // SiteDeployer is the site surface the SSH layer consumes, an interface so
 // cache invalidation can be a decorator the composition root layers on.
@@ -139,7 +139,7 @@ type SiteResult struct {
 }
 
 // ErrEmptySite is returned when an archive safe-untars to zero files.
-var ErrEmptySite = errors.New("service: archive contains no files")
+var ErrEmptySite = errors.New("archive contains no files")
 
 // maxDeployRetries bounds the slug reservation retry budget.
 const maxDeployRetries = 5

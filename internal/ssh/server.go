@@ -400,7 +400,7 @@ func (s *Server) ratelimitMiddleware() wish.Middleware {
 					fmt.Fprintln(sess.Stderr(), "to get in:") //nolint:errcheck
 					fmt.Fprintln(sess.Stderr(), "  (a) use a key already known on this subnet")
 					if frees := ref.NextSlotFreesAt(); !frees.IsZero() {
-						fmt.Fprintf(sess.Stderr(), "  (b) wait until %s - the oldest entry ages out then\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
+						_, _ = fmt.Fprintf(sess.Stderr(), "  (b) wait until %s\n", frees.UTC().Format("2006-01-02 15:04 UTC"))
 					}
 					_ = sess.Exit(ExitSybilRefuse)
 					return
@@ -1076,8 +1076,6 @@ func (s *Server) verbWhoami(sess gossh.Session, owner domain.Owner, argv []strin
 		fmt.Fprintln(sess)
 		fmt.Fprintln(sess, "session:")
 		fmt.Fprintf(sess, "  subnet:        %s\n", info.Session.Subnet)
-		fmt.Fprintf(sess, "  seen subnets:  %d  (this one + %d other in the last 24h)\n",
-			info.Session.IdentitySubnets, max(0, info.Session.IdentitySubnets-1))
 		fmt.Fprintf(sess, "  subnet budget: %d of %d fresh keys used here today\n",
 			info.Session.SubnetFreshCount, info.Session.SubnetCap)
 	}
@@ -1138,10 +1136,8 @@ func emitHelp(w io.Writer, sess gossh.Session, apex string) {
 // are substituted at render time, so the text is correct under any deployment.
 const helpTextTemplate = `Pipe a rendered file in, get a URL out. Pastes persist indefinitely.
 
-UPLOAD  (-T silences the ssh pseudo-terminal warning on piped uploads;
-         -- is required before an UPLOAD flag, or ssh parses it as its
-         own; verb flags like -o json are already safe;
-         a QR code of the URL also prints to stderr on success)
+UPLOAD  (-T silences the ssh pseudo-terminal warning; put -- before an
+         upload flag, or ssh parses it as its own)
 
     cat foo.html   | ssh -T {{apex}}
     cat doc.md     | ssh -T {{apex}} -- --name "design notes"
@@ -1163,7 +1159,7 @@ UPDATE & MANAGE (owner only; ssh key authenticates)
     ssh {{apex}} url <slug>                 re-show the URL (no QR)
     ssh {{apex}} qr <slug>                  re-show the URL + QR code
     ssh {{apex}} rename <slug> "label"      set / change owner label
-    ssh {{apex}} delete <slug> [<ver>]      wipe the paste, or tombstone one version
+    ssh {{apex}} delete <slug> [<ver>]      delete the paste, or one version
     ssh {{apex}} rooms <slug>               list an app's rooms (rooms <slug> rm deletes)
     ssh {{apex}} whoami                     identity + active count + quota
     ssh {{apex}} pod link <webid>           store new uploads in your Solid pod
@@ -1188,9 +1184,7 @@ LINK TO A PLACE INSIDE A PASTE
                             is just a link
 
     Clicking a heading, row, page, diff line number, or flame frame updates
-    the URL, so the address bar always holds a link you can copy. To select
-    a range of diff lines: shift-click a second line number, or on a touch
-    screen just tap it.
+    the URL, so the address bar always holds a link you can copy.
 
 OUTPUT
 

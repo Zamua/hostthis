@@ -408,7 +408,7 @@ async function callback(env, url) {
     return failed("the link could not be saved");
   }
   return page(200, "Pod linked", `<p>New uploads from <code>${escapeHtml(keyOf(link.owner))}</code> are stored in
-<code>${escapeHtml(link.storage)}hostthis/</code>.</p><p>You can close this page.</p>`);
+<code>${escapeHtml(link.storage)}hostthis/</code>.</p>`);
 }
 
 function json(body) {
