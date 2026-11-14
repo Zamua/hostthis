@@ -17,9 +17,9 @@ Personal and commercial content are both welcome: notes, documents, demos, proto
 
 Do not use it to host:
 
-- a page that takes payment or personal data from its visitors: a working checkout or payment link, a payment or wallet address, or a form that sends what visitors enter to a server
+- a page that takes payment or personal data from its visitors: a working checkout, or a form that sends what visitors enter to a server. A tip or donation link is fine.
 - link placement for search ranking
-- anything illegal, deceptive or harmful, such as phishing, malware or impersonation
+- anything illegal, deceptive or harmful, such as scams, phishing, malware or impersonation
 
 ## For AI agents
 
