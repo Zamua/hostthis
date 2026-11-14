@@ -535,7 +535,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 	//
 	// The peek also waits for the body to start (or end) before admission, so
 	// a session that sends nothing holds no upload slot.
-	peeked := bufio.NewReaderSize(sess, 512)
+	peeked := bufio.NewReaderSize(uploadBody(sess), 512)
 	head, _ := peeked.Peek(2)
 	isArchive := s.Deploy != nil && args.Type == "" && domain.HasGzipMagic(head)
 	// Admission precedes every read past that small buffer, so a queued upload

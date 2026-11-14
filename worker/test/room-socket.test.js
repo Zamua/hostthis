@@ -3,7 +3,8 @@ import test from "node:test";
 
 import { Room } from "../src/index.js";
 import {
-  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
+  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_RELAY_BYTE_BURST, ROOM_RELAY_BYTES_PER_SEC,
+  ROOM_RELAY_FRAME_BURST, ROOM_RELAY_FRAMES_PER_SEC, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
 } from "../src/rooms/policy.js";
 import { FakeStorage, roomDoc, state } from "./harness.js";
 
@@ -221,4 +222,48 @@ test("off mode relays a frame of any size and the ping frame", async () => {
     assert.ok(peer.sent.length === 1 && peer.sent[0] === frame, what);
     assert.equal(sender.closed, null, what);
   }
+});
+
+test("a sender over its frame rate is closed with 1008 and its extra frame reaches no peer", async () => {
+  const sender = new FakeSocket();
+  const peer = new FakeSocket();
+  const { cell } = room([sender, peer]);
+  for (let i = 0; i < ROOM_RELAY_FRAME_BURST; i++) {
+    await cell.webSocketMessage(sender, "x", NOW);
+  }
+  assert.equal(sender.closed, null);
+  await cell.webSocketMessage(sender, "x", NOW);
+  assert.deepEqual(sender.closed, [1008, "too many frames"]);
+  assert.equal(peer.sent.length, ROOM_RELAY_FRAME_BURST);
+});
+
+test("a sender within its rate keeps relaying, and a quiet second refills it", async () => {
+  const sender = new FakeSocket();
+  const peer = new FakeSocket();
+  const { cell } = room([sender, peer]);
+  for (let i = 0; i < ROOM_RELAY_FRAME_BURST; i++) {
+    await cell.webSocketMessage(sender, "x", NOW);
+  }
+  for (let i = 0; i < ROOM_RELAY_FRAMES_PER_SEC; i++) {
+    await cell.webSocketMessage(sender, "x", NOW + 1000);
+  }
+  assert.equal(sender.closed, null);
+  assert.equal(peer.sent.length, ROOM_RELAY_FRAME_BURST + ROOM_RELAY_FRAMES_PER_SEC);
+});
+
+test("a sender over its byte rate is closed, and each socket has its own allowance", async () => {
+  const flooder = new FakeSocket();
+  const other = new FakeSocket();
+  const peer = new FakeSocket();
+  const { cell } = room([flooder, other, peer]);
+  const frame = "x".repeat(ROOM_CLIENT_FRAME_LIMIT);
+  const fits = Math.floor(ROOM_RELAY_BYTE_BURST / frame.length);
+  for (let i = 0; i < fits; i++) {
+    await cell.webSocketMessage(flooder, frame, NOW);
+  }
+  await cell.webSocketMessage(flooder, frame, NOW);
+  assert.deepEqual(flooder.closed, [1008, "too many frames"]);
+  await cell.webSocketMessage(other, frame, NOW);
+  assert.equal(other.closed, null);
+  assert.ok(ROOM_RELAY_BYTES_PER_SEC < ROOM_RELAY_BYTE_BURST);
 });

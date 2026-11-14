@@ -1,6 +1,9 @@
 import { normalizeHost } from "../public/host.js";
 import { PUSH_DAILY_CAP, PUSH_KEY, PUSH_MAX_PAYLOAD, PUSH_MAX_SUBSCRIPTIONS, PUSH_PRUNE_GRACE_MS, PUSH_SEND_TIMEOUT_MS, PUSH_STALE_MS, PUSH_TEST_INTERVAL_MS, encryptPush, localDate, nextDue, publicItem, unb64u, utf8, validateSchedule, validateSubscription } from "../push.js";
-import { PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE } from "../rooms/policy.js";
+import {
+  PING_FRAME, PONG_FRAME, ROOM_CLIENT_FRAME_LIMIT, ROOM_PING_STALE_MS, ROOM_RATE_CLOSE, ROOM_SOCKET_CAP, ROOM_STALE_CLOSE,
+  RelayAllowance,
+} from "../rooms/policy.js";
 import { base64Bytes, compareCodePoints, roomWireValue } from "../rooms/wire.js";
 import { cellRoute } from "./image.js";
 import { cellCall, dispatch, mutation, read, runOp } from "./ops.js";
@@ -898,17 +901,17 @@ export class Room {
     answerClose(ws);
   }
 
-  async webSocketMessage(ws, message) {
+  async webSocketMessage(ws, message, now = Date.now()) {
     if (await this.appQuarantined()) {
       this.closeForQuarantine();
       return;
     }
     if (this.publicSurface && overFrameLimit(message)) {
-      try {
-        ws.close(1009, "frame too large");
-      } catch {
-        // closed already
-      }
+      closeQuietly(ws, 1009, "frame too large");
+      return;
+    }
+    if (this.publicSurface && !this.relayAllowed(ws, message, now)) {
+      closeQuietly(ws, ROOM_RATE_CLOSE, "too many frames");
       return;
     }
     if (typeof message === "string") {
@@ -933,6 +936,26 @@ export class Room {
         // reaped by the runtime
       }
     }
+  }
+
+  // Allowances live in memory only: a socket quiet long enough to hibernate
+  // comes back with a full one, which is all a quiet socket is owed.
+  relayAllowed(ws, message, now) {
+    this.allowances ??= new WeakMap();
+    let allowance = this.allowances.get(ws);
+    if (allowance === undefined) {
+      allowance = new RelayAllowance(now);
+      this.allowances.set(ws, allowance);
+    }
+    return allowance.take(typeof message === "string" ? message.length : message.byteLength, now);
+  }
+}
+
+function closeQuietly(ws, code, reason) {
+  try {
+    ws.close(code, reason);
+  } catch {
+    // closed already
   }
 }
 

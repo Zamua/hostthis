@@ -598,6 +598,12 @@ A row with no persisted status is read as **`ready`**.
 Quota is enforced here, inside the serialized metadata commit, so an
 over-quota upload is rejected before any URL is handed out.
 
+Over SSH, the end of the body is confirmed before step 2: a channel reads as
+ended both when the client closes its input and when the whole connection
+drops, so at that point the server asks the client for one round trip. A
+client that closed its input is still connected and answers; a dropped
+connection fails the upload, and nothing it sent is saved.
+
 ### Finalize: the asynchronous half
 
 After `Create` returns the URL, a background goroutine (owned by the
@@ -1693,6 +1699,14 @@ mirror frames may carry up to 2 MiB so a full 256 KiB room still fits after
 worst-case JSON escaping; the cell writes them, so only `hostthisd`'s proxy
 limits them, at its upstream read boundary. A dead or closing peer is skipped
 without blocking the remaining fan-out.
+
+Each socket also has a relay allowance: 60 frames a second with a burst of
+120, and 256 KiB a second with a burst of 1 MiB. A frame over either closes the
+sender with 1008 ("too many frames") and reaches no peer. The allowance is per
+socket, so one sender over its rate does not slow the others, and with at most
+64 sockets the room's total relay is bounded too. It lives in the cell's memory
+only: a socket quiet long enough for the cell to hibernate returns with a full
+one.
 
 ### Snapshot and sequence contract
 
@@ -3537,6 +3551,16 @@ listed; a single storage shows no choice. Switching pods later is another
    `acp:AccessControlResource`, and WAC otherwise.
 3. Discards the session and records the link. Only then does the page say
    linked.
+
+Every address the profile leads to (the profile itself, the issuer and its
+registration and token endpoints, the storage, its access resource, and every
+later payload request) must be https on a public host name: not an IP
+literal, not a single-label or `.local`/`.internal` name, not hostthis's own
+apex and not `workers.dev`. A storage that fails this is never offered. A
+redirect is followed, for GET and HEAD only, to an address that passes the
+same check, and a profile, provider document, token answer or container
+listing larger than 1 MiB is refused. A local runtime (`worker/localrt`) also
+allows loopback names, where a development WebID may use plain http.
 
 The login is what binds the pod to the key. One hostthis identity can reach
 every container shared with it, so a key may only be linked to a pod whose

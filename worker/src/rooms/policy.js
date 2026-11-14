@@ -30,6 +30,13 @@ export const ROOM_PING_STALE_MS = 120_000;
 // An application close code, so a client tells eviction from a server fault.
 export const ROOM_STALE_CLOSE = 4001;
 export const ROOM_CLIENT_FRAME_LIMIT = 32 * 1024;
+// What one socket may relay: a sustained rate with a burst on top, in frames
+// and in bytes. A sender over either closes with ROOM_RATE_CLOSE.
+export const ROOM_RELAY_FRAMES_PER_SEC = 60;
+export const ROOM_RELAY_FRAME_BURST = 120;
+export const ROOM_RELAY_BYTES_PER_SEC = 256 * 1024;
+export const ROOM_RELAY_BYTE_BURST = 1024 * 1024;
+export const ROOM_RATE_CLOSE = 1008;
 export const PING_FRAME = '{"type":"ping"}';
 export const PONG_FRAME = '{"type":"pong"}';
 
@@ -793,4 +800,28 @@ export function roomDenyMatch(raw, bytes) {
     if (r.pattern.test(text)) return r;
   }
   return null;
+}
+
+// A sender's relay allowance: two token buckets, frames and bytes, refilled
+// by elapsed time. take() spends one frame of the given size, or reports the
+// sender over its rate and spends nothing.
+export class RelayAllowance {
+  constructor(now) {
+    this.frames = ROOM_RELAY_FRAME_BURST;
+    this.bytes = ROOM_RELAY_BYTE_BURST;
+    this.at = now;
+  }
+
+  take(size, now) {
+    const secs = Math.max(0, now - this.at) / 1000;
+    this.at = Math.max(this.at, now);
+    this.frames = Math.min(ROOM_RELAY_FRAME_BURST, this.frames + secs * ROOM_RELAY_FRAMES_PER_SEC);
+    this.bytes = Math.min(ROOM_RELAY_BYTE_BURST, this.bytes + secs * ROOM_RELAY_BYTES_PER_SEC);
+    if (this.frames < 1 || this.bytes < size) {
+      return false;
+    }
+    this.frames -= 1;
+    this.bytes -= size;
+    return true;
+  }
 }

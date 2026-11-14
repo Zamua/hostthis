@@ -2,6 +2,7 @@
 // upload id names a pod link (docs/SPEC.md "Pod storage").
 import { bucketGet } from "../bucket.js";
 import { agentHeaders, solidEnabled } from "./identity.js";
+import { podNetFetch, readJsonCapped } from "./net.js";
 
 const POD_UPLOAD = /^uploads\/pod_([a-f0-9]{16})_[A-Za-z0-9]+\//;
 const LDP_CONTAINS = "http://www.w3.org/ns/ldp#contains";
@@ -49,7 +50,7 @@ async function podBase(env, linkId) {
 async function podFetch(env, method, url, init = {}) {
   let res;
   try {
-    res = await fetch(url, { ...init, method, headers: { ...(init.headers ?? {}), ...(await agentHeaders(env, method, url)) } });
+    res = await podNetFetch(env, url, { ...init, method, headers: { ...(init.headers ?? {}), ...(await agentHeaders(env, method, url)) } });
   } catch (error) {
     throw new PodError(0, `pod unreachable: ${error.message}`);
   }
@@ -119,7 +120,7 @@ async function containerMembers(env, url) {
   if (!res.ok) {
     throw await refused(res, `GET ${url}`);
   }
-  const doc = await res.json();
+  const doc = await readJsonCapped(res);
   const nodes = Array.isArray(doc) ? doc : (doc["@graph"] ?? [doc]);
   const members = [];
   for (const node of nodes) {

@@ -4,6 +4,7 @@ import {
   clientDocument, issuerConfiguration, jwks, solidEnabled, solidOrigin, solidUrls, webidProfile,
 } from "./identity.js";
 import { b64url, dpopProof, jwtClaims, randomToken, sha256 } from "./jose.js";
+import { allowedPodUrl, podNetFetch, readJsonCapped, readTextCapped } from "./net.js";
 import { linkCellName } from "./pod.js";
 
 const LINK_PATH = /^\/_solid\/link\/([a-f0-9]{16})$/;
@@ -89,13 +90,13 @@ function asContainer(iri) {
 
 // The WebID's issuer and every storage it lists, from its profile as JSON-LD
 // or Turtle.
-async function readProfile(webid) {
-  const res = await fetch(webid, { headers: { Accept: "application/ld+json, text/turtle;q=0.9" } });
+async function readProfile(env, webid) {
+  const res = await podNetFetch(env, webid, { headers: { Accept: "application/ld+json, text/turtle;q=0.9" } });
   if (!res.ok) {
     throw new Error(`your WebID profile answered ${res.status}`);
   }
   const type = res.headers.get("Content-Type") ?? "";
-  const text = await res.text();
+  const text = await readTextCapped(res);
   let issuer = null;
   const storages = [];
   if (type.includes("json")) {
@@ -116,7 +117,9 @@ async function readProfile(webid) {
   }
   issuer = issuer && resolveIri(issuer, webid);
   if (!issuer) throw new Error("your WebID profile names no solid:oidcIssuer");
-  const resolved = storages.map((s) => resolveIri(s, webid)).filter(Boolean).map(asContainer);
+  // A storage hostthis may not contact is never offered, nor linked.
+  const resolved = storages.map((s) => resolveIri(s, webid)).filter(Boolean).map(asContainer)
+    .filter((s) => allowedPodUrl(s, env));
   return { issuer, storages: [...new Set(resolved)] };
 }
 
@@ -127,12 +130,12 @@ function defaultStorage(storages, webid) {
   return storages.find((s) => new URL(s).host === host) ?? storages[0] ?? null;
 }
 
-async function issuerConfig(issuer) {
-  const res = await fetch(`${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`, { headers: { Accept: "application/json" } });
+async function issuerConfig(env, issuer) {
+  const res = await podNetFetch(env, `${issuer.replace(/\/$/, "")}/.well-known/openid-configuration`, { headers: { Accept: "application/json" } });
   if (!res.ok) {
     throw new Error(`your identity provider answered ${res.status}`);
   }
-  return res.json();
+  return readJsonCapped(res);
 }
 
 // The client this link signs in as. A provider that offers dynamic
@@ -143,7 +146,7 @@ async function signInClient(env, config) {
   const urls = solidUrls(env);
   if (typeof config.registration_endpoint === "string") {
     try {
-      const res = await fetch(config.registration_endpoint, {
+      const res = await podNetFetch(env, config.registration_endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({
@@ -157,7 +160,7 @@ async function signInClient(env, config) {
           token_endpoint_auth_method: "client_secret_basic",
         }),
       });
-      const reg = res.ok ? await res.json() : null;
+      const reg = res.ok ? await readJsonCapped(res) : null;
       if (typeof reg?.client_id === "string" && reg.client_id) {
         return { id: reg.client_id, secret: typeof reg.client_secret === "string" ? reg.client_secret : undefined };
       }
@@ -170,10 +173,10 @@ async function signInClient(env, config) {
 
 // A radio list of the profile's storages, or nothing when it lists one or
 // none: the choice only matters to providers that give a WebID several pods.
-async function storagePicker(webid) {
+async function storagePicker(env, webid) {
   let storages;
   try {
-    ({ storages } = await readProfile(webid));
+    ({ storages } = await readProfile(env, webid));
   } catch {
     return "";
   }
@@ -196,7 +199,7 @@ async function confirmPage(env, id, url) {
   if (!link) {
     return dead();
   }
-  const picker = await storagePicker(link.webid);
+  const picker = await storagePicker(env, link.webid);
   return page(200, "Link your pod to hostthis", `
 <p>Key: <code>${escapeHtml(keyOf(link.owner))}</code></p>
 <p>WebID: <code>${escapeHtml(link.webid)}</code></p>
@@ -214,8 +217,8 @@ async function beginLogin(env, id, request) {
   let profile;
   let config;
   try {
-    profile = await readProfile(link.webid);
-    config = await issuerConfig(profile.issuer);
+    profile = await readProfile(env, link.webid);
+    config = await issuerConfig(env, profile.issuer);
   } catch (error) {
     return failed(error.message);
   }
@@ -293,8 +296,8 @@ function wacRule(container, owner, agent) {
 `;
 }
 
-function ownerFetch(session, accessToken) {
-  return async (method, url, init = {}) => fetch(url, {
+function ownerFetch(env, session, accessToken) {
+  return async (method, url, init = {}) => podNetFetch(env, url, {
     ...init,
     method,
     headers: { ...(init.headers ?? {}), Authorization: `DPoP ${accessToken}`, DPoP: await dpopProof(session, method, url, accessToken) },
@@ -364,7 +367,7 @@ async function callback(env, url) {
   const session = await sessionKey(login.dpop);
   let token;
   try {
-    const res = await fetch(login.tokenEndpoint, {
+    const res = await podNetFetch(env, login.tokenEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -381,7 +384,7 @@ async function callback(env, url) {
         code_verifier: login.verifier,
       }),
     });
-    token = await res.json();
+    token = await readJsonCapped(res);
     if (!res.ok || typeof token.access_token !== "string") {
       return failed(`your provider refused the sign-in (${token.error ?? res.status})`);
     }
@@ -391,7 +394,7 @@ async function callback(env, url) {
   if (jwtClaims(token.access_token)?.webid !== link.webid) {
     return failed(`you signed in as a different WebID than ${link.webid}`);
   }
-  const call = ownerFetch(session, token.access_token);
+  const call = ownerFetch(env, session, token.access_token);
   try {
     link.storage = login.storage ?? link.storage ?? await discoverStorage(call, link.webid);
     await shareContainer(env, link, call);
