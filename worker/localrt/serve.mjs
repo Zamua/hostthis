@@ -95,6 +95,9 @@ for (const [name, value] of Object.entries(process.env)) {
   }
   if (value !== "") bindings[`HOSTTHIS_${suffix}`] = value;
 }
+// A local runtime links pods served on loopback, as tests and development do;
+// a deployed Worker never sets this, so its pod links reach public https only.
+bindings.HOSTTHIS_SOLID_ALLOW_LOOPBACK = "1";
 const token = process.env.HOSTTHIS_WORKER_TOKEN;
 if (token) bindings.HOSTTHIS_WORKER_TOKEN = token;
 const publicSurface = bindings.HOSTTHIS_APEX_DOMAIN !== undefined;
