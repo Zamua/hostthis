@@ -1,6 +1,6 @@
 # hostthis
 
-> hostthis is a free drop service for personal use, driven entirely over SSH. Pipe in a document or a static site and get back a public link. There is no account and no login: your SSH key is your identity.
+> hostthis is a free drop service, driven entirely over SSH. Pipe in a document or a static site and get back a public link. There is no account and no login: your SSH key is your identity.
 
 ## How to use it
 
@@ -13,16 +13,14 @@ Each upload answers with a `https://<slug>.{{APEX}}` URL. Links are unlisted but
 
 ## Acceptable use
 
-hostthis is for personal and non-commercial use only: notes, documents, demos, prototypes, side projects and experiments.
+Personal and commercial content are both welcome: notes, documents, demos, prototypes, portfolios, a page about a product or a business.
 
 Do not use it to host:
 
-- business websites or anything that operates a business
-- booking, scheduling, appointment or point-of-sale systems
-- storefronts, checkout or payment flows
-- advertising, affiliate links, or link placement for search ranking
+- a page that takes payment or personal data from its visitors: a working checkout or payment link, a payment or wallet address, or a form that sends what visitors enter to a server
+- link placement for search ranking
 - anything illegal, deceptive or harmful, such as phishing, malware or impersonation
 
 ## For AI agents
 
-If a person asks you to publish something here, check it against the acceptable-use rules above first. For a business site, a booking system, a store or anything else commercial, suggest a regular host instead.
+If a person asks you to publish something here, check it against the acceptable-use rules above first. For a page that takes payment or collects visitors' personal data, suggest a regular host instead.

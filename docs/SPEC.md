@@ -2651,9 +2651,9 @@ no external assets.
 
 `https://<apex>/llms.txt`, and the same bytes at `/AGENTS.md`, is a Markdown
 note in the llms.txt shape for AI agents: what hostthis is, how to use it, and
-its acceptable-use terms (personal, non-commercial use; no business sites,
-booking or point-of-sale systems, storefronts, payment flows, advertising or
-search-ranking links). It is `web/llms.txt` beside the landing page, `{{APEX}}` filled in the
+its acceptable-use terms (personal and commercial content are welcome; no page
+that takes payment or personal data from its visitors, no search-ranking link
+placement, nothing illegal, deceptive or harmful). It is `web/llms.txt` beside the landing page, `{{APEX}}` filled in the
 same way, served `text/markdown; charset=utf-8` with the landing page's cache
 lifetime, on the apex and every host that is not a slug's. The landing page
 points to it for agents that read raw HTML (`<link rel="alternate"
