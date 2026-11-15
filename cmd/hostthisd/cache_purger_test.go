@@ -9,11 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/cache"
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/service"
 )
 
 // The worker backend enqueues a slug's purge at the Worker with the Worker
@@ -75,31 +73,5 @@ func TestPurgeExempt(t *testing.T) {
 	exempt := purgeExempt("key:SHA256:cccc, key:SHA256:aaaa")
 	if !exempt(listed) || exempt(other) {
 		t.Fatalf("exempt(listed)=%v exempt(other)=%v", exempt(listed), exempt(other))
-	}
-}
-
-func TestParseCDNTTL(t *testing.T) {
-	purging := &cache.Queue{}
-	cases := []struct {
-		name    string
-		raw     string
-		purger  service.CachePurger
-		want    time.Duration
-		wantErr bool
-	}{
-		{"unset", "", cache.Noop{}, 0, false},
-		{"set with a purger", "1h", purging, time.Hour, false},
-		{"a TTL nothing can purge", "1h", cache.Noop{}, 0, true},
-		{"zero without a purger", "0s", cache.Noop{}, 0, false},
-		{"not a duration", "soon", purging, 0, true},
-		{"negative", "-1h", purging, 0, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got, err := parseCDNTTL(c.raw, c.purger)
-			if got != c.want || (err != nil) != c.wantErr {
-				t.Fatalf("got %v, %v; want %v, error %v", got, err, c.want, c.wantErr)
-			}
-		})
 	}
 }

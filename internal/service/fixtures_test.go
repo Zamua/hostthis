@@ -201,11 +201,3 @@ func objectsUnder(t *testing.T, l *keyLedger) int {
 	}
 	return n
 }
-
-// newRoomRepo is the room surface over the test's cells.
-func newRoomRepo(t *testing.T) *worker.RoomRepo {
-	t.Helper()
-	rooms := worker.NewRoomRepo(workertest.Endpoint(t), nil)
-	rooms.PushSubject = "https://paste.test"
-	return rooms
-}

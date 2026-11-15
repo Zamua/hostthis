@@ -121,9 +121,9 @@ upgrade while looking like an upstream bug.
 cmd/hostthisd/       single binary entry point
 internal/
   domain/            pure types + invariants (no I/O)
-  service/           use cases (upload, manage, deploy, rooms, admission)
+  service/           use cases (upload, manage, deploy, owner rooms, admission)
   ssh/               SSH server (charmbracelet/ssh + wish) + verb dispatch
-  http/              apex landing + paste read surface
+  http/              apex landing page, agent notes, health endpoints
   worker/            metadata adapters over the Worker
   workertest/        runs the Worker locally for tests
   storage/           site view, blob store layers, storage contract tests
@@ -135,15 +135,13 @@ internal/
   abuselog/          the abuse log line
   metrics/           Prometheus metrics
   drain/             graceful shutdown gate
-  roomwire/          room socket wire constants
-  parity/            response parity suite: hostthisd against the Worker
-  sitevalidation/    serves built demo sites and compares bytes
+  sitevalidation/    deploys built demo sites and reads them back from the Worker
 worker/              the Worker: cells (Durable Objects), internal routes,
-                     the public read surface; its own README
+                     the public surface (pastes, sites, rooms); its own README
 e2e/                 Playwright browser suite (Chromium + WebKit)
 web/landing.html     embedded apex landing page
-web/shells/          render shells, their assets and shells.json; read by Go
-                     (package web) and the Worker build
+web/shells/          render shells, their assets and shells.json; read by the
+                     Worker build
 scripts/             smoke.sh (verb surface against a live host), repo checks
 testdata/            vectors shared by the Go and Worker tests
 docs/SPEC.md         product spec; source of truth for behavior
@@ -178,10 +176,11 @@ Worker code with no shared state.
 ```
 make build         # local Go build → ./bin/hostthisd
 make check         # what CI's main job gates on: fmt-check, vet, fix-check, test, vuln
-make test          # Go tests, the parity suite, the Worker tests, repo checks
+make test          # Go tests, the Worker tests, repo checks
 make vuln          # govulncheck: fails on a reachable known vulnerability (also a CI job)
-make run           # run locally, no container; ssh :2222 http :8080, path-mode,
-                   # beside the Worker under Miniflare (state in ./data/worker)
+make run           # run locally, no container; ssh :2222, landing at :8080,
+                   # path-mode reads from the Worker under Miniflare at
+                   # localhost:8787 (state in ./data/worker)
 
 make docker-build  # build the container image
 make docker-up     # docker compose up; same ports; data persists in ./data
@@ -199,48 +198,30 @@ the browser suite run the same code under Miniflare.
 The conformance suite pins the adapters' contract: it runs against the local
 runtime on every `go test ./...`, and against a real celld node when
 `WORKER_TEST_ENDPOINT` names one (the CI `celld` job), along with the blob
-contract and the live room suite.
+contract.
 
-### Response parity
+### The public surface: the Worker
 
-Until hostthisd's read path is gone, two servers answer the public surface:
-hostthisd, and the Worker with an apex set. `internal/parity` holds them to one
-answer. It builds hostthisd, starts it beside a Worker whose public surface is
-on (`workertest.StartPublic`), uploads a corpus over SSH (every kind, forced
-pending and failed rows, versions, the site fixtures, a knowledge base, damaged
-data, and rows forced in the shape written before entries recorded a decoded
-size), and sends every request to both, the Worker directly and in forwarded
-mode. It diffs the status, the header set `docs/SPEC.md` "The public surface"
-holds equal, and the body. A difference fails the run unless an entry in
-`allowances_test.go` explains it by a SPEC section, and an entry no request
-needs fails it too. The legacy rows are also held to their files' own bytes,
-since two servers that trusted the same wrong size would agree.
+hostthisd serves no paste, site, shell or room. Its HTTP listener answers the
+apex landing page, `/llms.txt` and `/AGENTS.md` beside it, and `/healthz` and
+`/readyz`; everything else is a 404. Every public read and the rooms API are
+the Worker's, chosen by Host (`docs/SPEC.md` "The public surface"), and the
+URLs hostthisd prints name the Worker's host.
 
-```
-make parity     # local; part of make test
-```
+The read surface is tested where it lives: `worker/test` (`npm --prefix worker
+test`, part of `make test`), with the `*-live` suites under Miniflare. Go tests
+that upload over SSH and read the result back (`internal/ssh`,
+`internal/sitevalidation`) read from a Worker whose public surface is on, in
+path mode at `localhost`: `workertest.PublicEndpoint(t)` hands each test its
+own namespace of one shared runtime. `testdata/shells-golden.json` pins the
+bytes and headers of every shell and asset; a change under `web/shells`
+updates it in the same change.
 
-The same suite runs against a deployed environment, in forwarded mode only,
-from `PARITY_HOSTTHISD_URL`, `PARITY_WORKER_URL`, `PARITY_TOKEN_FILE` and
-`PARITY_SLUGS` (read-only), plus `PARITY_ALLOW_WRITES=1` and
-`PARITY_WRITE_SLUG` to run the room and socket checks against one test paste
-(`internal/parity/external_test.go`). `TestParityAgainstURLs` drives that mode
-against the local servers on every run.
-
-A release that deploys the Worker before hostthisd compares the new Worker
-against the previous hostthisd with `PARITY_REFERENCE=previous`. That mode also
-factors out what the release changed on purpose and what each server's front
-door does to a path before the server sees it (`previous_test.go`, each rule
-with its reason), and still fails on any other status or body difference.
-
-Quick smoke from another terminal once it's live:
+Quick smoke from another terminal once `make run` is up:
 
 ```
-# make run    - ssh :2222 / http :8080
-# make docker-up - ssh :12222 / http :18080 (host ports shifted to avoid common clashes)
-
-echo '<!doctype html><h1>hi</h1>' | ssh -p 12222 -o StrictHostKeyChecking=no localhost
-# → prints a URL like http://localhost:18080/p/abc12345
+echo '<!doctype html><h1>hi</h1>' | ssh -p 2222 -o StrictHostKeyChecking=no localhost
+# → prints a URL like http://localhost:8787/p/abc12345
 curl <that URL>
 ```
 
@@ -263,14 +244,12 @@ make e2e        # run it (installs e2e/node_modules on first use)
 make e2e-ci     # same, after installing the browsers and their system libraries
                 # (PLAYWRIGHT_DEPS= skips the libraries, as CI's Playwright image has them)
 make e2e E2E_FLAGS='tests/mermaid.spec.ts --project webkit'   # one file, one engine
-E2E_READS=worker make e2e   # read every paste from the Worker's public surface
 ```
 
-With `E2E_READS=worker` each Worker runs its public surface in path mode at
-`localhost`, a host its daemon's internal endpoint (`127.0.0.1`) does not
-share, and the daemon prints URLs on it, so the browser reads from the Worker
-while uploads still go through hostthisd. That run writes
-`e2e/playwright-report-worker`. CI runs both modes.
+Each Worker runs its public surface in path mode at `localhost`, a host its
+daemon's internal endpoint (`127.0.0.1`) does not share, and the daemon prints
+URLs on it, so the browser reads from the Worker while uploads go through
+hostthisd.
 
 The harness is `e2e/fixtures.ts`. A run builds `hostthisd` once and mints one
 SSH key; each Playwright worker starts its own Worker under Miniflare and

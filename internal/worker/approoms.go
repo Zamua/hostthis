@@ -20,6 +20,12 @@ func NewAppRoomsRepo(base string, c *http.Client) *AppRoomsRepo {
 	return &AppRoomsRepo{cell: newCell(base, c)}
 }
 
+// roomKey addresses a Room cell. The app slug leads so a room is unreachable
+// without its app.
+func roomKey(app domain.Slug, id domain.RoomID) string {
+	return app.String() + "|" + id.String()
+}
+
 // List returns every room the app's index holds, in id order.
 func (r *AppRoomsRepo) List(app domain.Slug) ([]domain.AppRoom, error) {
 	var rooms []domain.AppRoom

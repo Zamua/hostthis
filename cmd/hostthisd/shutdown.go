@@ -10,34 +10,21 @@ type shutdowner interface {
 	Shutdown(context.Context) error
 }
 
-type relayShutdowner interface {
-	shutdowner
-	StopAdmission()
-}
-
 type sshShutdowner interface {
 	shutdowner
 	Close() error
 }
 
-type idleRelay struct{}
-
-func (idleRelay) StopAdmission()                 {}
-func (idleRelay) Shutdown(context.Context) error { return nil }
-
 func shutdownDaemon(
 	ctx context.Context,
 	sshGrace time.Duration,
 	public, metrics shutdowner,
-	relay relayShutdowner,
 	ssh sshShutdowner,
 	waitFinalize func(),
 ) error {
-	relay.StopAdmission()
-
-	results := make(chan error, 4)
+	results := make(chan error, 3)
 	var result error
-	for _, drain := range []shutdowner{public, metrics, relay} {
+	for _, drain := range []shutdowner{public, metrics} {
 		go func() { results <- drain.Shutdown(ctx) }()
 	}
 
@@ -70,7 +57,7 @@ func shutdownDaemon(
 		results <- nil
 	}()
 
-	for range 4 {
+	for range 3 {
 		select {
 		case err := <-results:
 			if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {

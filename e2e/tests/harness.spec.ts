@@ -14,11 +14,11 @@ test('harness reports a missing subresource', async ({ server, page, pageErrors 
   expect(pageErrors.list().join('\n')).toContain('no-such-asset.js');
 });
 
-// Paste URLs name the server E2E_READS picks. Only the Worker refuses a POST
-// to a read path, so the answer tells the two apart.
-test('harness reads from the server E2E_READS names', async ({ server }) => {
+// Paste URLs name the Worker's public surface, which refuses a POST to a read
+// path, so the answer proves which server read it.
+test('harness reads from the Worker', async ({ server }) => {
   const paste = server.upload('# which server\n', { type: 'md' });
   expect(new URL(paste.url).origin).toBe(server.baseURL);
   const res = await fetch(paste.url, { method: 'POST' });
-  expect(res.status).toBe(server.reads === 'worker' ? 405 : 200);
+  expect(res.status).toBe(405);
 });

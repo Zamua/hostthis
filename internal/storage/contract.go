@@ -7,8 +7,6 @@ var (
 	ErrNotFound       = domain.ErrNotFound
 	ErrTooManyNewKeys = domain.ErrTooManyNewKeys
 	ErrSlugTaken      = domain.ErrSlugTaken
-	ErrAppRoomsFull   = domain.ErrAppRoomsFull
-	ErrRoomDataFull   = domain.ErrRoomDataFull
 	ErrOverUserQuota  = domain.ErrOverUserQuota
 )
 

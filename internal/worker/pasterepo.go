@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -772,11 +771,6 @@ func (r *PasteRepo) AppendManifestVersion(ctx context.Context, slug domain.Slug,
 ) (domain.AppendResult, error) {
 	return r.appendArtifact(ctx, slug, generation, kind, uploadID, m, size, userCap, now, base)
 }
-
-// urlQuery escapes a value for a query string. Named rather than inlined so
-// every call site escapes, which is what keeps a key containing & or = from
-// silently becoming two parameters.
-func urlQuery(v string) string { return url.QueryEscape(v) }
 
 // replaced reports the cell's refusal of a call addressed to an incarnation
 // the slug no longer holds: the paste the caller named is gone.

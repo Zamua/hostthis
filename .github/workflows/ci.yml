@@ -128,7 +128,7 @@ jobs:
       # A real node against MinIO, not `celld dev`: the dev watcher polls the
       # project directory, sees its own PROJECT/.celld state writes on Linux,
       # and restart-storms the application, dropping mid-suite connections.
-      - name: celld storage and room contracts
+      - name: celld storage contracts
         run: |
           # One pinned image for server and client: the fork bundles mc, so the
           # job depends on a single registry pull.
@@ -169,8 +169,6 @@ jobs:
 
           WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/storage -run 'TestConformance_Worker|TestWorkerBlobContract'
-          WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
-            go test -count=1 ./internal/http -run 'TestLiveRoom'
           WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
             go test -count=1 ./internal/worker -run 'TestReleaseReplay'
 

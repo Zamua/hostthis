@@ -74,30 +74,14 @@ var (
 	opPasteDelVersion = route{http.MethodPost, "/paste/delversion", bySlug}
 	opPasteHead       = route{http.MethodGet, "/paste/head", bySlug}
 	opPastePin        = route{http.MethodPost, "/paste/pin", bySlug}
-	opPastePushKey    = route{http.MethodPost, "/paste/pushkey", bySlug}
-	opPasteRoomCounts = route{http.MethodGet, "/paste/roomcounts", bySlug}
 	opPasteRoomIndex  = route{http.MethodGet, "/paste/roomindex", bySlug}
 
 	opSubnetAdmit    = route{http.MethodPost, "/subnet/admit", bySubnet}
 	opSubnetSnapshot = route{http.MethodGet, "/subnet/snapshot", bySubnet}
 
 	opDenylistList = route{http.MethodGet, "/denylist/list", singleton}
-	opTurnIssue    = route{http.MethodPost, "/turn/issue", singleton}
 
-	opRoomCreate          = route{http.MethodPost, "/room/create", byRoom}
-	opRoomMeta            = route{http.MethodGet, "/room/meta", byRoom}
-	opRoomGet             = route{http.MethodGet, "/room/get", byRoom}
-	opRoomScan            = route{http.MethodGet, "/room/scan", byRoom}
-	opRoomPut             = route{http.MethodPost, "/room/put", byRoom}
-	opRoomDel             = route{http.MethodPost, "/room/del", byRoom}
-	opRoomJoin            = route{http.MethodGet, "/room/join", byRoom}
-	opRoomRemove          = route{http.MethodPost, "/room/remove", byRoom}
-	opRoomPushSubPut      = route{http.MethodPost, "/room/pushsubput", byRoom}
-	opRoomPushSubDel      = route{http.MethodPost, "/room/pushsubdel", byRoom}
-	opRoomPushSubList     = route{http.MethodPost, "/room/pushsublist", byRoom}
-	opRoomPushSchedulePut = route{http.MethodPost, "/room/pushscheduleput", byRoom}
-	opRoomPushScheduleGet = route{http.MethodPost, "/room/pushscheduleget", byRoom}
-	opRoomPushTest        = route{http.MethodPost, "/room/pushtest", byRoom}
+	opRoomRemove = route{http.MethodPost, "/room/remove", byRoom}
 )
 
 // Refusal codes a cell answers in its `error` (or `reason`) field.
@@ -232,62 +216,4 @@ type admitRequest struct {
 	Limit    int    `json:"limit"`
 	Now      int64  `json:"now"`
 	Window   int64  `json:"window"`
-}
-
-// --- room cell --------------------------------------------------------------
-
-type roomCreateRequest struct {
-	Addr      string `json:"addr,omitempty"`
-	AppCap    int64  `json:"appCap"`
-	AppSlug   string `json:"appSlug"`
-	At        int64  `json:"at"`
-	CreatedAt int64  `json:"createdAt"`
-	ID        string `json:"id"`
-	RoomLimit int    `json:"roomLimit"`
-	Subnet    string `json:"subnet"`
-	UpdatedAt int64  `json:"updatedAt"`
-}
-
-type roomPutRequest struct {
-	AppCap  int64  `json:"appCap"`
-	Key     string `json:"key"`
-	KeyCap  int    `json:"keyCap"`
-	Now     int64  `json:"now"`
-	RoomCap int    `json:"roomCap"`
-	// Base64 of the stored bytes.
-	Value string `json:"value"`
-	// The frame encoding the cell echoes verbatim (domain.RoomWireValue).
-	Wire string `json:"wire"`
-}
-
-type roomDelRequest struct {
-	Key string `json:"key"`
-	Now int64  `json:"now"`
-}
-
-type pushSubPutRequest struct {
-	Endpoint string   `json:"endpoint"`
-	Keys     pushKeys `json:"keys"`
-	Now      int64    `json:"now"`
-	Subject  string   `json:"subject"`
-}
-
-type pushKeys struct {
-	Auth   string `json:"auth"`
-	P256DH string `json:"p256dh"`
-}
-
-type pushSubDelRequest struct {
-	Endpoint string `json:"endpoint"`
-}
-
-type pushScheduleRequest struct {
-	Items   []domain.PushItem `json:"items"`
-	Now     int64             `json:"now"`
-	Subject string            `json:"subject"`
-	TZ      string            `json:"tz"`
-}
-
-type pushTestRequest struct {
-	Now int64 `json:"now"`
 }

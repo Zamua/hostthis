@@ -45,20 +45,16 @@ type conformanceRepo interface {
 var fixedNow = time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
 
 // runConformanceWithSites runs the paste contract suite against the backend
-// newRepo produces, plus the site and room suites when their factories are set.
+// newRepo produces, plus the site suite when its factory is set.
 func runConformanceWithSites(
 	t *testing.T,
 	name string,
 	newRepo func(t *testing.T) conformanceRepo,
 	newSites func(t *testing.T) (conformanceRepo, conformanceSiteRepo),
-	newRooms func(t *testing.T) roomConformanceStores,
 ) {
 	t.Helper()
 	if newSites != nil {
 		runSiteConformance(t, name, newSites)
-	}
-	if newRooms != nil {
-		runRoomConformance(t, name, newRooms)
 	}
 	runLifecycleConformance(t, name, func(t *testing.T) lifecycleRepo { return newRepo(t) })
 	runOwnerIndexConformance(t, name, func(t *testing.T) ownerIndexRepo { return newRepo(t) })

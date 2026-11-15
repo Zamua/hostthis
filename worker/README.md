@@ -33,7 +33,7 @@ esbuild is pinned in `package.json`. `dist/` is a build output and is not
 committed. `npm test` builds it first.
 
 The build (`build/build.mjs`) also reads `../web/shells`, the render shells
-hostthisd embeds. The bundle imports their templates and `shells.json` as the
+the Worker serves. The bundle imports their templates and `shells.json` as the
 module `hostthis:shells` (tests that import `src/` resolve it through
 `test/hooks.mjs`). Beside the bundle it writes `dist/assets/`, every renderer
 asset at `_hostthis/<name>` with a `_headers` rule giving its Content-Type and
@@ -64,8 +64,8 @@ as a Cloudflare deploy does: `dist/assets` as the static assets binding, and
 the assets too large for it (`dist/static-r2.json`) stored in `PAYLOADS`. The
 listener's own host (`127.0.0.1`) stays the internal endpoint, so the public
 surface needs a host name under the apex: `localhost` and every name under it
-resolve to loopback. `internal/workertest.StartPublic` and the browser suite's
-`E2E_READS=worker` start it this way.
+resolve to loopback. `internal/workertest.StartPublic` and the browser suite
+start it this way.
 
 To run the Worker on celld itself, install celld v0.6.1 and use its local
 runtime:
@@ -94,8 +94,6 @@ Miniflare:
 ```sh
 WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
   go test -count=1 ./internal/storage -run 'TestConformance_Worker|TestWorkerBlobContract'
-WORKER_TEST_ENDPOINT=http://127.0.0.1:8087 \
-  go test -count=1 ./internal/http -run TestLiveRoom
 ```
 
 `npm test` builds the bundle and runs the Worker-level suites (atomicity, crash

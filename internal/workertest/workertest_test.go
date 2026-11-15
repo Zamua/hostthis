@@ -128,3 +128,29 @@ func TestRuntimeLeavesNoTempDirWhenItsParentGoes(t *testing.T) {
 		t.Fatalf("temp entries left behind: %v", names)
 	}
 }
+
+// A shared public namespace serves the public surface at the apex host and
+// keeps the internal endpoint behind the token.
+func TestPublicEndpointServesBothRouters(t *testing.T) {
+	ns := PublicEndpoint(t)
+	if again := PublicEndpoint(t); again != ns {
+		t.Fatalf("second call = %+v, want %+v", again, ns)
+	}
+	res, body := get(t, ns.Reads, "", "/p/abcdefgh", nil)
+	if res.StatusCode != 404 || body != "404 page not found\n" {
+		t.Errorf("unknown slug in path mode = %d %q", res.StatusCode, body)
+	}
+	res, _ = get(t, ns.Reads, "abcdefgh."+PublicApex, "/_hostthis/md.js", nil)
+	if res.StatusCode != 200 {
+		t.Errorf("static asset on a slug host = %d", res.StatusCode)
+	}
+	res, _ = get(t, ns.Endpoint, "", "/paste/exists?slug=abcdefgh", nil)
+	if res.StatusCode != 401 {
+		t.Errorf("internal route without the token = %d, want 401", res.StatusCode)
+	}
+	res, _ = get(t, ns.Endpoint, "", "/paste/exists?slug=abcdefgh",
+		http.Header{"Authorization": {"Bearer " + ns.Token}})
+	if res.StatusCode != 200 {
+		t.Errorf("internal route with the token = %d", res.StatusCode)
+	}
+}

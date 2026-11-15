@@ -1,175 +1,58 @@
-// Package http serves the apex landing + the paste read surface.
-//
-// The router accepts both URL shapes at once, subdomain (`<slug>.apex`) and
-// path (`apex/p/<slug>`), so the serving side is independent of which URL
-// the SSH server emits after upload.
+// Package http serves hostthisd's own pages: the apex landing page, the agent
+// notes beside it, and the health endpoints. Pastes, sites, rooms and the
+// render shells are served by the Worker's public surface, never here.
 package http
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"hash/fnv"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/service"
 )
-
-// PasteReader is the read side of the paste repo, narrowed to what serving
-// needs.
-type PasteReader interface {
-	Get(domain.Slug) (domain.Paste, error)
-}
-
-// SiteReader is the read side for static sites. Optional: nil disables site
-// serving, so a slug then resolves only as a paste. internal/storage.SiteRepo
-// satisfies it.
-type SiteReader interface {
-	Get(domain.Slug) (domain.Site, error)
-}
-
-// BlobReader is the streaming read side of the byte plane. It resolves an entry
-// by its object key.
-type BlobReader interface {
-	Read(ctx context.Context, entry domain.ManifestEntry) (io.ReadCloser, int64, error)
-}
 
 // Server bundles the dependencies.
 type Server struct {
-	Pastes   PasteReader
-	Sites    SiteReader      // optional; nil disables static-site serving
-	Rooms    RoomService     // optional; nil disables the /api/rooms surface
-	RoomPush RoomPushService // optional; nil disables the push routes
-	Relay    RoomRelay       // optional; nil disables the /api/rooms/<uuid>/ws relay
-	RoomICE  RoomICEService  // optional; nil makes /api/rooms/<uuid>/ice a 404
-	Blobs    BlobReader
-	// Solid answers the apex /_solid/ paths (docs/SPEC.md "Pod storage");
-	// nil leaves them 404.
-	Solid       http.Handler
-	LandingHTML []byte // optional; apex landing page bytes embedded at build
+	LandingHTML []byte // optional; apex landing page bytes
 	// AgentNotes is /llms.txt (and /AGENTS.md) beside the landing page; nil 404s.
 	AgentNotes []byte
-	ApexDomain string // e.g. "hostthis.dev"; used to peel slug subdomains
-	// PathMode serves slugs at /p/<slug> on the apex as well as on their own
-	// hosts. Dev only: every paste then shares the apex origin.
-	PathMode bool
-	// CDNTTL, when positive, lets a CDN answer small site files for this long
-	// without asking this server (docs/SPEC.md "Cache-Control posture").
-	// Browsers still revalidate. Only a deployment whose writes purge that CDN
-	// may set it.
-	CDNTTL time.Duration
+	// ApexDomain is the public apex, e.g. "hostthis.dev". A slug's host under it
+	// is not the apex, so it gets none of the apex's pages.
+	ApexDomain string
 	// Color labels the replica in blue/green deploys, echoed in the
 	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
-	// ClientIP names where the room-creation limit reads the client address.
-	ClientIP ClientIPSource
-	// RoomsAccess, when set, limits the rooms API to listed networks or a
-	// token holder.
-	RoomsAccess RoomsAccess
-	Now         func() time.Time
-	// Logf, when set, receives one warn line per 5xx served by the paste/site
-	// read path (docs/SPEC.md "5xx observability on the read surface"): slug +
-	// underlying error, so a read 500 is attributable from the logs while the
-	// response body stays a generic "internal error". Nil disables.
-	Logf func(format string, args ...any)
-	// Abuse, when set, receives one line per abuse event on the
-	// rooms surface (docs/SPEC.md "Abuse log on hostthisd"). Nil disables.
-	Abuse service.AbuseLog
-}
-
-// abuse logs one abuse event for the request's client.
-func (s *Server) abuse(r *http.Request, event domain.AbuseEvent, route string, status int) {
-	if s.Abuse == nil {
-		return
-	}
-	s.Abuse.Log(event, route, status, clientAddress(r, s.ClientIP))
-}
-
-func (s *Server) logf(format string, args ...any) {
-	if s.Logf != nil {
-		s.Logf(format, args...)
-	}
 }
 
 // Handler returns the mux the caller binds with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// Fixed prefix so ServeMux's longest-prefix match routes /_hostthis/<name>
-	// here ahead of the "/" catch-all, on any Host. serveAsset whitelists the
-	// asset names, so the prefix cannot reach any other path.
-	mux.HandleFunc("/_hostthis/", s.serveAsset)
-	mux.HandleFunc("/_solid/", func(w http.ResponseWriter, r *http.Request) {
-		if _, onSlug := s.slugFromHost(r.Host); onSlug || s.Solid == nil {
-			http.NotFound(w, r)
-			return
-		}
-		s.Solid.ServeHTTP(w, r)
-	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Health endpoints answer on any Host and never enter slug routing.
-		if r.URL.Path == "/healthz" {
+		// Health endpoints answer on any Host.
+		switch r.URL.Path {
+		case "/healthz":
 			s.serveHealthz(w, r)
 			return
-		}
-		if r.URL.Path == "/readyz" {
+		case "/readyz":
 			s.serveReadyz(w, r)
 			return
 		}
-		// Subdomain mode: Host like "<slug>.<apex>". A slug resolves to a SITE
-		// (owning its whole path space) or a single-file PASTE. Site wins;
-		// the paste fallback serves ONLY at "/" so a browser's automatic
-		// favicon fetch does not receive the paste HTML labeled text/html.
-		if slug, ok := s.slugFromHost(r.Host); ok {
-			s.route(w, r, slug, r.URL.Path)
+		if _, onSlug := s.slugFromHost(r.Host); onSlug {
+			http.NotFound(w, r)
 			return
 		}
-		// Path mode only: /p/<slug> (paste) or /p/<slug>/<path...> (site) on
-		// the apex. Otherwise the apex serves no paste content, so a paste
-		// never runs on the apex origin or shares one with another paste.
-		if after, ok := strings.CutPrefix(r.URL.Path, "/p/"); ok && s.PathMode {
-			slugStr, rest, _ := strings.Cut(after, "/")
-			slug, err := domain.ParseSlug(slugStr)
-			if err != nil {
-				http.NotFound(w, r)
-				return
-			}
-			s.route(w, r, slug, "/"+rest)
-			return
-		}
-		if r.URL.Path == "/" {
+		switch {
+		case r.URL.Path == "/":
 			s.serveLanding(w, r)
-			return
-		}
-		if (r.URL.Path == "/llms.txt" || r.URL.Path == "/AGENTS.md") && len(s.AgentNotes) > 0 {
+		case (r.URL.Path == "/llms.txt" || r.URL.Path == "/AGENTS.md") && len(s.AgentNotes) > 0:
 			w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 			w.Header().Set("Cache-Control", "public, max-age=300")
 			_, _ = w.Write(s.AgentNotes)
-			return
+		default:
+			http.NotFound(w, r)
 		}
-		http.NotFound(w, r)
 	})
 	return mux
-}
-
-// route dispatches one request for slug's origin: the rooms API and the push
-// key are carved out BEFORE the static-file lookup so a manifest file can
-// never shadow them, and they answer even for a paste-only slug.
-func (s *Server) route(w http.ResponseWriter, r *http.Request, slug domain.Slug, path string) {
-	if rest, ok := roomAPIPath(path); ok {
-		s.handleRoomsAPI(w, r, slug, rest)
-		return
-	}
-	if path == pushKeyPath {
-		s.handlePushKey(w, r, slug)
-		return
-	}
-	s.serveSlug(w, r, slug, path)
 }
 
 func (s *Server) serveHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -191,13 +74,9 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 	if i := strings.Index(host, ":"); i >= 0 {
 		host = host[:i]
 	}
-	suffix := "." + s.ApexDomain
-	if !strings.HasSuffix(host, suffix) {
-		return "", false
-	}
-	sub := strings.TrimSuffix(host, suffix)
-	if strings.Contains(sub, ".") {
-		// Multi-level subdomain ("x.y.apex") is not a slug.
+	sub, ok := strings.CutSuffix(host, "."+s.ApexDomain)
+	if !ok || strings.Contains(sub, ".") {
+		// Not under the apex, or a multi-level subdomain ("x.y.apex").
 		return "", false
 	}
 	slug, err := domain.ParseSlug(sub)
@@ -209,540 +88,14 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 
 func (s *Server) serveLanding(w http.ResponseWriter, _ *http.Request) {
 	if len(s.LandingHTML) == 0 {
-		// Dev/test default; a deploy embeds web/landing.html.
+		// Dev/test default; a deploy loads web/landing.html.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "hostthis - landing page not embedded.")
 		return
 	}
-	// Short max-age: landing copy changes more often than a paste, and a
-	// copy fix should be visible within minutes without hitting origin per
-	// visitor.
+	// Short max-age: landing copy changes often, and a copy fix should be
+	// visible within minutes without hitting origin per visitor.
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = w.Write(s.LandingHTML)
-}
-
-// serveSlug resolves reqPath against the paste owning slug. ONE head read
-// decides everything: the head carries the served version's whole descriptor,
-// manifest included, so a directory's file lookup and a single file's render
-// both answer from it.
-func (s *Server) serveSlug(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) {
-	// A deploy may wire either surface alone.
-	if s.Pastes == nil {
-		if !s.serveSiteIfExists(w, r, slug, reqPath) {
-			http.NotFound(w, r)
-		}
-		return
-	}
-	p, err := s.Pastes.Get(slug)
-	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			if s.serveSiteIfExists(w, r, slug, reqPath) {
-				return
-			}
-			http.NotFound(w, r)
-			return
-		}
-		s.logf("warn: paste read 500: slug=%s metadata get: %v", slug, err)
-		serveReadError(w, "internal error")
-		return
-	}
-	// The SHAPE is declared by the paste's kind, never inferred from how
-	// many entries its manifest holds: a directory of one file is still a
-	// directory, and serving it as a document would render it instead of
-	// handing back the bytes.
-	if p.Kind.IsDirectory() {
-		s.serveDirectory(w, r, slug, p.Kind, p.Manifest, p.UploadID, p.UpdatedAt, reqPath)
-		return
-	}
-	// A document answers only at its own URL; deeper paths belong to a
-	// directory.
-	if reqPath != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	s.servePaste(w, r, slug, p)
-}
-
-// servePaste serves a resolved single-file paste with its sandboxing headers.
-func (s *Server) servePaste(w http.ResponseWriter, r *http.Request, slug domain.Slug, p domain.Paste) {
-	// Lifecycle status gate (docs/SPEC.md "Paste lifecycle status"). A pending
-	// paste's blob has not landed yet, so it gets a self-refreshing loading
-	// page; only a ready paste reaches the content serve below.
-	switch p.Status {
-	case domain.PasteStatusPending:
-		s.servePending(w, r)
-		return
-	case domain.PasteStatusFailed:
-		s.serveFailed(w, r)
-		return
-	}
-
-	// A root without an object key names no bytes. Answering here keeps a
-	// shell from serving 200 for content its raw fetch could never read.
-	root := p.RootEntry()
-	if root.Key == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	// A client-rendered kind serves the raw bytes only under an explicit ?raw,
-	// else the fixed shell. No Accept negotiation, so each URL is a SINGLE
-	// representation and safe to edge-cache (docs/SPEC.md "The bare URL always
-	// serves the shell").
-	shell := shellFor(p.Kind)
-	rawWanted := shell != nil && wantsRaw(r)
-
-	h := w.Header()
-	setSandboxHeaders(h)
-	if shell != nil && !rawWanted {
-		h.Set("Permissions-Policy", permissionsPolicy)
-	} else {
-		h.Set("Permissions-Policy", storedPermissionsPolicy)
-	}
-
-	h.Set("Cache-Control", contentCacheControl)
-
-	// ETag is the stored file's object key for HTML and for any raw body: a key
-	// never names different bytes. The shell is content-INDEPENDENT, so it
-	// validates on its shell version instead.
-	etag := storedETag(root.Validator())
-	if shell != nil && !rawWanted {
-		etag = `"` + shell.version + `"`
-	}
-	if notModified(w, r, etag, p.UpdatedAt) {
-		return
-	}
-
-	// HTML is the one kind served as itself: the stored bytes ARE the page.
-	if p.Kind == domain.KindHTML {
-		s.streamEntry(w, r, slug, root, "text/html; charset=utf-8", "paste", "html")
-		return
-	}
-
-	// Every other kind is client-rendered: raw bytes under ?raw, else the shell
-	// that fetches them same-origin under its CSP.
-	if shell == nil {
-		s.logf("warn: paste read 500: slug=%s unsupported stored kind %q", slug, p.Kind)
-		serveReadError(w, "unsupported kind")
-		return
-	}
-	if rawWanted {
-		ct := rawContentType[p.Kind]
-		if ct == "" {
-			ct = "text/plain; charset=utf-8"
-		}
-		s.streamEntry(w, r, slug, root, ct, "paste", "raw "+string(p.Kind))
-		return
-	}
-	h.Set("Content-Security-Policy", shell.policy())
-	h.Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(shell.html(p.Kind))
-}
-
-// statusPage renders the pending and failed pages from one skeleton. The
-// refresh meta and the per-page rules are substituted, not conditional, so
-// each page is exactly its head plus its card.
-func statusPage(title, refresh, style, card string) string {
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-` + refresh + `<title>` + title + `</title>
-<style>
-  :root { color-scheme: light dark; }
-  html, body { height: 100%; margin: 0; }
-  body {
-    display: flex; align-items: center; justify-content: center;
-    font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: #0e0e10; color: #e6e6e6;
-  }
-` + style + `</style>
-</head>
-<body>
-  <div class="card">
-` + card + `  </div>
-</body>
-</html>
-`
-}
-
-// loadingPageHTML is the body served for a pending paste. The meta refresh
-// (no JS required) re-checks every second until the finalizer flips the paste
-// to ready.
-var loadingPageHTML = statusPage("preparing your paste",
-	"<meta http-equiv=\"refresh\" content=\"1\">\n",
-	`  .card { text-align: center; padding: 2rem; }
-  .dot {
-    display: inline-block; width: .6rem; height: .6rem; margin: 0 .15rem;
-    border-radius: 50%; background: currentColor; opacity: .25;
-    animation: pulse 1s infinite ease-in-out;
-  }
-  .dot:nth-child(2) { animation-delay: .15s; }
-  .dot:nth-child(3) { animation-delay: .3s; }
-  @keyframes pulse { 0%,100% { opacity: .25; } 50% { opacity: 1; } }
-`,
-	`    <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-    <p>preparing your paste</p>
-`)
-
-// failedPageHTML is the body served for a failed paste, one whose blob write
-// never completed. No auto-refresh: the content will never arrive.
-var failedPageHTML = statusPage("paste unavailable", "",
-	`  .card { text-align: center; padding: 2rem; max-width: 28rem; }
-  h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
-  .muted { color: #8a8a8a; font-size: 13px; }
-`,
-	`    <h1>this paste could not be saved</h1>
-    <p class="muted">upload it again.</p>
-`)
-
-// servePending serves the loading page for a pending paste. no-store is
-// required: a cached 200 freezes the loading screen even after the paste goes
-// ready.
-func (s *Server) servePending(w http.ResponseWriter, _ *http.Request) {
-	h := w.Header()
-	setSandboxHeaders(h)
-	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Cache-Control", "no-store")
-	h.Set("Retry-After", "1")
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, loadingPageHTML)
-}
-
-// serveFailed serves the error page for a failed paste. 410 Gone: the slug
-// existed but its content will never arrive, which also keeps the failed
-// paste out of any naive success cache.
-func (s *Server) serveFailed(w http.ResponseWriter, _ *http.Request) {
-	h := w.Header()
-	setSandboxHeaders(h)
-	h.Set("Content-Type", "text/html; charset=utf-8")
-	h.Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusGone)
-	_, _ = io.WriteString(w, failedPageHTML)
-}
-
-// serveSiteIfExists serves reqPath from the static site owning slug. True
-// means the request was handled and the caller must return. False is returned
-// ONLY when no site owns the slug, so the caller falls through to the paste
-// path: one slug is either a site or a paste, never both.
-func (s *Server) serveSiteIfExists(w http.ResponseWriter, r *http.Request, slug domain.Slug, reqPath string) bool {
-	if s.Sites == nil {
-		return false
-	}
-	site, err := s.Sites.Get(slug)
-	if err != nil {
-		// A read error is deliberately indistinguishable from "no such site":
-		// the paste path tries next and surfaces its own 404 or 500.
-		return false
-	}
-	s.serveDirectory(w, r, slug, site.Kind, site.Manifest, site.UploadID, site.UpdatedAt, reqPath)
-	return true
-}
-
-// serveDirectory routes a directory artifact to the surface its kind declares:
-// a site hands back its files, a knowledge base browses them.
-func (s *Server) serveDirectory(w http.ResponseWriter, r *http.Request, slug domain.Slug,
-	kind domain.ContentKind, manifest domain.Manifest, uploadID string, updatedAt time.Time, reqPath string,
-) {
-	if kind == domain.KindKnowledgeBase {
-		s.serveKnowledgeBase(w, r, slug, manifest, uploadID, updatedAt, reqPath)
-		return
-	}
-	s.serveFromManifest(w, r, slug, manifest, updatedAt, reqPath)
-}
-
-// serveFromManifest resolves reqPath against a manifest and writes the file.
-// The one implementation both paste shapes go through.
-func (s *Server) serveFromManifest(w http.ResponseWriter, r *http.Request, slug domain.Slug, manifest domain.Manifest, updatedAt time.Time, reqPath string) {
-	// SPA fallback: a miss that looks like a client-side ROUTE serves the root
-	// index.html with a 200; a miss that looks like a static ASSET stays a 404
-	// (domain.Manifest.LookupWithSPAFallback, SPEC.md "SPA fallback (route vs.
-	// asset)"). A fallback hit is byte-identical to requesting "/".
-	entry, hit, _ := manifest.LookupWithSPAFallback(reqPath)
-	if !hit || entry.Key == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Site files are served RAW, secured by per-subdomain origin isolation
-	// rather than by sanitizing the bytes, so they carry the same sandbox
-	// headers as an HTML paste.
-	h := w.Header()
-	setSandboxHeaders(h)
-	h.Set("Permissions-Policy", storedPermissionsPolicy)
-	h.Set("Cache-Control", contentCacheControl)
-	s.setCDNCacheControl(h, entry)
-	if notModified(w, r, storedETag(entry.Validator()), updatedAt) {
-		return
-	}
-
-	ct := entry.ContentType
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	s.streamEntry(w, r, slug, entry, ct, "site", "file")
-}
-
-// cdnCacheMaxBytes is the largest site file a CDN may keep for CDNTTL. A fill
-// should end inside the 15 seconds between a write's two purges: one that ends
-// later can store the old bytes after both, until the TTL ends.
-const cdnCacheMaxBytes = 8 << 20
-
-// setCDNCacheControl gives a site file the CDN-only freshness of RFC 9213. A
-// file of unknown size gets none.
-func (s *Server) setCDNCacheControl(h http.Header, entry domain.ManifestEntry) {
-	if s.CDNTTL <= 0 || entry.DecodedSize <= 0 || entry.DecodedSize > cdnCacheMaxBytes {
-		return
-	}
-	h.Set("CDN-Cache-Control", fmt.Sprintf("public, max-age=%d", int(s.CDNTTL.Seconds())))
-}
-
-// streamBufPool holds the copy buffers of streamEntry.
-var streamBufPool = sync.Pool{New: func() any { b := make([]byte, 32<<10); return &b }}
-
-// streamEntry writes entry's stored bytes as a 200 under ct, streamed so
-// memory stays constant whatever the size. Content-Length is the entry's
-// recorded decoded size, so a short body is visible to every client; an entry
-// without one declares none, since its Size may be wrong. An entry with a
-// size answers single byte ranges (docs/SPEC.md "Byte ranges").
-//
-// The first chunk is decoded before the status goes out, so damage found there
-// is a 500. Damage found later aborts the response, the one signal left once
-// the status is sent. The last byte is held back until the stream ends
-// cleanly, so damage found only at the end (the frame checksum) still leaves
-// the client short.
-func (s *Server) streamEntry(w http.ResponseWriter, r *http.Request, slug domain.Slug,
-	entry domain.ManifestEntry, ct, surface, what string,
-) {
-	h := w.Header()
-	// Never on a 304: a cache applies a 304's headers to the response it
-	// stored, and a shell's stricter policy must not be replaced.
-	h.Set("Content-Security-Policy", sandboxPolicy)
-	size, known := entry.DecodedLength()
-	status, rng := http.StatusOK, domain.ByteRange{Length: int64(size)}
-	if known {
-		h.Set("Accept-Ranges", "bytes")
-		var verdict domain.RangeVerdict
-		if ifr := r.Header.Get("If-Range"); ifr == "" || ifr == h.Get("ETag") {
-			rng, verdict = domain.ParseRange(r.Header.Get("Range"), int64(size))
-		}
-		switch verdict {
-		case domain.RangeUnsatisfiable:
-			h.Del("CDN-Cache-Control")
-			h.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-			return
-		case domain.RangeSatisfiable:
-			status = http.StatusPartialContent
-			h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", rng.Start, rng.Start+rng.Length-1, size))
-		default:
-			rng = domain.ByteRange{Length: int64(size)}
-		}
-	}
-
-	rc, _, err := s.Blobs.Read(r.Context(), entry)
-	if err != nil {
-		s.logf("warn: %s read failed: slug=%s %s blob read: %v", surface, slug, what, err)
-		if errors.As(err, new(*domain.PodRefusedError)) {
-			serveStorageOffline(w)
-		} else {
-			serveReadError(w, "internal error")
-		}
-		return
-	}
-	defer rc.Close() //nolint:errcheck
-	var body io.Reader = rc
-	if rng.Start > 0 {
-		if _, err := io.CopyN(io.Discard, rc, rng.Start); err != nil {
-			s.logf("warn: %s read 500: slug=%s %s decode: %v", surface, slug, what, err)
-			serveReadError(w, "internal error")
-			return
-		}
-	}
-	// A range short of the end cannot see the frame checksum.
-	if known && rng.Start+rng.Length < int64(size) {
-		body = io.LimitReader(rc, rng.Length)
-	}
-
-	bp := streamBufPool.Get().(*[]byte)
-	defer streamBufPool.Put(bp)
-	buf := *bp
-	held := 0
-	for held == 0 && err == nil {
-		held, err = body.Read(buf)
-	}
-	if err != nil && err != io.EOF {
-		s.logf("warn: %s read 500: slug=%s %s decode: %v", surface, slug, what, err)
-		serveReadError(w, "internal error")
-		return
-	}
-
-	h.Set("Content-Type", ct)
-	if known {
-		h.Set("Content-Length", strconv.FormatInt(rng.Length, 10))
-	}
-	w.WriteHeader(status)
-	var sent int64
-	for err == nil {
-		if held > 1 {
-			n, werr := w.Write(buf[:held-1])
-			sent += int64(n)
-			if werr != nil {
-				s.warnShort(werr, slug, surface, what, size)
-				return
-			}
-			buf[0], held = buf[held-1], 1
-		}
-		var n int
-		n, err = body.Read(buf[held:])
-		held += n
-	}
-	if err != io.EOF {
-		s.logf("warn: %s read aborted: slug=%s %s decode: %v", surface, slug, what, err)
-		panic(http.ErrAbortHandler)
-	}
-	n, werr := w.Write(buf[:held])
-	sent += int64(n)
-	if werr == nil && known && sent != rng.Length {
-		werr = http.ErrContentLength
-	}
-	s.warnShort(werr, slug, surface, what, size)
-}
-
-// warnShort logs a decoded size that disagrees with the declared one. The
-// server already ends such a response short of its Content-Length; any other
-// write error is a client that went away.
-func (s *Server) warnShort(err error, slug domain.Slug, surface, what string, size int) {
-	if errors.Is(err, http.ErrContentLength) {
-		s.logf("warn: %s read short: slug=%s %s decoded size differs from the recorded %d", surface, slug, what, size)
-	}
-}
-
-// permissionsPolicy denies the powerful browser features a served page could
-// otherwise request. A render shell and every other response hostthis writes
-// itself carry it: hostthis's own pages never capture.
-const permissionsPolicy = "camera=(), microphone=(), geolocation=(), usb=(), payment=()"
-
-// storedPermissionsPolicy is what stored bytes carry: the page may capture the
-// camera, microphone and screen on its own origin, for WebRTC, once the
-// visitor accepts the browser's prompt (docs/SPEC.md "WebRTC").
-const storedPermissionsPolicy = "camera=(self), microphone=(self), display-capture=(self), geolocation=(), usb=(), payment=()"
-
-// contentCacheControl is every content response's: any cache may store it but
-// must revalidate before each reuse, so an update, pin or delete shows on the
-// next load, and an unchanged file costs a 304.
-const contentCacheControl = "public, no-cache"
-
-// sandboxPolicy lets a stored page load and connect anywhere over https or
-// wss, never plain http or ws, so its code cannot reach a visitor's localhost,
-// LAN or a cloud metadata address; and keeps its forms on its own origin.
-const sandboxPolicy = "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'"
-
-// storedETag is a stored file's validator, tagged with a hash of the headers
-// stored bytes carry. A 304 never carries those headers, so without the tag a
-// cache that stored the file before a header change would keep revalidating
-// its old copy, and the old headers with it, forever.
-func storedETag(validator string) string {
-	return `"` + validator + "-p" + sandboxTag + `"`
-}
-
-var sandboxTag = func() string {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(sandboxPolicy + "\n" + robotsTag))
-	return fmt.Sprintf("%08x", h.Sum32())
-}()
-
-// setSandboxHeaders applies the framing and referrer lockdown every response
-// from a paste origin carries (docs/SPEC.md HTML-sandboxing section), and
-// keeps it out of search indexes (docs/SPEC.md "Search engines").
-func setSandboxHeaders(h http.Header) {
-	h.Set("X-Frame-Options", "DENY")
-	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("X-Robots-Tag", robotsTag)
-}
-
-// robotsTag is every paste-origin response's X-Robots-Tag.
-const robotsTag = "noindex, nofollow"
-
-// contentHeaders are the headers a content response sets before it can still
-// fail.
-var contentHeaders = []string{
-	"CDN-Cache-Control",
-	"Accept-Ranges", "Cache-Control", "Content-Length", "Content-Range", "Content-Security-Policy", "ETag",
-	"Last-Modified", "Permissions-Policy", "Referrer-Policy", "X-Frame-Options", "X-Robots-Tag",
-}
-
-// serveReadError answers a read-path 5xx with its text alone. Validators or a
-// cacheable posture left on a 500 would let a cache store the error, or
-// revalidate it against the content it replaced.
-// serveStorageOffline answers a read whose bytes live in an owner's pod that
-// refused or did not answer (docs/SPEC.md "Pod storage").
-func serveStorageOffline(w http.ResponseWriter) {
-	h := w.Header()
-	for _, k := range contentHeaders {
-		h.Del(k)
-	}
-	h.Set("Cache-Control", "no-store")
-	h.Set("Retry-After", "300")
-	http.Error(w, "this paste's storage is offline right now", http.StatusServiceUnavailable)
-}
-
-func serveReadError(w http.ResponseWriter, text string) {
-	h := w.Header()
-	for _, k := range contentHeaders {
-		h.Del(k)
-	}
-	h.Set("Cache-Control", "no-store")
-	http.Error(w, text, http.StatusInternalServerError)
-}
-
-// notModified sets the response validators (ETag, Last-Modified) and answers
-// a conditional GET with a bodiless 304 when the client's validator matches.
-// If-Modified-Since counts only without If-None-Match (RFC 9110 13.2.2). True
-// means the response is written.
-func notModified(w http.ResponseWriter, r *http.Request, etag string, updatedAt time.Time) bool {
-	h := w.Header()
-	h.Set("Last-Modified", updatedAt.UTC().Format(http.TimeFormat))
-	h.Set("ETag", etag)
-	if inm := r.Header.Get("If-None-Match"); inm != "" {
-		if etagMatches(inm, etag) {
-			w.WriteHeader(http.StatusNotModified)
-			return true
-		}
-		return false
-	}
-	if ims := r.Header.Get("If-Modified-Since"); ims != "" {
-		if since, err := http.ParseTime(ims); err == nil && !updatedAt.UTC().Truncate(time.Second).After(since) {
-			w.WriteHeader(http.StatusNotModified)
-			return true
-		}
-	}
-	return false
-}
-
-// wantsRaw reports whether the client asked for the raw paste bytes rather
-// than the client-render shell. True ONLY for an explicit ?raw query: there is
-// no Accept negotiation, so the bare URL is a single representation (the
-// shell, for every client) and safe to edge-cache.
-func wantsRaw(r *http.Request) bool {
-	return r.URL.Query().Has("raw")
-}
-
-// etagMatches reports whether an If-None-Match header lists etag. Handles the
-// comma-separated form and the "*" wildcard.
-func etagMatches(ifNoneMatch, etag string) bool {
-	if ifNoneMatch == "" {
-		return false
-	}
-	if strings.TrimSpace(ifNoneMatch) == "*" {
-		return true
-	}
-	for candidate := range strings.SplitSeq(ifNoneMatch, ",") {
-		if strings.TrimSpace(candidate) == etag {
-			return true
-		}
-	}
-	return false
 }

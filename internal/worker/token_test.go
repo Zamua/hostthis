@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/coder/websocket"
-
 	"github.com/Zamua/hostthis/internal/worker"
 )
 
@@ -129,34 +127,5 @@ func TestAuthorizeRefusesUnusableConfig(t *testing.T) {
 		if strings.Contains(err.Error(), tc.token) {
 			t.Fatalf("error %q repeats the token", err)
 		}
-	}
-}
-
-// The room relay dials an https Worker as wss, carrying the token.
-func TestRoomProxyDialsAnHTTPSWorkerWithTheToken(t *testing.T) {
-	const snapshot = `{"type":"snapshot","seq":0,"state":{}}`
-	cell, seen := recorder(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+testToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if err != nil {
-			return
-		}
-		_ = c.Write(r.Context(), websocket.MessageText, []byte(snapshot))
-		for {
-			if _, _, err := c.Read(r.Context()); err != nil {
-				return
-			}
-		}
-	})
-	_, client, ctx := proxiedBy(t, worker.NewRoomProxy(cell.URL, authorized(t, cell.URL, testToken)))
-	_, data, err := client.Read(ctx)
-	if err != nil {
-		t.Fatalf("read snapshot: %v (cell saw Authorization %q)", err, seen())
-	}
-	if string(data) != snapshot {
-		t.Fatalf("snapshot = %q", data)
 	}
 }

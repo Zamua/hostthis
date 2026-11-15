@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +24,9 @@ import (
 
 // localRuntime is one Worker process, started on first use.
 type localRuntime struct {
-	token   string
+	token string
+	// env is added to the runtime's environment.
+	env     []string
 	once    sync.Once
 	baseURL string
 	bootErr error
@@ -38,7 +41,16 @@ var (
 	seq     atomic.Int64
 	plain   = &localRuntime{byTest: map[testing.TB]string{}}
 	tokened = &localRuntime{token: newToken(), byTest: map[testing.TB]string{}}
+	public  = &localRuntime{token: newToken(), byTest: map[testing.TB]string{}, env: []string{
+		"HOSTTHIS_LOCALRT_APEX_DOMAIN=" + PublicApex,
+		"HOSTTHIS_LOCALRT_URL_MODE=path",
+		"HOSTTHIS_LOCALRT_PUBLIC_SCHEME=http",
+	}}
 )
+
+// PublicApex is the apex of the runtime PublicEndpoint shares. The Worker
+// ignores a host's port, so its listener addressed as localhost is the apex.
+const PublicApex = "localhost"
 
 func newToken() string {
 	b := make([]byte, 16)
@@ -53,11 +65,12 @@ func localrtDir() string {
 
 func (r *localRuntime) start() {
 	// Set even when empty, so an inherited token never gates the open runtime.
-	r.baseURL, r.stdin, _, r.bootErr = launch(append(runtimeEnv(), "HOSTTHIS_WORKER_TOKEN="+r.token), os.Stderr)
+	env := append(runtimeEnv(), "HOSTTHIS_WORKER_TOKEN="+r.token)
+	r.baseURL, r.stdin, _, r.bootErr = launch(append(env, r.env...), os.Stderr)
 }
 
 // runtimeEnv is this process's environment without the variables that turn
-// the runtime's public surface on, so only StartPublic ever does.
+// the runtime's public surface on, so only StartPublic and PublicEndpoint do.
 func runtimeEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
@@ -153,9 +166,34 @@ func TokenEndpoint(t testing.TB) (endpoint, token string) {
 	return tokened.endpoint(t), tokened.token
 }
 
+// PublicNamespace is t's cell namespace on the shared runtime whose public
+// surface is on, in path mode under PublicApex over http.
+type PublicNamespace struct {
+	// Endpoint is the internal endpoint, which takes Token.
+	Endpoint string
+	Token    string
+	// Reads is the same namespace addressed by the apex host: Reads+"/p/<slug>"
+	// reads a slug in path mode, and a request under Reads whose Host is
+	// "<slug>."+PublicApex reads it in subdomain shape.
+	Reads string
+}
+
+// PublicEndpoint is t's namespace on the shared public runtime, the same on
+// every call in t. Its reads see only what the namespace holds.
+func PublicEndpoint(t testing.TB) PublicNamespace {
+	t.Helper()
+	ep := public.endpoint(t)
+	u, err := url.Parse(ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Host = PublicApex + ":" + u.Port()
+	return PublicNamespace{Endpoint: ep, Token: public.token, Reads: u.String()}
+}
+
 // Stop ends the runtimes early; they otherwise exit with the test binary.
 func Stop() {
-	for _, r := range []*localRuntime{plain, tokened} {
+	for _, r := range []*localRuntime{plain, tokened, public} {
 		if r.stdin != nil {
 			_ = r.stdin.Close()
 		}

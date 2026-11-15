@@ -6,26 +6,21 @@ import (
 	"errors"
 	"io"
 	"log"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/coder/websocket"
-
 	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/roomwire"
 	"github.com/Zamua/hostthis/internal/workertest"
 )
 
 // probeWorker builds the Worker clients exactly as the daemon does, from
 // HOSTTHIS_WORKER_ENDPOINT and HOSTTHIS_WORKER_TOKEN, and drives each of them
-// once: every metadata adapter, the three blob calls, and the room relay dial.
+// once: every metadata adapter and the three blob calls.
 // A probe's error is nil when the Worker served it.
 func probeWorker(t *testing.T, logger *log.Logger) map[string]error {
 	t.Helper()
-	meta, err := buildMetadata("example.test", logger)
+	meta, err := buildMetadata(logger)
 	if err != nil {
 		t.Fatalf("build metadata: %v", err)
 	}
@@ -53,8 +48,8 @@ func probeWorker(t *testing.T, logger *log.Logger) map[string]error {
 	probes["sites"] = notFound(err)
 	_, err = meta.KeyGate.AdmitNewKey("SHA256:token-probe", "203.0.113.0/24", time.Now(), 20, time.Hour)
 	probes["key gate"] = err
-	_, err = meta.Rooms.GetRoom(slug, domain.NewRoomID())
-	probes["room repo"] = notFound(err)
+	_, err = meta.AppRooms.List(slug)
+	probes["app rooms"] = err
 
 	upload := domain.NewUploadID()
 	key := domain.UploadObjectKey(upload, 0)
@@ -72,32 +67,7 @@ func probeWorker(t *testing.T, logger *log.Logger) map[string]error {
 	probes["blob get"] = err
 	probes["blob delete"] = blobs.DeleteUpload(ctx, upload)
 
-	probes["room relay"] = probeRelay(ctx, t, meta)
 	return probes
-}
-
-// probeRelay joins a room through the relay and reads the cell's snapshot.
-func probeRelay(ctx context.Context, t *testing.T, meta *metadataBundle) error {
-	t.Helper()
-	room := roomwire.RoomKey{App: "prbe2345", ID: domain.NewRoomID()}
-	id, err := meta.RoomRelay.Admit(room)
-	if err != nil {
-		return err
-	}
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-		if err == nil {
-			meta.RoomRelay.Serve(r.Context(), room, id, c)
-		}
-	}))
-	defer front.Close()
-	client, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(front.URL, "http"), nil)
-	if err != nil {
-		return err
-	}
-	defer client.CloseNow() //nolint:errcheck
-	_, _, err = client.Read(ctx)
-	return err
 }
 
 func TestEveryWorkerCallCarriesTheToken(t *testing.T) {

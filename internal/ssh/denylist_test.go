@@ -13,7 +13,7 @@ import (
 
 func (s *stack) denylistOp(op, body string) {
 	s.t.Helper()
-	res, err := http.Post(s.endpoint+"/denylist/"+op, "application/json", bytes.NewBufferString(body))
+	res, err := s.client.Post(s.endpoint+"/denylist/"+op, "application/json", bytes.NewBufferString(body))
 	if err != nil || res.StatusCode != http.StatusOK {
 		s.t.Fatalf("denylist %s %s: %v %v", op, body, res, err)
 	}

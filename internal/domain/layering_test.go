@@ -27,7 +27,6 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	archive, cache    mechanisms that speak in domain values.
 //	storage           repository adapters.
 //	service           use cases; declares the ports, never names an adapter.
-//	relay, relaygrpc  the room relay and its gRPC peer transport.
 //	http, ssh         transports; they reach service, never an adapter.
 var layerPolicy = map[string][]string{
 	"mime": {},
@@ -41,27 +40,22 @@ var layerPolicy = map[string][]string{
 	"domain":  {},
 	// The abuse log adapter: the consumer declares the port (service.AbuseLog).
 	"abuselog": {"domain"},
-	// The shared room-realtime vocabulary. A leaf like domain: both relay
-	// implementations speak it, and it may never grow machinery.
-	"roomwire": {"domain"},
 	"archive":  {"domain"},
 	"cache":    {"domain", "drain"},
 	// The screening service's HTTP adapter.
 	"screen":  {"domain"},
 	"storage": {"domain", "zstdenc"},
 	"service": {"archive", "domain", "mime", "zstdenc"},
-	"http":    {"archive", "domain", "mime", "roomwire", "service", "zstdenc"},
+	"http":    {"domain"},
 	"ssh":     {"archive", "domain", "drain", "mime", "service", "zstdenc"},
 
 	// The worker adapters implement domain-shaped ports directly, beside storage
 	// rather than on top of it.
-	"worker": {"domain", "drain", "roomwire"},
+	"worker": {"domain"},
 
 	// Test-only harness: the importable package is empty and must stay so. Its
 	// _test.go files wire whole stacks, which is why the graph is production-only.
 	"sitevalidation": {},
-	// Test-only like sitevalidation: the response parity suite.
-	"parity": {},
 
 	// Test-only: runs the Worker locally for other packages' tests. A
 	// leaf, so any test may use it, and in no production package's allowed set.

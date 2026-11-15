@@ -1,7 +1,7 @@
 // The read rules: what a request to a paste's origin serves, decided from the
 // stored row alone. Pure, with no I/O and no runtime API, so the Paste cell runs
 // them and only the small answer leaves it. testdata/read-vectors.json holds
-// them to the Go read path (domain.Manifest, internal/http serveSlug).
+// them to the Go domain rules (domain.Manifest).
 //
 // An answer is one of:
 //   { found: false }                       no row
