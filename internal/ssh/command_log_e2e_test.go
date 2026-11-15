@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -95,7 +94,7 @@ func TestNewKeyRecordsTheAddressItCameFrom(t *testing.T) {
 	}
 	target := fmt.Sprintf("%s/identity/subnetlist?scope=%s&now=%d", s.endpoint,
 		url.QueryEscape("key:"+s.keyedOwner), time.Now().UnixMilli())
-	resp, err := http.Get(target)
+	resp, err := s.client.Get(target)
 	if err != nil {
 		t.Fatal(err)
 	}

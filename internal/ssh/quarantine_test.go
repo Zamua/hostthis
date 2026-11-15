@@ -9,7 +9,7 @@ import (
 
 func (s *stack) abuseOp(op, slug string) {
 	s.t.Helper()
-	res, err := http.Post(s.endpoint+"/abuse/"+op, "application/json",
+	res, err := s.client.Post(s.endpoint+"/abuse/"+op, "application/json",
 		bytes.NewBufferString(`{"slug":"`+slug+`","reason":"test"}`))
 	if err != nil || res.StatusCode != http.StatusOK {
 		s.t.Fatalf("abuse %s %s: %v %v", op, slug, res, err)

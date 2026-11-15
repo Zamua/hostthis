@@ -1,13 +1,13 @@
 // Package sitevalidation is the test-only byte-identical validation harness for
 // static-site hosting. It deploys real framework-built site fixtures through the
 // SAME archive pipeline an ssh tar upload hits (service.DeploySite over a real
-// metadata repo and compressed blob store), fetches every built file back over the
-// real HTTP serving surface, and asserts the served bytes are BYTE-IDENTICAL to
+// metadata repo and compressed blob store), fetches every built file back from the
+// Worker's public surface, and asserts the served bytes are BYTE-IDENTICAL to
 // the fixture with the content type the extension implies.
 //
 // Fixtures are committed build outputs under testdata/sitefixtures/<demo>/dist
-// (see that dir's README). The harness never runs npm, so `go test ./...`
-// exercises the full deploy + serve round-trip with no Node toolchain.
+// (see that dir's README). The harness never rebuilds them, so `go test ./...`
+// exercises the full deploy + serve round-trip without a framework toolchain.
 package sitevalidation
 
 import (
@@ -16,21 +16,17 @@ import (
 	"compress/gzip"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	"github.com/Zamua/hostthis/internal/storage"
 	"github.com/Zamua/hostthis/internal/worker"
 	"github.com/Zamua/hostthis/internal/workertest"
 )
-
-const apexDomain = "paste.test"
 
 // fixtureDist resolves the absolute path to a fixture's dist/ directory. Tests
 // run with the package dir as CWD, so fixtures are two levels up under
@@ -122,22 +118,22 @@ func tarDist(t *testing.T, files []distFile) []byte {
 	return buf.Bytes()
 }
 
-// deployedSite is a live site: the slug it landed under plus a real HTTP
-// server in front of the same repos it was deployed into.
+// deployedSite is a live site: the slug it landed under and the Worker
+// public surface that reads the namespace it was deployed into.
 type deployedSite struct {
-	slug    domain.Slug
-	httpSrv *httptest.Server
+	slug  domain.Slug
+	reads string
 }
 
-// get issues a request whose Host is "<slug>.paste.test", so the server's
+// get issues a request whose Host is "<slug>.<apex>", so the Worker's
 // subdomain routing peels the slug exactly as in production.
 func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest("GET", d.httpSrv.URL+urlPath, nil)
+	req, err := http.NewRequest("GET", d.reads+urlPath, nil)
 	if err != nil {
 		t.Fatalf("new request %q: %v", urlPath, err)
 	}
-	req.Host = d.slug.String() + "." + apexDomain
+	req.Host = d.slug.String() + "." + workertest.PublicApex
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET %q: %v", urlPath, err)
@@ -145,18 +141,23 @@ func (d deployedSite) get(t *testing.T, urlPath string) *http.Response {
 	return resp
 }
 
-// deployFixture stands up real metadata repo, compressed-blob and site repos, deploys
-// the fixture's dist/ through the production DeploySite use case, and fronts
-// those same repos with the real HTTP handler.
+// deployFixture stands up real metadata repo, compressed-blob and site repos,
+// and deploys the fixture's dist/ through the production DeploySite use case
+// into a Worker namespace whose public surface serves it.
 func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	t.Helper()
-	endpoint := workertest.Endpoint(t)
-	rawBlobs, err := storage.NewWorkerBlobStore(endpoint, nil)
+	ns := workertest.PublicEndpoint(t)
+	authed, err := worker.Authorize(nil, ns.Endpoint, ns.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: authed}
+	rawBlobs, err := storage.NewWorkerBlobStore(ns.Endpoint, client)
 	if err != nil {
 		t.Fatalf("blob store: %v", err)
 	}
 	blobUnit := storage.NewCompressedBlobStore(rawBlobs)
-	pastes := worker.NewPasteRepo(endpoint, nil)
+	pastes := worker.NewPasteRepo(ns.Endpoint, client)
 	sites := storage.NewSites(pastes)
 	deploy := service.NewDeploySite(sites, pastes, blobUnit)
 
@@ -172,15 +173,7 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 		t.Fatalf("deploy %s fixture: %v", demo, err)
 	}
 
-	httpSrv := httptest.NewServer((&httpapi.Server{
-		Pastes:     pastes,
-		Sites:      sites,
-		Blobs:      blobUnit,
-		ApexDomain: apexDomain,
-	}).Handler())
-	t.Cleanup(httpSrv.Close)
-
-	return files, deployedSite{slug: res.Site.Slug, httpSrv: httpSrv}
+	return files, deployedSite{slug: res.Site.Slug, reads: ns.Reads}
 }
 
 func readBody(t *testing.T, resp *http.Response) []byte {

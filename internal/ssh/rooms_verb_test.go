@@ -27,7 +27,7 @@ func TestRooms_OwnerListsAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rooms := service.NewRooms(worker.NewRoomRepo(g.endpoint, nil))
+	rooms := service.NewRooms(worker.NewRoomRepo(g.endpoint, g.client))
 	var ids []string
 	for range 3 {
 		room, err := rooms.Create(app, "203.0.113.0/24")

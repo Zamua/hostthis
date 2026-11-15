@@ -13,7 +13,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +21,6 @@ import (
 
 	"github.com/Zamua/hostthis/internal/abuselog"
 	"github.com/Zamua/hostthis/internal/domain"
-	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -49,17 +47,21 @@ func fingerprintSigner(pk xssh.PublicKey) string {
 const qrGlyphs = "█▀▄"
 
 // stack is one real hostthisd-shaped deployment: metadata repo, blob store,
-// http surface, ssh server, plus a keyed and an anonymous client. Options wire
-// the optional services (site deploy, Sybil gate, PROXY protocol).
+// ssh server, the Worker's public surface reading what they write, plus a
+// keyed and an anonymous client. Options wire the optional services (site
+// deploy, Sybil gate, PROXY protocol).
 type stack struct {
-	t          *testing.T
-	httpURL    string
-	sshAddr    string
-	repo       *worker.PasteRepo
-	upload     *service.Upload
-	keyGate    *service.KeyGate
-	denyGate   *service.DenyGate
+	t *testing.T
+	// httpURL is the Worker's public surface: httpURL+"/p/<slug>" reads a slug.
+	httpURL  string
+	sshAddr  string
+	repo     *worker.PasteRepo
+	upload   *service.Upload
+	keyGate  *service.KeyGate
+	denyGate *service.DenyGate
+	// endpoint is the Worker's internal endpoint; client carries its token.
 	endpoint   string
+	client     *http.Client
 	keyed      *xssh.Client
 	keyedOwner string
 	anon       *xssh.Client
@@ -136,7 +138,7 @@ func withAllow(entries ...string) stackOpt {
 	}
 }
 
-// withSites wires the static-site deploy path on both the ssh and http side.
+// withSites wires the static-site deploy path.
 func withSites() stackOpt { return func(o *stackOpts) { o.sites = true } }
 
 // withProxyProto requires a PROXY v1 header on every connection, so the
@@ -149,19 +151,24 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	endpoint := workertest.Endpoint(t)
-	rawBlobs, err := storage.NewWorkerBlobStore(endpoint, nil)
+	ns := workertest.PublicEndpoint(t)
+	endpoint := ns.Endpoint
+	authed, err := worker.Authorize(nil, endpoint, ns.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: authed}
+	rawBlobs, err := storage.NewWorkerBlobStore(endpoint, client)
 	if err != nil {
 		t.Fatalf("blobs: %v", err)
 	}
-	// Same wrapping as cmd/hostthisd: service and http surface both go through
-	// the compression layer.
+	// Same wrapping as cmd/hostthisd.
 	var raw storage.InnerBlobStore = rawBlobs
 	if o.rawBlobs != nil {
 		raw = o.rawBlobs(raw)
 	}
 	blobUnit := storage.NewCompressedBlobStore(raw)
-	repo := worker.NewPasteRepo(endpoint, nil)
+	repo := worker.NewPasteRepo(endpoint, client)
 	upload := service.NewUpload(repo, blobUnit)
 	t.Cleanup(upload.WaitFinalize)
 	var admin service.PasteAdmin = repo
@@ -172,7 +179,6 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	upload.Screen = o.screen
 	manage.Screen = o.screen
 
-	httpSrv := &httpapi.Server{PathMode: true, Pastes: repo, Blobs: blobUnit}
 	sshSrv := &hostssh.Server{
 		ApexDomain: "paste.test",
 		Upload:     upload,
@@ -181,7 +187,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
 	}
-	sshSrv.AppRooms = &service.OwnerRooms{Slugs: repo, Rooms: worker.NewAppRoomsRepo(endpoint, nil), Now: time.Now}
+	sshSrv.AppRooms = &service.OwnerRooms{Slugs: repo, Rooms: worker.NewAppRoomsRepo(endpoint, client), Now: time.Now}
 	sshSrv.ProxyProtocol = o.proxyProto
 	sshSrv.Abuse = o.abuse
 	if o.logOut != nil {
@@ -189,15 +195,13 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	}
 	if o.sites {
 		sites := storage.NewSites(repo)
-		httpSrv.Sites = sites
-		httpSrv.ApexDomain = "paste.test"
 		deploy := service.NewDeploySite(sites, repo, blobUnit)
 		deploy.Screen = o.screen
 		sshSrv.Deploy = service.NewSiteCacheInvalidating(deploy, o.purger, nil)
 	}
 	var keyGate *service.KeyGate
 	if o.keyGateCap > 0 {
-		keyGate = service.NewKeyGate(worker.NewKeyGateRepo(endpoint, nil))
+		keyGate = service.NewKeyGate(worker.NewKeyGateRepo(endpoint, client))
 		keyGate.MaxFreshKeysPerSubnet = o.keyGateCap
 		manage.KeyGate = keyGate
 		sshSrv.KeyGate = keyGate
@@ -205,15 +209,13 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 
 	var denyGate *service.DenyGate
 	if o.denylist {
-		denyGate = service.NewDenyGate(worker.NewDenylistRepo(endpoint, nil))
+		denyGate = service.NewDenyGate(worker.NewDenylistRepo(endpoint, client))
 		sshSrv.Denylist = denyGate
 	}
 	sshSrv.Allow = o.allow
 	sshSrv.IdleTimeout, sshSrv.MaxSession = o.idle, o.max
 
-	hs := httptest.NewServer(httpSrv.Handler())
-	t.Cleanup(hs.Close)
-	sshSrv.BuildURL = func(s domain.Slug) string { return hs.URL + "/p/" + s.String() }
+	sshSrv.BuildURL = func(s domain.Slug) string { return ns.Reads + "/p/" + s.String() }
 
 	l := mustListen(t)
 	addr := l.Addr().String()
@@ -222,8 +224,8 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	go func() { _ = sshSrv.ListenAndServe() }()
 	waitForSSH(t, addr)
 
-	s := &stack{t: t, httpURL: hs.URL, sshAddr: addr, repo: repo, upload: upload, keyGate: keyGate,
-		denyGate: denyGate, endpoint: endpoint}
+	s := &stack{t: t, httpURL: ns.Reads, sshAddr: addr, repo: repo, upload: upload, keyGate: keyGate,
+		denyGate: denyGate, endpoint: endpoint, client: client}
 	if !o.proxyProto {
 		s.keyed, s.keyedOwner = newKeyClient(t, addr)
 		s.anon = newAnonClient(t, addr)

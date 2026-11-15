@@ -15,13 +15,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
-	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
 	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
@@ -51,14 +51,12 @@ func solidKeyJWK(t *testing.T) string {
 	return string(raw)
 }
 
-// podStack is a deployment whose Worker has pod support, with its apex
-// /_solid/ paths served through hostthisd as in production.
+// podStack is a deployment whose Worker has pod support. Its public surface,
+// the apex /_solid/ paths included, answers at a port fixed before the Worker
+// starts, so the WebID it signs for is one the pod can reach.
 type podStack struct {
 	*stack
 	pod *fakePod
-	// worker is the Worker's listener; addressed by the apex host it is the
-	// public read surface.
-	worker string
 }
 
 func startPodStack(t *testing.T, acp, register bool, storages ...string) *podStack {
@@ -69,7 +67,7 @@ func startPodStack(t *testing.T, acp, register bool, storages ...string) *podSta
 	}
 
 	// The public origin is known before the Worker starts, so the WebID it
-	// signs for is the one hostthisd serves.
+	// signs for is the one the pod reaches.
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -100,12 +98,13 @@ func startPodStack(t *testing.T, acp, register bool, storages ...string) *podSta
 	deploy := service.NewDeploySite(sites, repo, blobUnit)
 	deploy.UploadIDs = pods.UploadID
 	upload.Archive = service.ArchiveAdapter{Deployer: deploy}
-	solid, err := worker.NewSolidProxy(rt.URL, "localhost", authed)
+	// The origin passes every request to the Worker with its Host intact, so
+	// the Worker answers it as the apex.
+	target, err := url.Parse(rt.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpSrv := &httpapi.Server{PathMode: true, Pastes: repo, Blobs: blobUnit, Sites: sites, ApexDomain: "localhost", Solid: solid}
-	hs := httptest.NewUnstartedServer(httpSrv.Handler())
+	hs := httptest.NewUnstartedServer(httputil.NewSingleHostReverseProxy(target))
 	_ = hs.Listener.Close()
 	hs.Listener = l
 	hs.Start()
@@ -131,7 +130,7 @@ func startPodStack(t *testing.T, acp, register bool, storages ...string) *podSta
 	waitForSSH(t, addr)
 	s := &stack{t: t, httpURL: origin, sshAddr: addr, repo: repo, upload: upload}
 	s.keyed, s.keyedOwner = newKeyClient(t, addr)
-	return &podStack{stack: s, pod: pod, worker: rt.URL}
+	return &podStack{stack: s, pod: pod}
 }
 
 var noRedirect = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -231,14 +230,11 @@ func siteArchive(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-func assertStorageOffline(t *testing.T, server, u, host string) {
+func assertStorageOffline(t *testing.T, u string) {
 	t.Helper()
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if host != "" {
-		req.Host = host
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -248,7 +244,7 @@ func assertStorageOffline(t *testing.T, server, u, host string) {
 	b, _ := io.ReadAll(res.Body)
 	if res.StatusCode != 503 || string(b) != "this paste's storage is offline right now\n" ||
 		res.Header.Get("Retry-After") != "300" || res.Header.Get("Cache-Control") != "no-store" {
-		t.Fatalf("%s: %d %q Retry-After %q Cache-Control %q", server, res.StatusCode, b,
+		t.Fatalf("%d %q Retry-After %q Cache-Control %q", res.StatusCode, b,
 			res.Header.Get("Retry-After"), res.Header.Get("Cache-Control"))
 	}
 }
@@ -355,9 +351,8 @@ func TestPodStorageEndToEnd(t *testing.T) {
 			if code == 0 || !strings.Contains(stderr, "your pod refused the write (403)") {
 				t.Fatalf("refused deploy: exit %d %q", code, stderr)
 			}
-			// A read the pod refuses tells the reader the storage is offline, from both servers.
-			assertStorageOffline(t, "hostthisd", pasteURL+"?raw", "")
-			assertStorageOffline(t, "worker", s.worker+strings.TrimPrefix(pasteURL, s.httpURL)+"?raw", "localhost")
+			// A read the pod refuses tells the reader the storage is offline.
+			assertStorageOffline(t, pasteURL+"?raw")
 			s.pod.setDeny(false)
 
 			// After unlink, new bytes go to the bucket; the pod's paste still reads.
