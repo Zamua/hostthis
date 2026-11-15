@@ -159,6 +159,83 @@ test("the cell answers a client's close frame", { skip }, async () => {
   assert.ok(await client.closedWithin(2000), "no close frame came back within 2 s");
 });
 
+async function putValue(id, key, body) {
+  const res = await mf.dispatchFetch(`http://${APP}.${APEX}/api/rooms/${id}/${key}`, { method: "PUT", body });
+  assert.equal(res.status, 204, await res.text());
+}
+
+// Every connected client receives every durable mutation, in commit order and
+// with a dense seq: the cell owning the room is the broadcast point.
+test("every client receives every write in commit order with a dense seq", { skip }, async () => {
+  const id = await newRoom();
+  const clients = [await connect(id), await connect(id), await connect(id)];
+  for (let n = 0; n < 5; n++) await putValue(id, `k${n}`, `{"n":${n}}`);
+  for (const [i, client] of clients.entries()) {
+    let last = 0;
+    for (let n = 0; n < 5; n++) {
+      const f = JSON.parse(await client.next());
+      assert.equal(f.type, "put", `client ${i} frame ${n}`);
+      assert.equal(f.key, `k${n}`, `client ${i} frame ${n}`);
+      if (last !== 0) assert.equal(f.seq, last + 1, `client ${i} frame ${n}`);
+      last = f.seq;
+    }
+  }
+  for (const client of clients) client.ws.close(1000);
+});
+
+test("an ephemeral frame reaches its peers byte for byte and never its sender", { skip }, async () => {
+  const id = await newRoom();
+  const sender = await connect(id);
+  const peer = await connect(id);
+  const want = new Uint8Array([0x00, 0x01, 0xfe, 0xff]);
+  sender.ws.send(want);
+  const got = await peer.next();
+  assert.ok(got instanceof ArrayBuffer, `peer frame is ${typeof got}`);
+  assert.deepEqual(new Uint8Array(got), want);
+  assert.equal(await sender.next(200), undefined, "the sender received its own frame");
+  sender.ws.close(1000);
+  peer.ws.close(1000);
+});
+
+// A late joiner's live frames start right after its snapshot's seq: no write
+// is lost in the gap and none is replayed.
+test("a late joiner's frames follow its snapshot's seq with no gap and no duplicate", { skip }, async () => {
+  const id = await newRoom();
+  await putValue(id, "before1", "1");
+  await putValue(id, "before2", "2");
+  const client = await connect(id);
+  const snap = JSON.parse(client.snapshot);
+  assert.equal(snap.seq, 2);
+  assert.deepEqual(Object.keys(snap.state).sort(), ["before1", "before2"]);
+  await putValue(id, "after", "3");
+  const f = JSON.parse(await client.next());
+  assert.deepEqual([f.type, f.key, f.seq], ["put", "after", snap.seq + 1]);
+  client.ws.close(1000);
+});
+
+test("a client never sees another room's frames", { skip }, async () => {
+  const a = await newRoom();
+  const b = await newRoom();
+  const client = await connect(a);
+  await putValue(b, "noise", '"b-only"');
+  await putValue(a, "signal", '"a-only"');
+  assert.equal(JSON.parse(await client.next()).key, "signal");
+  client.ws.close(1000);
+});
+
+test("a durable delete arrives as a delete frame with the next seq", { skip }, async () => {
+  const id = await newRoom();
+  const client = await connect(id);
+  await putValue(id, "gone", '"soon"');
+  const res = await mf.dispatchFetch(`http://${APP}.${APEX}/api/rooms/${id}/gone`, { method: "DELETE" });
+  await res.arrayBuffer();
+  const put = JSON.parse(await client.next());
+  assert.deepEqual([put.type, put.key], ["put", "gone"]);
+  const del = JSON.parse(await client.next());
+  assert.deepEqual([del.type, del.key, del.seq], ["delete", "gone", 2]);
+  client.ws.close(1000);
+});
+
 test("a foreign origin is refused before the upgrade", { skip }, async () => {
   const id = await newRoom();
   const { res } = await connect(id, { Origin: "https://evil.test" });
