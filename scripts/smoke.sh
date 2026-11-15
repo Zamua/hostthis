@@ -53,6 +53,7 @@ curl() { command curl -H 'X-Activity-Skip: 1' -H 'If-None-Match: "smoke-no-fill"
 # slug_from_url extracts the 8-char slug from a hostthis URL. Handles
 # both URL shapes the server can emit:
 #   subdomain mode: https://<slug>.apex.tld/      → take chars before first dot
+#                   https://<slug>-suffix.tld/    (flat suffix) → and before a hyphen
 #   path mode:      http(s)://host[:port]/p/<slug> → take chars after last "/"
 # Slug is always exactly 8 chars (domain.SlugLength), so we use that as
 # the disambiguator: strip scheme, then look at the LAST path segment
@@ -68,8 +69,10 @@ slug_from_url() {
     printf '%s' "${rest##*/}"
     return
   fi
-  # Otherwise subdomain mode: slug is the first DNS label.
-  printf '%s' "${rest%%.*}"
+  # Otherwise subdomain mode: slug is the first DNS label, up to any hyphen of
+  # a flat suffix (a slug has none).
+  local label="${rest%%.*}"
+  printf '%s' "${label%%-*}"
 }
 
 # A transcript of the whole run, written before the first step so a failure is
