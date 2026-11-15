@@ -7,7 +7,6 @@ toolchain go1.27.4
 require (
 	github.com/charmbracelet/ssh v0.1.0
 	github.com/charmbracelet/wish v1.4.7
-	github.com/coder/websocket v1.8.15
 	github.com/klauspost/compress v1.20.3
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pires/go-proxyproto v0.15.0
