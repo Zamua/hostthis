@@ -1,5 +1,5 @@
 import { bucketGet } from "../bucket.js";
-import { normalizeHost } from "../public/host.js";
+import { normalizeHost, slugHostSuffix } from "../public/host.js";
 import { cellRoute } from "./image.js";
 import { dispatch, mutation } from "./ops.js";
 
@@ -72,7 +72,7 @@ export function purgeConfig(env) {
       console.warn(`warn: HOSTTHIS_PURGE_BUDGET ${JSON.stringify(raw)} is not "<n>/<burst>,<n>/<burst>"; using the default`);
     }
   }
-  return { apex, zone: env.HOSTTHIS_CF_ZONE_ID, token: env.HOSTTHIS_CF_PURGE_TOKEN, budget };
+  return { apex, suffix: slugHostSuffix(env), zone: env.HOSTTHIS_CF_ZONE_ID, token: env.HOSTTHIS_CF_PURGE_TOKEN, budget };
 }
 
 // Tokens a bucket holds at now, given what it held at `at`.
@@ -304,7 +304,7 @@ export class Purge {
       const res = await this.fetcher(`https://api.cloudflare.com/client/v4/zones/${cfg.zone}/purge_cache`, {
         method: "POST",
         headers: { "Authorization": `Bearer ${cfg.token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ hosts: slugs.map((slug) => `${slug}.${cfg.apex}`) }),
+        body: JSON.stringify({ hosts: slugs.map((slug) => `${slug}${cfg.suffix}`) }),
         signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
       });
       if (res.ok) {

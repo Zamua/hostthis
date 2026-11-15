@@ -4284,14 +4284,22 @@ routes, `/blob` and the room join behind the optional token, and `/healthz`.
 The public router answers the public hostnames. Which router a request reaches is
 decided from its host, before any path is looked at.
 
+An app's host is `<slug>.<apex>` unless `HOSTTHIS_SLUG_HOST_SUFFIX` names a
+flat suffix: with `-staging.example.com`, apps are served at
+`<slug>-staging.example.com`, one level under the zone, where a single-level
+wildcard certificate covers them. The apex keeps its own pages and SSH. A
+nested `<slug>.<apex>` is then no app's host. hostthisd takes the same setting
+for the URLs it prints, the Worker for routing, room origins, purges and the
+pod address check.
+
 `HOSTTHIS_APEX_DOMAIN` on the Worker turns the split on. Unset or empty, the
 Worker runs only the internal router, exactly as above, whatever the Host and
 headers, and serves nothing public (see "Real-time room relay" for its Room
 cells in that mode). Set, each request is classified in this order:
 
 1. **Public host.** A request whose host is the apex or any name under it
-   (`<apex>`, `<slug>.<apex>`, `www.<apex>`, `a.b.<apex>`) goes to the public
-   router, whatever its path, query, method or headers, a valid token
+   (`<apex>`, `<slug>.<apex>`, `www.<apex>`, `a.b.<apex>`), or an app's host
+   under a flat suffix (below), goes to the public router, whatever its path, query, method or headers, a valid token
    included. Nothing a public request carries reaches the internal router or
    the payload bucket, and it reaches a cell only as values the public router
    parsed (below).
@@ -5379,6 +5387,7 @@ file). Defaults in parens:
 --http-addr              / HOSTTHIS_HTTP_ADDR               listen for http (landing, health)       (:8080)
 --apex-domain            / HOSTTHIS_APEX_DOMAIN             public apex                             (hostthis.dev)
 --mode                   / HOSTTHIS_URL_MODE                subdomain (prod) | path (dev)           (path)
+--slug-host-suffix       / HOSTTHIS_SLUG_HOST_SUFFIX        what follows the slug in an app's host  (.<apex>)
 --scheme                 / HOSTTHIS_PUBLIC_SCHEME           https | http                            (https)
 --data-dir               / HOSTTHIS_DATA_DIR                where the ssh host key lives            (./data)
 --landing                / HOSTTHIS_LANDING                 path to landing.html                    (web/landing.html)
@@ -5421,6 +5430,7 @@ runtime's equivalent), separate from `hostthisd`'s:
 HOSTTHIS_APEX_DOMAIN   public apex; turns on the public/internal host split     (unset: off)
 HOSTTHIS_WORKER_TOKEN   bearer token for the internal routes; required with an apex   (unset)
 HOSTTHIS_URL_MODE      path also serves /p/<slug> on the apex host (dev only)   (subdomain)
+HOSTTHIS_SLUG_HOST_SUFFIX  what follows the slug in an app's host           (.<apex>)
 ASSETS                 static assets binding for /_hostthis/; absent serves them from PAYLOADS
 HOSTTHIS_EDGE_CACHE_TTL_S      edge TTL of cached read responses; 0 is off      (0)
 HOSTTHIS_EDGE_CACHE_MAX_BYTES  largest read response the edge cache stores      (8388608)

@@ -9,7 +9,7 @@ import { serveSolid } from "../solid/link.js";
 import { byteStringBytes, goText } from "../rooms/wire.js";
 import { isAssetPath, serveAsset } from "./assets.js";
 import { serveHealth } from "./health.js";
-import { FORWARDED_HOST, normalizeHost, parseSlug, slugOfHost } from "./host.js";
+import { FORWARDED_HOST, normalizeHost, parseSlug, slugHostSuffix, slugOfHost } from "./host.js";
 import { cleanRedirect, decodePath, subtreeRedirect } from "./path.js";
 import { queryFlags } from "./request.js";
 import { notFound } from "./responses.js";
@@ -26,8 +26,8 @@ function badRequest() {
 
 // The app a request addresses, { slug, path, mount } with path decoded and
 // mount the URL path it is served under ("" on its own host), or null.
-function appOf(host, apex, urlMode, path) {
-  const slug = slugOfHost(host, apex);
+function appOf(host, apex, suffix, urlMode, path) {
+  const slug = slugOfHost(host, suffix);
   if (slug) {
     return { slug, path, mount: "" };
   }
@@ -98,7 +98,7 @@ async function route(request, env, host, forwarded, surface) {
       return solid;
     }
   }
-  const app = appOf(host, apex, pathMode ? "path" : "subdomain", path);
+  const app = appOf(host, apex, slugHostSuffix(env), pathMode ? "path" : "subdomain", path);
   if (!app) {
     return notFound();
   }

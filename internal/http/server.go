@@ -19,6 +19,8 @@ type Server struct {
 	// ApexDomain is the public apex, e.g. "hostthis.dev". A slug's host under it
 	// is not the apex, so it gets none of the apex's pages.
 	ApexDomain string
+	// SlugSuffix follows the slug in an app's host; empty means ".<ApexDomain>".
+	SlugSuffix string
 	// Color labels the replica in blue/green deploys, echoed in the
 	// X-Backend-Color header on /healthz. Empty for single-replica deploys.
 	Color string
@@ -65,7 +67,7 @@ func (s *Server) serveHealthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-// slugFromHost returns (slug, true) when host is "<slug>.<apex>" and the slug
+// slugFromHost returns (slug, true) when host is "<slug><suffix>" and the slug
 // parses cleanly. The port, if present, is ignored.
 func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 	if s.ApexDomain == "" {
@@ -74,7 +76,11 @@ func (s *Server) slugFromHost(host string) (domain.Slug, bool) {
 	if i := strings.Index(host, ":"); i >= 0 {
 		host = host[:i]
 	}
-	sub, ok := strings.CutSuffix(host, "."+s.ApexDomain)
+	suffix := s.SlugSuffix
+	if suffix == "" {
+		suffix = "." + s.ApexDomain
+	}
+	sub, ok := strings.CutSuffix(host, suffix)
 	if !ok || strings.Contains(sub, ".") {
 		// Not under the apex, or a multi-level subdomain ("x.y.apex").
 		return "", false

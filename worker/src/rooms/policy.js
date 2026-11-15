@@ -369,10 +369,11 @@ function globMatch(pattern, text) {
   return new RegExp(`^${source}$`).test(text);
 }
 
-// coder/websocket's authenticateOrigin with hostthisd's patterns: the refusal
-// message, or null when the origin may open the socket. requestHost is the
-// Host the client addressed, port included.
-export function originRefusal(origin, requestHost, apex) {
+// coder/websocket's authenticateOrigin with hostthisd's patterns, plus any
+// app host when slugs use a flat suffix: the refusal message, or null when the
+// origin may open the socket. requestHost is the Host the client addressed,
+// port included.
+export function originRefusal(origin, requestHost, apex, suffix = `.${apex}`) {
   if (!origin) {
     return null;
   }
@@ -383,7 +384,7 @@ export function originRefusal(origin, requestHost, apex) {
   if (requestHost.toLowerCase() === url.host.toLowerCase()) {
     return null;
   }
-  for (const pattern of [`*.${apex}`, apex]) {
+  for (const pattern of [`*.${apex}`, apex, `*${suffix}`]) {
     if (globMatch(pattern.toLowerCase(), url.host.toLowerCase())) {
       return null;
     }
