@@ -7,7 +7,7 @@ import { BLOB_PATH, handleBlob } from "./blobs.js";
 import { DENYLIST_CELL, denylistPoll } from "./cells/denylist.js";
 import { purgeRoute } from "./cells/purge.js";
 import { TURN_CELL } from "./cells/turn.js";
-import { FORWARDED_HOST, isHostname, normalizeHost, withinApex } from "./public/host.js";
+import { FORWARDED_HOST, isHostname, normalizeHost, publicHost, slugHostSuffix } from "./public/host.js";
 import { CONTENT_CACHE_CONTROL } from "./public/reads.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
@@ -128,8 +128,9 @@ export default {
     if (!apex) {
       return internalRouter.fetch(request, env, ctx);
     }
+    const suffix = slugHostSuffix(env);
     const host = normalizeHost(new URL(request.url).hostname);
-    if (withinApex(host, apex)) {
+    if (publicHost(host, apex, suffix)) {
       // Direct reads only: hostthisd answers a forwarded read's reader itself.
       return publicRouter(request, env, host, false, { ctx, reads: countingPageReads(publicReads(env), CONTENT_CACHE_CONTROL) });
     }
@@ -142,7 +143,7 @@ export default {
     const forwarded = request.headers.get(FORWARDED_HOST);
     if (forwarded !== null && forwardPermitted(await credentialScope(request, env), request.method)) {
       const target = normalizeHost(forwarded);
-      if (!isHostname(target) || !withinApex(target, apex)) {
+      if (!isHostname(target) || !publicHost(target, apex, suffix)) {
         return new Response("forwarded host outside the apex\n", { status: 400 });
       }
       return publicRouter(request, env, target, true, { ctx, reads: publicReads(env) });

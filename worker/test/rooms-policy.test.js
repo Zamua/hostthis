@@ -48,10 +48,10 @@ test("slugs come from one label of the apex in Go's alphabet", () => {
   for (const bad of ["abcdefg", "abcdefghi", "abc12345", "ABCDEFGH", "abcdefgl", "abcdefgo"]) {
     assert.equal(parseSlug(bad), null, bad);
   }
-  assert.equal(slugOfHost("abcdefgh.example.com", "example.com"), "abcdefgh");
-  assert.equal(slugOfHost("x.abcdefgh.example.com", "example.com"), null);
-  assert.equal(slugOfHost("example.com", "example.com"), null);
-  assert.equal(slugOfHost("abcdefgh.example.org", "example.com"), null);
+  assert.equal(slugOfHost("abcdefgh.example.com", ".example.com"), "abcdefgh");
+  assert.equal(slugOfHost("x.abcdefgh.example.com", ".example.com"), null);
+  assert.equal(slugOfHost("example.com", ".example.com"), null);
+  assert.equal(slugOfHost("abcdefgh.example.org", ".example.com"), null);
 });
 
 test("rooms routes split as hostthisd's handler does", () => {

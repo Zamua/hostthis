@@ -5,7 +5,7 @@
 // under a cap, so a profile cannot point the Worker at a private network or
 // at hostthis itself, nor exhaust its memory.
 
-import { normalizeHost } from "../public/host.js";
+import { normalizeHost, slugHostSuffix, slugOfHost } from "../public/host.js";
 
 // Larger than any profile, provider document, token answer or container
 // listing a real pod sends.
@@ -47,7 +47,10 @@ export function allowedPodUrl(raw, env) {
     return false;
   }
   const apex = normalizeHost(env?.HOSTTHIS_APEX_DOMAIN ?? "");
-  return !(apex && (host === apex || host.endsWith(`.${apex}`)));
+  if (apex && (host === apex || host.endsWith(`.${apex}`))) {
+    return false;
+  }
+  return slugOfHost(host, slugHostSuffix(env)) === null;
 }
 
 // fetch() for a profile-named address: refuses a disallowed one, and follows

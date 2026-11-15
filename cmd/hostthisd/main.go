@@ -42,6 +42,7 @@ func main() {
 		httpAddr        = flag.String("http-addr", envOr("HOSTTHIS_HTTP_ADDR", ":8080"), "http listen address")
 		metricsAddr     = flag.String("metrics-addr", envOr("HOSTTHIS_METRICS_ADDR", ":9091"), "prometheus metrics listen address (never route this publicly)")
 		apexDomain      = flag.String("apex-domain", os.Getenv("HOSTTHIS_APEX_DOMAIN"), "public apex (required; e.g. paste.example.com)")
+		slugSuffix      = flag.String("slug-host-suffix", os.Getenv("HOSTTHIS_SLUG_HOST_SUFFIX"), "what follows the slug in an app's host (default \".<apex>\"; e.g. -staging.example.com)")
 		urlMode         = flag.String("mode", envOr("HOSTTHIS_URL_MODE", "path"), "url mode: subdomain (prod) | path (dev)")
 		scheme          = flag.String("scheme", envOr("HOSTTHIS_PUBLIC_SCHEME", "https"), "public URL scheme (https for prod, http for local dev)")
 		landingPath     = flag.String("landing", envOr("HOSTTHIS_LANDING", "web/landing.html"), "path to apex landing HTML")
@@ -178,7 +179,7 @@ func main() {
 		logger.Fatalf("%v", err)
 	}
 
-	build := buildURL(*scheme, *apexDomain, *urlMode, logger)
+	build := buildURL(*scheme, slugHostSuffix(*apexDomain, *slugSuffix), *apexDomain, *urlMode, logger)
 
 	// Decorators, so a write invalidates the edge cache for its slug while the
 	// verb and deploy services stay cache-unaware (SPEC "Active invalidation:
@@ -231,6 +232,7 @@ func main() {
 		LandingHTML: landing,
 		AgentNotes:  notes,
 		ApexDomain:  *apexDomain,
+		SlugSuffix:  slugHostSuffix(*apexDomain, *slugSuffix),
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 	}
 	// Metrics and pprof listen on their OWN port, never the public one: the
@@ -418,13 +420,23 @@ func purgeExempt(raw string) service.PurgeExempt {
 	return func(owner domain.Owner) bool { return listed[owner.String()] }
 }
 
-// buildURL returns the URL emitter for a scheme, mode and apex. Subdomain mode
-// is required in production; path mode is dev-only (SPEC "Dev-only path mode").
-func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder {
+// slugHostSuffix is what follows the slug in an app's host: ".<apex>" unless a
+// flat suffix is named, for a deployment whose certificate covers one level.
+func slugHostSuffix(apex, flat string) string {
+	if flat = strings.ToLower(strings.TrimSpace(flat)); flat != "" {
+		return flat
+	}
+	return "." + apex
+}
+
+// buildURL returns the URL emitter for a scheme, mode, slug host suffix and
+// apex. Subdomain mode is required in production; path mode is dev-only (SPEC
+// "Dev-only path mode").
+func buildURL(scheme, suffix, apex, mode string, logger *log.Logger) hostssh.URLBuilder {
 	switch strings.ToLower(mode) {
 	case "subdomain":
 		return func(slug domain.Slug) string {
-			return scheme + "://" + slug.String() + "." + apex
+			return scheme + "://" + slug.String() + suffix
 		}
 	case "path":
 		logger.Printf("WARN running in path mode - origin isolation is dev-only. " +

@@ -6,6 +6,7 @@
 
 import { addressListed, secretIs } from "../auth.js";
 import { TURN_CELL } from "../cells/turn.js";
+import { slugHostSuffix } from "../public/host.js";
 import {
   APP_MAX_ROOM_BYTES,
   APP_MAX_ROOMS,
@@ -380,7 +381,7 @@ async function joinRoom(request, env, app, id, client) {
   if (refused) {
     return goError(refused.status, refused.message, refused.headers);
   }
-  const origin = originRefusal(request.headers.get("Origin"), client.host, env.HOSTTHIS_APEX_DOMAIN);
+  const origin = originRefusal(request.headers.get("Origin"), client.host, env.HOSTTHIS_APEX_DOMAIN, slugHostSuffix(env));
   if (origin) {
     return goError(403, origin);
   }
