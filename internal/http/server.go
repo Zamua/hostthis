@@ -13,6 +13,9 @@ import (
 
 // Server bundles the dependencies.
 type Server struct {
+	// Solid answers the apex /_solid/ paths (docs/SPEC.md "Pod storage");
+	// nil leaves them 404.
+	Solid       http.Handler
 	LandingHTML []byte // optional; apex landing page bytes
 	// AgentNotes is /llms.txt (and /AGENTS.md) beside the landing page; nil 404s.
 	AgentNotes []byte
@@ -29,6 +32,13 @@ type Server struct {
 // Handler returns the mux the caller binds with http.ListenAndServe.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/_solid/", func(w http.ResponseWriter, r *http.Request) {
+		if _, onSlug := s.slugFromHost(r.Host); onSlug || s.Solid == nil {
+			http.NotFound(w, r)
+			return
+		}
+		s.Solid.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Health endpoints answer on any Host.
 		switch r.URL.Path {

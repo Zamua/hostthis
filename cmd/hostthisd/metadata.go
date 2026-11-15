@@ -26,6 +26,9 @@ type metadataBundle struct {
 	Sites    siteStore
 	// AppRooms lists and removes an app's rooms for its owner.
 	AppRooms *worker.AppRoomsRepo
+	// Solid forwards the apex /_solid/ paths to the Worker: the apex is not
+	// behind Cloudflare (SSH answers on it), so no Worker route reaches them.
+	Solid http.Handler
 }
 
 // metadataRepo is the union of every service-layer / ssh-layer interface the
@@ -46,7 +49,7 @@ type siteStore interface {
 }
 
 // buildMetadata wires the worker adapters.
-func buildMetadata(logger *log.Logger) (*metadataBundle, error) {
+func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 	base := envOr("HOSTTHIS_WORKER_ENDPOINT", "")
 	if base == "" {
 		return nil, errors.New("HOSTTHIS_WORKER_ENDPOINT is required")
@@ -60,6 +63,10 @@ func buildMetadata(logger *log.Logger) (*metadataBundle, error) {
 	client := &http.Client{Timeout: 30 * time.Second, Transport: rt}
 	repo := worker.NewPasteRepo(base, client)
 	repo.Logger = logger
+	solid, err := worker.NewSolidProxy(base, apex, rt)
+	if err != nil {
+		return nil, err
+	}
 
 	logger.Printf("metadata: worker at %s", base)
 	return &metadataBundle{
@@ -68,6 +75,7 @@ func buildMetadata(logger *log.Logger) (*metadataBundle, error) {
 		Denylist: worker.NewDenylistRepo(base, client),
 		Sites:    storage.NewSites(repo),
 		AppRooms: worker.NewAppRoomsRepo(base, client),
+		Solid:    solid,
 	}, nil
 }
 

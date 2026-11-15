@@ -20,7 +20,7 @@ import (
 // A probe's error is nil when the Worker served it.
 func probeWorker(t *testing.T, logger *log.Logger) map[string]error {
 	t.Helper()
-	meta, err := buildMetadata(logger)
+	meta, err := buildMetadata("example.com", logger)
 	if err != nil {
 		t.Fatalf("build metadata: %v", err)
 	}

@@ -77,7 +77,7 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	metadata, err := buildMetadata(logger)
+	metadata, err := buildMetadata(*apexDomain, logger)
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
@@ -232,6 +232,7 @@ func main() {
 		LandingHTML: landing,
 		AgentNotes:  notes,
 		ApexDomain:  *apexDomain,
+		Solid:       metadata.Solid,
 		SlugSuffix:  slugHostSuffix(*apexDomain, *slugSuffix),
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
 	}

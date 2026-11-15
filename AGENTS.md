@@ -204,7 +204,9 @@ contract.
 
 hostthisd serves no paste, site, shell or room. Its HTTP listener answers the
 apex landing page, `/llms.txt` and `/AGENTS.md` beside it, and `/healthz` and
-`/readyz`; everything else is a 404. Every public read and the rooms API are
+`/readyz`, and forwards the apex `/_solid/` paths to the Worker (the apex is
+not behind the edge, so no Worker route reaches them); everything else is a
+404. Every public read and the rooms API are
 the Worker's, chosen by Host (`docs/SPEC.md` "The public surface"), and the
 URLs hostthisd prints name the Worker's host.
 
