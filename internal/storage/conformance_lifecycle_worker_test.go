@@ -223,83 +223,6 @@ func (n namespacedRepo) OwnerSummary(o string, at time.Time) (domain.OwnerSummar
 	return n.inner.OwnerSummary(n.owner(o), at)
 }
 
-// namespacedRooms keeps each run's app slugs distinct, for the reason the paste
-// wrapper does: cells are durable and the suite's app slugs are fixed.
-type namespacedRooms struct {
-	inner  *worker.RoomRepo
-	prefix string
-}
-
-func (n namespacedRooms) app(s domain.Slug) domain.Slug { return domain.Slug(n.prefix + string(s)) }
-
-func (n namespacedRooms) CreateRoom(room domain.Room, subnet string, appCap int64, now time.Time) error {
-	room.AppSlug = n.app(room.AppSlug)
-	return n.inner.CreateRoom(room, n.prefix+subnet, appCap, now)
-}
-
-func (n namespacedRooms) GetRoom(app domain.Slug, id domain.RoomID) (domain.Room, error) {
-	got, err := n.inner.GetRoom(n.app(app), id)
-	if err != nil {
-		return domain.Room{}, err
-	}
-	got.AppSlug = app
-	return got, nil
-}
-
-func (n namespacedRooms) GetValue(app domain.Slug, id domain.RoomID, key string) ([]byte, error) {
-	return n.inner.GetValue(n.app(app), id, key)
-}
-
-func (n namespacedRooms) ScanRoom(app domain.Slug, id domain.RoomID) (domain.RoomKV, error) {
-	return n.inner.ScanRoom(n.app(app), id)
-}
-
-func (n namespacedRooms) PutValue(app domain.Slug, id domain.RoomID, key string, val []byte,
-	appCap int64, now time.Time,
-) (uint64, error) {
-	return n.inner.PutValue(n.app(app), id, key, val, appCap, now)
-}
-
-func (n namespacedRooms) DeleteValue(app domain.Slug, id domain.RoomID, key string, now time.Time) (uint64, error) {
-	return n.inner.DeleteValue(n.app(app), id, key, now)
-}
-
-func (n namespacedRooms) CountRoomCreates(app domain.Slug, subnet string, now time.Time,
-	window time.Duration,
-) (int, int, error) {
-	return n.inner.CountRoomCreates(n.app(app), n.prefix+subnet, now, window)
-}
-
-func (n namespacedRooms) PushKey(app domain.Slug) (string, error) {
-	return n.inner.PushKey(n.app(app))
-}
-
-func (n namespacedRooms) PutPushSubscription(app domain.Slug, id domain.RoomID, sub domain.PushSubscription,
-	now time.Time,
-) error {
-	return n.inner.PutPushSubscription(n.app(app), id, sub, now)
-}
-
-func (n namespacedRooms) DeletePushSubscription(app domain.Slug, id domain.RoomID, endpoint string) error {
-	return n.inner.DeletePushSubscription(n.app(app), id, endpoint)
-}
-
-func (n namespacedRooms) ListPushSubscriptions(app domain.Slug, id domain.RoomID) ([]domain.PushSubscriptionSummary, error) {
-	return n.inner.ListPushSubscriptions(n.app(app), id)
-}
-
-func (n namespacedRooms) PutPushSchedule(app domain.Slug, id domain.RoomID, sched domain.PushSchedule, now time.Time) error {
-	return n.inner.PutPushSchedule(n.app(app), id, sched, now)
-}
-
-func (n namespacedRooms) GetPushSchedule(app domain.Slug, id domain.RoomID) (domain.PushSchedule, error) {
-	return n.inner.GetPushSchedule(n.app(app), id)
-}
-
-func (n namespacedRooms) TestPush(app domain.Slug, id domain.RoomID, now time.Time) (domain.PushTestResult, error) {
-	return n.inner.TestPush(n.app(app), id, now)
-}
-
 // The FULL contract suite against the Worker, not a subset.
 //
 // It ran as three partial entries first - lifecycle, owner index, sites - and
@@ -314,14 +237,6 @@ func TestConformance_Worker(t *testing.T) {
 		r := newNamespacedWorker(base)
 		return r, storage.NewSites(r)
 	}
-	newRooms := func(t *testing.T) roomConformanceStores {
-		r := newNamespacedWorker(base)
-		return roomConformanceStores{
-			Rooms: namespacedRooms{inner: worker.NewRoomRepo(base, nil), prefix: r.prefix},
-			Paste: r,
-			Site:  storage.NewSites(r),
-		}
-	}
-	runConformanceWithSites(t, "worker", newRepo, newSites, newRooms)
+	runConformanceWithSites(t, "worker", newRepo, newSites)
 	runKeygateConformance(t, "worker", func(t *testing.T) keygateRepo { return newNamespacedWorker(base).kg })
 }

@@ -2,16 +2,44 @@ package ssh_test
 
 import (
 	"encoding/json"
-	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/service"
-	"github.com/Zamua/hostthis/internal/worker"
-
 	xssh "golang.org/x/crypto/ssh"
 )
+
+// roomCall sends one request to the public rooms API and returns its status
+// and body.
+func roomCall(t *testing.T, c *http.Client, method, url, body string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	defer res.Body.Close() //nolint:errcheck
+	b, _ := io.ReadAll(res.Body)
+	return res.StatusCode, string(b)
+}
+
+// createRoom creates a room in the app the rooms API at api serves and
+// returns its id.
+func createRoom(t *testing.T, c *http.Client, api string) string {
+	t.Helper()
+	code, body := roomCall(t, c, http.MethodPost, api, "")
+	var room struct {
+		ID string `json:"id"`
+	}
+	if code != http.StatusCreated || json.Unmarshal([]byte(body), &room) != nil || room.ID == "" {
+		t.Fatalf("create room: %d %s", code, body)
+	}
+	return room.ID
+}
 
 // The owner of an app lists its rooms and deletes one, several or all of them;
 // a deleted room is gone for its users, and nobody else can see or touch the
@@ -23,25 +51,15 @@ func TestRooms_OwnerListsAndDeletes(t *testing.T) {
 		t.Fatalf("upload: exit %d %q", code, stderr)
 	}
 	slug := extractSlug(url)
-	app, err := domain.ParseSlug(slug)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rooms := service.NewRooms(worker.NewRoomRepo(g.endpoint, g.client))
+	// The app's users reach its rooms through the Worker's public rooms API.
+	api := g.httpURL + "/p/" + slug + "/api/rooms"
 	var ids []string
 	for range 3 {
-		room, err := rooms.Create(app, "203.0.113.0/24")
-		if err != nil {
-			t.Fatalf("create room: %v", err)
-		}
-		ids = append(ids, room.ID.String())
+		ids = append(ids, createRoom(t, g.client, api))
 	}
-	firstID, err := domain.ParseRoomID(ids[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := rooms.Put(app, firstID, "greeting", []byte(`"hello"`)); err != nil {
-		t.Fatalf("put: %v", err)
+	greeting := api + "/" + ids[0] + "/greeting"
+	if code, body := roomCall(t, g.client, http.MethodPut, greeting, `"hello"`); code != http.StatusNoContent {
+		t.Fatalf("put: %d %s", code, body)
 	}
 
 	listed := func() []string {
@@ -96,8 +114,8 @@ func TestRooms_OwnerListsAndDeletes(t *testing.T) {
 	if code != 0 || !strings.Contains(stderr, "removed 1 room(s).") || !strings.Contains(stderr, absent+": no such room") {
 		t.Fatalf("rm one: exit %d %q", code, stderr)
 	}
-	if _, err := rooms.Get(app, firstID, "greeting"); !errors.Is(err, service.ErrRoomNotFound) {
-		t.Fatalf("read of a deleted room = %v, want ErrRoomNotFound", err)
+	if code, body := roomCall(t, g.client, http.MethodGet, greeting, ""); code != http.StatusNotFound {
+		t.Fatalf("read of a deleted room = %d %s, want 404", code, body)
 	}
 	if got := listed(); len(got) != 2 {
 		t.Fatalf("after rm one: %d rooms, want 2: %v", len(got), got)
@@ -122,9 +140,7 @@ func TestRooms_OwnerListsAndDeletes(t *testing.T) {
 	}
 
 	// A new room can be created in the freed app, and bad arguments are usage errors.
-	if _, err := rooms.Create(app, "203.0.113.0/24"); err != nil {
-		t.Fatalf("create after deleting all: %v", err)
-	}
+	createRoom(t, g.client, api)
 	for _, cmd := range []string{"rooms", "rooms " + slug + " rm", "rooms " + slug + " rm not-a-room", "rooms " + slug + " purge"} {
 		if _, _, code := g.run(cmd, nil); code != 2 {
 			t.Fatalf("%q: exit %d, want 2", cmd, code)

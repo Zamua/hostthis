@@ -151,6 +151,14 @@ test("a join answers 101 from the cell, no-store, snapshot first", { skip }, asy
   res.webSocket.close(1000);
 });
 
+// The cell answers a client's close frame, so the handshake ends at once
+// rather than at the client's own close timeout.
+test("the cell answers a client's close frame", { skip }, async () => {
+  const client = await connect(await newRoom());
+  client.ws.close(1000, "done");
+  assert.ok(await client.closedWithin(2000), "no close frame came back within 2 s");
+});
+
 test("a foreign origin is refused before the upgrade", { skip }, async () => {
   const id = await newRoom();
   const { res } = await connect(id, { Origin: "https://evil.test" });

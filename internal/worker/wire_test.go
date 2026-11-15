@@ -13,7 +13,6 @@ import (
 func TestRequestBodiesKeepTheWireShape(t *testing.T) {
 	base := 3
 	row := pasteRow{Slug: "slugone1", Identity: "id1", Status: "pending", Kind: "html"}
-	items := []domain.PushItem{}
 	for _, tc := range []struct {
 		name string
 		body any
@@ -64,20 +63,6 @@ func TestRequestBodiesKeepTheWireShape(t *testing.T) {
 			map[string]any{"opId": "op", "generation": "g1", "ver": 0}},
 		{"admit", admitRequest{Identity: "id1", Limit: 3, Now: 5, Window: 60},
 			map[string]any{"identity": "id1", "now": 5, "window": 60, "limit": 3}},
-		{"room create", roomCreateRequest{AppCap: 9, AppSlug: "a", At: 5, CreatedAt: 4, ID: "r", RoomLimit: 7, Subnet: "n", UpdatedAt: 6},
-			map[string]any{"appSlug": "a", "id": "r", "createdAt": 4, "updatedAt": 6, "subnet": "n", "at": 5, "appCap": 9, "roomLimit": 7}},
-		{"room put", roomPutRequest{AppCap: 9, Key: "k", KeyCap: 2, Now: 5, RoomCap: 8, Value: "dg==", Wire: `"v"`},
-			map[string]any{"key": "k", "value": "dg==", "wire": `"v"`, "roomCap": 8, "keyCap": 2, "appCap": 9, "now": 5}},
-		{"room delete", roomDelRequest{Key: "k", Now: 5}, map[string]any{"key": "k", "now": 5}},
-		{"push subscription put", pushSubPutRequest{
-			Endpoint: "e", Keys: pushKeys{Auth: "a", P256DH: "p"}, Now: 5, Subject: "s",
-		}, map[string]any{
-			"endpoint": "e", "keys": map[string]string{"p256dh": "p", "auth": "a"}, "now": 5, "subject": "s",
-		}},
-		{"push subscription delete", pushSubDelRequest{Endpoint: "e"}, map[string]any{"endpoint": "e"}},
-		{"push schedule put", pushScheduleRequest{Items: items, Now: 5, Subject: "s", TZ: "UTC"},
-			map[string]any{"tz": "UTC", "items": items, "now": 5, "subject": "s"}},
-		{"push test", pushTestRequest{Now: 5}, map[string]any{"now": 5}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got, want := decoded(t, tc.body), decoded(t, tc.want); !reflect.DeepEqual(got, want) {
