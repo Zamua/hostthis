@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"time"
 
-	httpapi "github.com/Zamua/hostthis/internal/http"
 	"github.com/Zamua/hostthis/internal/service"
+	hostssh "github.com/Zamua/hostthis/internal/ssh"
 	"github.com/Zamua/hostthis/internal/storage"
 	"github.com/Zamua/hostthis/internal/worker"
 )
@@ -24,43 +24,29 @@ type metadataBundle struct {
 	// Denylist is the operator's banned keys and networks.
 	Denylist service.DenylistSource
 	Sites    siteStore
-	Rooms    roomStore
 	// AppRooms lists and removes an app's rooms for its owner.
 	AppRooms *worker.AppRoomsRepo
-	// RoomRelay is the cell-backed real-time transport.
-	RoomRelay httpapi.RoomRelay
-	// Solid forwards the apex /_solid/ paths to the Worker.
-	Solid http.Handler
 }
 
-// metadataRepo is the union of every service-layer / http-layer interface the
+// metadataRepo is the union of every service-layer / ssh-layer interface the
 // metadata plane has to satisfy: a wiring-layer concern.
 type metadataRepo interface {
 	service.PasteRepo
 	service.PodLinkRepo
 	service.PasteAdmin
-	httpapi.PasteReader
+	hostssh.PasteReader
 }
 
-// siteStore is the union of every site-side interface the service / http
-// layers consume: the deploy view (service.SiteRepo) and the read view
-// (httpapi.SiteReader).
+// siteStore is the union of every site-side interface the service / ssh
+// layers consume: the deploy view (service.SiteRepo) and the by-slug read
+// `url` and `qr` use (hostssh.SiteReader).
 type siteStore interface {
 	service.SiteRepo
-	httpapi.SiteReader
+	hostssh.SiteReader
 }
 
-// roomStore is the room write/read view the service layer consumes, the push
-// surface included.
-type roomStore interface {
-	service.RoomRepo
-	service.RoomPushRepo
-	service.RoomICERepo
-}
-
-// buildMetadata wires the worker adapters. apex names the deployment in the
-// VAPID tokens the room cells sign.
-func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
+// buildMetadata wires the worker adapters.
+func buildMetadata(logger *log.Logger) (*metadataBundle, error) {
 	base := envOr("HOSTTHIS_WORKER_ENDPOINT", "")
 	if base == "" {
 		return nil, errors.New("HOSTTHIS_WORKER_ENDPOINT is required")
@@ -73,13 +59,7 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 	// rather than each surface opening its own.
 	client := &http.Client{Timeout: 30 * time.Second, Transport: rt}
 	repo := worker.NewPasteRepo(base, client)
-	solid, err := worker.NewSolidProxy(base, apex, rt)
-	if err != nil {
-		return nil, err
-	}
 	repo.Logger = logger
-	rooms := worker.NewRoomRepo(base, client)
-	rooms.PushSubject = "https://" + apex
 
 	logger.Printf("metadata: worker at %s", base)
 	return &metadataBundle{
@@ -87,11 +67,7 @@ func buildMetadata(apex string, logger *log.Logger) (*metadataBundle, error) {
 		KeyGate:  worker.NewKeyGateRepo(base, client),
 		Denylist: worker.NewDenylistRepo(base, client),
 		Sites:    storage.NewSites(repo),
-		Rooms:    rooms,
 		AppRooms: worker.NewAppRoomsRepo(base, client),
-		// Every socket terminates at its Room cell, which owns broadcast order.
-		RoomRelay: worker.NewRoomProxy(base, client),
-		Solid:     solid,
 	}, nil
 }
 

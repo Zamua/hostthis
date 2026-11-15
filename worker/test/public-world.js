@@ -9,7 +9,7 @@ import worker, { Paste } from "../src/index.js";
 import { FakeStorage, state } from "./harness.js";
 import { bucket, stored } from "./stored.js";
 
-// hostthisd's responses, recorded by internal/http's TestShells_GoldenResponses.
+// The pinned public responses for every shell and asset (see shells.test.js).
 export const GOLDEN = JSON.parse(readFileSync(join(REPO, "testdata", "shells-golden.json"), "utf8"));
 
 export const APEX = "paste.test";

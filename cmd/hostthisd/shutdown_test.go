@@ -31,20 +31,6 @@ func (d *testDrain) Shutdown(ctx context.Context) error {
 	}
 }
 
-type testRelay struct {
-	*testDrain
-	stopped bool
-}
-
-func (r *testRelay) StopAdmission() { r.stopped = true }
-
-func (r *testRelay) Shutdown(ctx context.Context) error {
-	if !r.stopped {
-		return errors.New("relay drained before admission stopped")
-	}
-	return r.testDrain.Shutdown(ctx)
-}
-
 type testSSH struct {
 	shutdownEntered chan struct{}
 	shutdownRelease <-chan struct{}
@@ -96,26 +82,21 @@ func awaitSignal(t *testing.T, name string, ch <-chan struct{}) {
 	}
 }
 
-func TestShutdownStopsAdmissionBeforeConcurrentDrains(t *testing.T) {
+func TestShutdownDrainsConcurrently(t *testing.T) {
 	release := make(chan struct{})
 	public := &testDrain{entered: make(chan struct{}), release: release}
 	metrics := &testDrain{entered: make(chan struct{}), release: release}
-	relay := &testRelay{testDrain: &testDrain{entered: make(chan struct{}), release: release}}
 	ssh := newTestSSH(release, closedSignal())
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- shutdownDaemon(ctx, 500*time.Millisecond, public, metrics, relay, ssh, func() {})
+		done <- shutdownDaemon(ctx, 500*time.Millisecond, public, metrics, ssh, func() {})
 	}()
 
 	awaitSignal(t, "public HTTP drain", public.entered)
 	awaitSignal(t, "metrics drain", metrics.entered)
-	awaitSignal(t, "relay drain", relay.entered)
 	awaitSignal(t, "SSH drain", ssh.shutdownEntered)
-	if !relay.stopped {
-		t.Fatal("relay drain started before admission stopped")
-	}
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatalf("shutdown: %v", err)
@@ -127,12 +108,11 @@ func TestShutdownWaitsForSSHThenFinalizers(t *testing.T) {
 	finalRelease := make(chan struct{})
 	finalStarted := make(chan struct{})
 	ssh := newTestSSH(sshRelease, closedSignal())
-	relay := &testRelay{testDrain: immediate()}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- shutdownDaemon(ctx, 500*time.Millisecond, immediate(), immediate(), relay, ssh, func() {
+		done <- shutdownDaemon(ctx, 500*time.Millisecond, immediate(), immediate(), ssh, func() {
 			close(finalStarted)
 			<-finalRelease
 		})
@@ -166,7 +146,7 @@ func TestShutdownForceClosesSSHBeforeWaitingFinalizers(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- shutdownDaemon(ctx, 20*time.Millisecond, immediate(), immediate(),
-			&testRelay{testDrain: immediate()}, ssh,
+			ssh,
 			func() { close(finalStarted) })
 	}()
 
@@ -190,7 +170,7 @@ func TestShutdownReturnsAtHardDeadline(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	err := shutdownDaemon(ctx, time.Second, immediate(), immediate(),
-		&testRelay{testDrain: immediate()}, ssh,
+		ssh,
 		func() { <-finalRelease })
 	close(finalRelease)
 	if !errors.Is(err, context.DeadlineExceeded) {

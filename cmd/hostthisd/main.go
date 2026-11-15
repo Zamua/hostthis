@@ -76,7 +76,7 @@ func main() {
 		logger.Fatalf("--apex-domain is required (or set HOSTTHIS_APEX_DOMAIN). Pass the public domain hostthis serves on, e.g. paste.example.com.")
 	}
 
-	metadata, err := buildMetadata(*apexDomain, logger)
+	metadata, err := buildMetadata(logger)
 	if err != nil {
 		logger.Fatalf("metadata backend: %v", err)
 	}
@@ -87,7 +87,6 @@ func main() {
 		logger.Fatalf("blob store: %v", err)
 	}
 	siteRepo := metadata.Sites
-	roomRepo := metadata.Rooms
 
 	// Per-identity create admission (docs/SPEC.md "Same-identity create
 	// admission"): same-identity creates beyond the width queue BEFORE the
@@ -188,10 +187,6 @@ func main() {
 	if err != nil {
 		logger.Fatalf("%v", err)
 	}
-	cdnTTL, err := parseCDNTTL(os.Getenv("HOSTTHIS_CDN_TTL"), cachePurger)
-	if err != nil {
-		logger.Fatalf("%v", err)
-	}
 	exempt := purgeExempt(os.Getenv("HOSTTHIS_CACHE_SKIP_OWNERS"))
 	pasteMgr := service.NewCacheInvalidating(manageSvc, cachePurger, exempt)
 	siteDeployer := service.NewSiteCacheInvalidating(deploySvc, cachePurger, exempt)
@@ -230,57 +225,13 @@ func main() {
 		ProxyProtocol: envTrue("HOSTTHIS_SSH_PROXY_PROTOCOL"),
 	}
 
-	roomsAllow, err := sshAllowList(os.Getenv("HOSTTHIS_ROOMS_ALLOW"))
-	if err != nil {
-		logger.Fatalf("HOSTTHIS_ROOMS_ALLOW: %v", err)
-	}
-	roomsAccess := httpapi.RoomsAccess{Allow: roomsAllow, Token: os.Getenv("HOSTTHIS_ROOMS_TOKEN")}
-	if roomsAllow != nil || roomsAccess.Token != "" {
-		networks := 0
-		if roomsAllow != nil {
-			networks = roomsAllow.Len()
-		}
-		logger.Printf("config: rooms API private (%d allowed entries, token %v)", networks, roomsAccess.Token != "")
-	}
-	rooms := service.NewRooms(roomRepo)
-	if rooms.Deny, err = domain.ParseRoomDenyList(os.Getenv("HOSTTHIS_ROOM_DENY")); err != nil {
-		logger.Fatalf("HOSTTHIS_ROOM_DENY: %v", err)
-	}
-
-	clientIP, err := clientIPSource()
-	if err != nil {
-		logger.Fatalf("HOSTTHIS_HTTP_CLIENT_IP_SOURCE: %v", err)
-	}
+	// The public HTTP surface is the apex landing page and the health checks:
+	// the Worker serves every paste, site and room.
 	httpServer := &httpapi.Server{
-		Pastes:      pasteRepo,
-		Blobs:       blobUnit,
 		LandingHTML: landing,
 		AgentNotes:  notes,
 		ApexDomain:  *apexDomain,
-		PathMode:    *urlMode == "path",
-		CDNTTL:      cdnTTL,
 		Color:       envOr("HOSTTHIS_BACKEND_COLOR", ""),
-		Logf:        logger.Printf,
-		Sites:       siteRepo,
-		// Rooms: the no-auth, capability-based app-persistence tier under
-		// /api/rooms.
-		Rooms:       rooms,
-		RoomPush:    service.NewRoomPush(roomRepo),
-		RoomICE:     service.NewRoomICE(roomRepo),
-		Solid:       metadata.Solid,
-		ClientIP:    clientIP,
-		RoomsAccess: roomsAccess,
-		Abuse:       abuse,
-	}
-	var relayDrain relayShutdowner = idleRelay{}
-	if metadata.RoomRelay != nil {
-		httpServer.Relay = metadata.RoomRelay
-		lifecycle, ok := metadata.RoomRelay.(relayShutdowner)
-		if !ok {
-			logger.Fatalf("cell relay does not implement the shutdown lifecycle")
-		}
-		relayDrain = lifecycle
-		logger.Printf("relay: cell proxy (the room cell is the broadcast point)")
 	}
 	// Metrics and pprof listen on their OWN port, never the public one: the
 	// public mux answers /healthz on any Host without auth, and /metrics there
@@ -351,7 +302,6 @@ func main() {
 		20*time.Second,
 		httpSrv,
 		metricsSrv,
-		relayDrain,
 		sshServer,
 		uploadSvc.WaitFinalize,
 	); err != nil {
@@ -468,23 +418,6 @@ func purgeExempt(raw string) service.PurgeExempt {
 	return func(owner domain.Owner) bool { return listed[owner.String()] }
 }
 
-// parseCDNTTL reads how long a CDN may keep a site file without asking. A CDN
-// entry is only recallable by a purge, so a TTL with no purging backend is
-// refused rather than left to serve stale files.
-func parseCDNTTL(raw string, purger service.CachePurger) (time.Duration, error) {
-	if raw == "" {
-		return 0, nil
-	}
-	ttl, err := time.ParseDuration(raw)
-	if err != nil || ttl < 0 {
-		return 0, fmt.Errorf("HOSTTHIS_CDN_TTL=%q: want a non-negative duration", raw)
-	}
-	if _, noop := purger.(cache.Noop); noop && ttl > 0 {
-		return 0, errors.New("HOSTTHIS_CDN_TTL needs a purging HOSTTHIS_CACHE_BACKEND")
-	}
-	return ttl, nil
-}
-
 // buildURL returns the URL emitter for a scheme, mode and apex. Subdomain mode
 // is required in production; path mode is dev-only (SPEC "Dev-only path mode").
 func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder {
@@ -506,18 +439,6 @@ func buildURL(scheme, apex, mode string, logger *log.Logger) hostssh.URLBuilder 
 }
 
 // envTrue reports whether key is set to "true", case-insensitively.
-// clientIPSource reads HOSTTHIS_HTTP_CLIENT_IP_SOURCE; the older
-// HOSTTHIS_HTTP_TRUST_XFF=true still means xff-rightmost.
-func clientIPSource() (httpapi.ClientIPSource, error) {
-	if v := os.Getenv("HOSTTHIS_HTTP_CLIENT_IP_SOURCE"); v != "" {
-		return httpapi.ParseClientIPSource(v)
-	}
-	if envTrue("HOSTTHIS_HTTP_TRUST_XFF") {
-		return httpapi.ClientIPForwardedFor, nil
-	}
-	return httpapi.ClientIPPeer, nil
-}
-
 func envTrue(key string) bool {
 	return strings.EqualFold(os.Getenv(key), "true")
 }

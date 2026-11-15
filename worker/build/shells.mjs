@@ -1,4 +1,4 @@
-// Reads web/shells, the render shells hostthisd embeds, for the Worker build
+// Reads web/shells, the render shells, for the Worker build
 // and for tests that import the Worker source.
 import { readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";

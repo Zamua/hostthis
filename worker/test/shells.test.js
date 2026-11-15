@@ -7,10 +7,12 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
-import { listAssets, loadTable, MAX_ASSET_BYTES, REPO, shellsPlugin } from "../build/shells.mjs";
+import { listAssets, loadTable, MAX_ASSET_BYTES, REPO, SHELLS_DIR, shellsPlugin } from "../build/shells.mjs";
 import { asset, rawContentType, renderShell } from "../src/public/shells.js";
 
-// hostthisd's responses, recorded by internal/http's TestShells_GoldenResponses.
+// The pinned public responses for every shell, asset and kind: a snapshot of
+// the served bytes and headers. A change to web/shells updates it by hand, so
+// every shift in what visitors receive shows up in review.
 const golden = JSON.parse(readFileSync(join(REPO, "testdata", "shells-golden.json"), "utf8"));
 const DIST = fileURLToPath(new URL("../dist", import.meta.url));
 
@@ -23,7 +25,41 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-test("every shell renders the bytes, ETag and policy hostthisd serves", () => {
+// Every page has a template and a known policy, every kind a page and a raw
+// type, every asset name one owner, and every file under web/shells is a
+// template or a listed asset.
+test("shells.json agrees with web/shells and with itself", () => {
+  const TEMPLATE = "shell.html";
+  const raw = JSON.parse(readFileSync(join(SHELLS_DIR, "shells.json"), "utf8"));
+  assert.deepEqual(Object.keys(raw).sort(), ["csp", "kinds", "shells"]);
+  const plain = (s) => s !== "" && s !== "." && s !== ".." && !/[/\\]/.test(s);
+  const owner = new Map();
+  for (const [dir, shell] of Object.entries(raw.shells)) {
+    assert.ok(plain(dir), dir);
+    assert.ok(shell.version, `${dir}: no version`);
+    const want = new Set();
+    if (shell.csp) {
+      assert.ok(raw.csp[shell.csp], `${dir}: unknown csp ${shell.csp}`);
+      want.add(TEMPLATE);
+    }
+    for (const [name, contentType] of Object.entries(shell.assets)) {
+      assert.ok(plain(name) && name !== TEMPLATE && name !== "shells.json", `${dir}: ${name} cannot be an asset`);
+      assert.ok(contentType, `${dir}: ${name} has no content type`);
+      assert.ok(!owner.has(name), `${name}: claimed by ${owner.get(name)} and ${dir}`);
+      owner.set(name, dir);
+      want.add(name);
+    }
+    assert.deepEqual(readdirSync(join(SHELLS_DIR, dir)).sort(), [...want].sort(), dir);
+  }
+  const dirs = readdirSync(SHELLS_DIR).filter((e) => statSync(join(SHELLS_DIR, e)).isDirectory());
+  assert.deepEqual(dirs.sort(), Object.keys(raw.shells).sort());
+  for (const [kind, { shell, raw: rawType }] of Object.entries(raw.kinds)) {
+    assert.ok(raw.shells[shell]?.csp, `${kind}: ${shell} is not a shell with a page`);
+    assert.ok(rawType, `${kind}: no raw content type`);
+  }
+});
+
+test("every shell renders the pinned bytes, ETag and policy", () => {
   const kinds = Object.keys(golden).filter((k) => k.startsWith("shell/")).map((k) => k.slice("shell/".length));
   assert.deepEqual(kinds.sort(), Object.keys(loadTable().kinds).sort());
   for (const kind of kinds) {
@@ -64,7 +100,7 @@ test("a kind without a shell renders nothing", () => {
   }
 });
 
-test("assets resolve to hostthisd's Content-Type, and nothing else resolves", () => {
+test("assets resolve to their pinned Content-Type, and nothing else resolves", () => {
   const served = Object.entries(golden).filter(([k, r]) => k.startsWith("asset/") && !k.includes("/", 6) && r.status === 200);
   assert.ok(served.length > 0);
   for (const [k, want] of served) {

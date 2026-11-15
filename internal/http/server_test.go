@@ -1,47 +1,62 @@
 package http
 
 import (
-	"bytes"
-	"context"
-	"fmt"
-	"hash/fnv"
-	"io"
-	stdhttp "net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
-
-	"github.com/Zamua/hostthis/internal/domain"
-	"github.com/Zamua/hostthis/internal/roomwire"
-	"github.com/Zamua/hostthis/internal/storage"
 )
 
-type stubPasteReader struct{ p domain.Paste }
-
-func (s stubPasteReader) Get(slug domain.Slug) (domain.Paste, error) {
-	if s.p.Slug != slug {
-		return domain.Paste{}, storage.ErrNotFound
-	}
-	return s.p, nil
-}
-
-type stubBlobReader struct{ body []byte }
-
-func (s stubBlobReader) Read(_ context.Context, _ domain.ManifestEntry) (io.ReadCloser, int64, error) {
-	return io.NopCloser(bytes.NewReader(s.body)), int64(len(s.body)), nil
-}
-
-func TestWriteRelayAdmitErrorMapsDrainingToUnavailable(t *testing.T) {
+func serve(srv *Server, host, path string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest("GET", path, nil)
+	r.Host = host
 	w := httptest.NewRecorder()
-	writeRelayAdmitError(w, roomwire.ErrRelayDraining)
-	if w.Code != stdhttp.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", w.Code)
+	srv.Handler().ServeHTTP(w, r)
+	return w
+}
+
+// /healthz answers on any Host, uncached, and names the replica color only
+// when one is configured.
+func TestHealthz(t *testing.T) {
+	for _, color := range []string{"blue", ""} {
+		srv := &Server{ApexDomain: "paste.test", Color: color}
+		for _, host := range []string{"paste.test", "abc23456.paste.test", "10.0.0.1:8080"} {
+			w := serve(srv, host, "/healthz")
+			if w.Code != 200 || w.Body.String() != "ok\n" {
+				t.Errorf("color %q host %s: status %d body %q, want 200 ok", color, host, w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("X-Backend-Color"); got != color {
+				t.Errorf("X-Backend-Color: got %q, want %q", got, color)
+			}
+			if got := w.Header().Get("Cache-Control"); got != "no-store" {
+				t.Errorf("Cache-Control: got %q, want no-store", got)
+			}
+		}
+	}
+}
+
+// The landing page answers at the apex root, never on a slug's host, and no
+// other path serves content.
+func TestLanding_ApexRootOnly(t *testing.T) {
+	srv := &Server{ApexDomain: "paste.test", LandingHTML: []byte("<h1>landing</h1>")}
+	w := serve(srv, "paste.test", "/")
+	if w.Code != 200 || w.Body.String() != "<h1>landing</h1>" ||
+		w.Header().Get("Content-Type") != "text/html; charset=utf-8" || w.Header().Get("Cache-Control") != "public, max-age=300" {
+		t.Fatalf("apex root: %d %q %v", w.Code, w.Body.String(), w.Header())
+	}
+	for _, c := range []struct{ host, path string }{
+		{"abc23456.paste.test", "/"},
+		{"paste.test", "/p/abc23456"},
+		{"paste.test", "/_hostthis/md.js"},
+		{"paste.test", "/_solid/id"},
+		{"abc23456.paste.test", "/api/rooms"},
+	} {
+		if w := serve(srv, c.host, c.path); w.Code != 404 {
+			t.Errorf("%s%s = %d, want 404", c.host, c.path, w.Code)
+		}
 	}
 }
 
 func TestSlugFromHost(t *testing.T) {
-	s := &Server{PathMode: true, ApexDomain: "paste.test"}
+	s := &Server{ApexDomain: "paste.test"}
 	cases := []struct {
 		host   string
 		want   string // empty when expected ok=false
@@ -59,383 +74,16 @@ func TestSlugFromHost(t *testing.T) {
 		{"abc.paste.test", "", false},
 		// Uppercase fails ParseSlug.
 		{"ABC23456.paste.test", "", false},
-		// Valid slug shape is accepted even if it reads like a reserved
-		// word: reserved names are blocked by never being generated.
-		{"abcdefgh.paste.test", "abcdefgh", true},
 	}
 	for _, c := range cases {
 		t.Run(c.host, func(t *testing.T) {
 			got, ok := s.slugFromHost(c.host)
-			if ok != c.wantOK {
-				t.Fatalf("ok: got %v, want %v (slug=%q)", ok, c.wantOK, got)
-			}
-			if string(got) != c.want {
-				t.Fatalf("slug: got %q, want %q", got, c.want)
+			if ok != c.wantOK || string(got) != c.want {
+				t.Fatalf("got (%q, %v), want (%q, %v)", got, ok, c.want, c.wantOK)
 			}
 		})
 	}
-}
-
-// An empty ApexDomain must never match a host: that deploy is path-mode only.
-func TestSlugFromHost_NoApexConfigured(t *testing.T) {
-	s := &Server{PathMode: true}
-	if _, ok := s.slugFromHost("abc23456.anything.com"); ok {
-		t.Fatalf("should not match without ApexDomain")
-	}
-}
-
-// TestSubdomain_OnlyServesRoot pins that a slug subdomain serves the paste at
-// "/" and nothing else: without it, Safari's auto-favicon request receives the
-// whole HTML body and its loading indicator hangs.
-//
-// "/" itself is not exercised here (no real PasteReader is wired); this covers
-// the path-rejection branch only.
-func TestSubdomain_OnlyServesRoot(t *testing.T) {
-	srv := &Server{PathMode: true, ApexDomain: "paste.test"}
-	mux := srv.Handler()
-
-	r := httptest.NewRequest("GET", "/favicon.ico", nil)
-	r.Host = "abc23456.paste.test"
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != 404 {
-		t.Fatalf("/favicon.ico on slug subdomain: got %d, want 404", w.Code)
-	}
-
-	for _, path := range []string{"/style.css", "/wp-login.php", "/p/abc23456", "/foo/bar"} {
-		r := httptest.NewRequest("GET", path, nil)
-		r.Host = "abc23456.paste.test"
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, r)
-		if w.Code != 404 {
-			t.Fatalf("%s on slug subdomain: got %d, want 404", path, w.Code)
-		}
-	}
-}
-
-// readyHTMLServer wires one ready HTML paste at abc23456 stored at keyA,
-// updated at updatedAt.
-func readyHTMLServer(body []byte, updatedAt time.Time) *Server {
-	return &Server{
-		PathMode: true,
-		Pastes: stubPasteReader{p: domain.Paste{
-			Slug: "abc23456", Status: domain.PasteStatusReady, Kind: domain.KindHTML,
-			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: keyA}), UpdatedAt: updatedAt,
-		}},
-		Blobs:      stubBlobReader{body: body},
-		ApexDomain: "paste.test",
-	}
-}
-
-// getPaste serves GET /p/abc23456 with the given request headers.
-func getPaste(srv *Server, hdr map[string]string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest("GET", "/p/abc23456", nil)
-	for k, v := range hdr {
-		r.Header.Set(k, v)
-	}
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	return w
-}
-
-// Cache-Control, ETag, and Last-Modified are the contract with the CDN.
-func TestPasteRead_CacheHeaders(t *testing.T) {
-	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	body := []byte("<!doctype html><h1>hi</h1>")
-	w := getPaste(readyHTMLServer(body, updatedAt), nil)
-	if w.Code != 200 || w.Body.String() != string(body) {
-		t.Fatalf("status %d body %q, want 200 with the content", w.Code, w.Body.String())
-	}
-	if got := w.Header().Get("Cache-Control"); got != "public, no-cache" {
-		t.Errorf("Cache-Control: got %q, want public, no-cache", got)
-	}
-	if got := w.Header().Get("ETag"); got != storedETag(keyA) {
-		t.Errorf("ETag: got %q, want the tagged object key", got)
-	}
-	if got := w.Header().Get("Last-Modified"); got != "Sun, 07 Jun 2026 14:00:00 GMT" {
-		t.Errorf("Last-Modified: got %q", got)
-	}
-}
-
-// A matching validator on either header answers 304 with no body.
-func TestPasteRead_Conditional304(t *testing.T) {
-	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	srv := readyHTMLServer([]byte("body"), updatedAt)
-	for name, hdr := range map[string]map[string]string{
-		"If-None-Match":     {"If-None-Match": storedETag(keyA)},
-		"If-Modified-Since": {"If-Modified-Since": updatedAt.Add(time.Hour).UTC().Format(stdhttp.TimeFormat)},
-	} {
-		w := getPaste(srv, hdr)
-		if w.Code != 304 || w.Body.Len() > 0 {
-			t.Errorf("%s: status %d body %d bytes, want 304 and empty", name, w.Code, w.Body.Len())
-		}
-	}
-}
-
-// The cleaned-path redirect keeps an escaped path escaped exactly once.
-func TestCleanPathRedirectKeepsEscapes(t *testing.T) {
-	srv := &Server{PathMode: true, ApexDomain: "paste.test", Pastes: stubPasteReader{}}
-	r := httptest.NewRequest("GET", "/a//b%20c", nil)
-	r.Host = "abc23456.paste.test"
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, r)
-	if w.Code != stdhttp.StatusTemporaryRedirect || w.Header().Get("Location") != "/a/b%20c" {
-		t.Fatalf("status %d Location %q, want 307 to /a/b%%20c", w.Code, w.Header().Get("Location"))
-	}
-}
-
-// RFC 9110 13.2.2: If-Modified-Since is ignored when If-None-Match is present.
-func TestPasteRead_IfNoneMatchOverridesIfModifiedSince(t *testing.T) {
-	updatedAt := time.Date(2026, 6, 7, 14, 0, 0, 0, time.UTC)
-	srv := readyHTMLServer([]byte("body"), updatedAt)
-	w := getPaste(srv, map[string]string{
-		"If-None-Match":     `"some-other-key"`,
-		"If-Modified-Since": updatedAt.Add(time.Hour).UTC().Format(stdhttp.TimeFormat),
-	})
-	if w.Code != 200 || w.Body.String() != "body" {
-		t.Fatalf("status %d body %q, want 200 with the content", w.Code, w.Body.String())
-	}
-}
-
-// /healthz answers on any Host, uncached, and names the replica color only
-// when one is configured.
-func TestHealthz(t *testing.T) {
-	for _, color := range []string{"blue", ""} {
-		srv := &Server{PathMode: true, ApexDomain: "paste.test", Color: color}
-		r := httptest.NewRequest("GET", "/healthz", nil)
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, r)
-		if w.Code != 200 || w.Body.String() != "ok\n" {
-			t.Errorf("color %q: status %d body %q, want 200 ok", color, w.Code, w.Body.String())
-		}
-		if got := w.Header().Get("X-Backend-Color"); got != color {
-			t.Errorf("X-Backend-Color: got %q, want %q", got, color)
-		}
-		if got := w.Header().Get("Cache-Control"); got != "no-store" {
-			t.Errorf("Cache-Control: got %q, want no-store", got)
-		}
-	}
-}
-
-// The lifecycle gate (docs/SPEC.md "Paste lifecycle status"): only a ready
-// paste serves its content. A pending paste serves an uncached 200 with
-// Retry-After, the signal e2e polls on; a failed paste is an uncached 410
-// without it.
-func TestPasteRead_Lifecycle(t *testing.T) {
-	content := []byte("<!doctype html><h1>ready</h1>")
-	cases := []struct {
-		status     domain.PasteStatus
-		code       int
-		retryAfter bool
-		serves     bool
-	}{
-		{domain.PasteStatusPending, 200, true, false},
-		{domain.PasteStatusFailed, 410, false, false},
-		{domain.PasteStatusReady, 200, false, true},
-	}
-	for _, c := range cases {
-		t.Run(string(c.status), func(t *testing.T) {
-			srv := readyHTMLServer(content, time.Now().UTC())
-			p := srv.Pastes.(stubPasteReader).p
-			p.Status = c.status
-			srv.Pastes = stubPasteReader{p: p}
-			w := getPaste(srv, nil)
-			if w.Code != c.code {
-				t.Fatalf("status: got %d, want %d", w.Code, c.code)
-			}
-			if got := w.Header().Get("Retry-After") != ""; got != c.retryAfter {
-				t.Errorf("Retry-After present: got %v, want %v", got, c.retryAfter)
-			}
-			if got := w.Body.String() == string(content); got != c.serves {
-				t.Errorf("serves content: got %v, want %v (body %q)", got, c.serves, w.Body.String())
-			}
-			if !c.serves {
-				if got := w.Header().Get("Cache-Control"); got != "no-store" {
-					t.Errorf("Cache-Control: got %q, want no-store", got)
-				}
-			}
-		})
-	}
-}
-
-// failingBlobReader models the blob plane erroring under a read.
-type failingBlobReader struct{ err error }
-
-func (f failingBlobReader) Read(_ context.Context, _ domain.ManifestEntry) (io.ReadCloser, int64, error) {
-	return nil, 0, f.err
-}
-
-// failingPasteReader models the metadata plane erroring under a read.
-type failingPasteReader struct{ err error }
-
-func (f failingPasteReader) Get(domain.Slug) (domain.Paste, error) { return domain.Paste{}, f.err }
-
-// TestPasteRead5xxLogsSlugAndError pins the read-surface observability contract
-// (docs/SPEC.md "5xx observability on the read surface"): every 5xx logs one
-// line carrying the slug and the underlying error, while the response body
-// stays the generic "internal error". Without the log a 500 is unattributable.
-func TestPasteRead5xxLogsSlugAndError(t *testing.T) {
-	now := time.Now().UTC()
-	paste := domain.Paste{
-		Slug:      "abc23456",
-		Kind:      domain.KindMarkdown,
-		Manifest:  domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0"}),
-		Status:    domain.PasteStatusReady,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	t.Run("blob read failure", func(t *testing.T) {
-		var logged strings.Builder
-		srv := &Server{
-			PathMode: true,
-			Pastes:   stubPasteReader{p: paste},
-			Blobs:    failingBlobReader{err: context.DeadlineExceeded},
-			Logf:     func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
-			Now:      func() time.Time { return now },
-		}
-		r := httptest.NewRequest("GET", "/p/abc23456?raw=1", nil)
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, r)
-		if w.Code != 500 {
-			t.Fatalf("status = %d, want 500", w.Code)
-		}
-		if got := w.Body.String(); !strings.Contains(got, "internal error") {
-			t.Fatalf("body %q must stay the generic internal error", got)
-		}
-		if out := logged.String(); !strings.Contains(out, "abc23456") || !strings.Contains(out, "deadline") {
-			t.Fatalf("5xx blob read must log slug + underlying error, got %q", out)
-		}
-	})
-
-	t.Run("metadata read failure", func(t *testing.T) {
-		var logged strings.Builder
-		srv := &Server{
-			PathMode: true,
-			Pastes:   failingPasteReader{err: context.DeadlineExceeded},
-			Blobs:    stubBlobReader{},
-			Logf:     func(f string, a ...any) { logged.WriteString(strings.TrimSpace(sprintf(f, a...)) + "\n") },
-			Now:      func() time.Time { return now },
-		}
-		r := httptest.NewRequest("GET", "/p/abc23456", nil)
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, r)
-		if w.Code != 500 {
-			t.Fatalf("status = %d, want 500", w.Code)
-		}
-		if out := logged.String(); !strings.Contains(out, "abc23456") || !strings.Contains(out, "deadline") {
-			t.Fatalf("5xx metadata read must log slug + underlying error, got %q", out)
-		}
-	})
-
-	t.Run("nil Logf does not panic", func(t *testing.T) {
-		srv := &Server{
-			PathMode: true,
-			Pastes:   stubPasteReader{p: paste},
-			Blobs:    failingBlobReader{err: context.DeadlineExceeded},
-			Now:      func() time.Time { return now },
-		}
-		r := httptest.NewRequest("GET", "/p/abc23456?raw=1", nil)
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, r)
-		if w.Code != 500 {
-			t.Fatalf("status = %d, want 500", w.Code)
-		}
-	})
-}
-
-func sprintf(format string, a ...any) string { return fmt.Sprintf(format, a...) }
-
-// Every read-path 5xx is the same bare response: its text and no-store, never
-// the validators or cache posture of the content response it replaced.
-func TestRead5xxCarriesNoContentHeaders(t *testing.T) {
-	now := time.Now().UTC()
-	doc := func(kind domain.ContentKind) stubPasteReader {
-		return stubPasteReader{p: domain.Paste{
-			Slug: "abc23456", Kind: kind, Status: domain.PasteStatusReady, UpdatedAt: now,
-			Manifest: domain.DocumentManifest(domain.ManifestEntry{Key: "uploads/u/0", Size: 4}),
-		}}
-	}
-	kb := domain.NewManifest()
-	kb.Add("README.md", domain.ManifestEntry{Key: "uploads/kb/0", Size: 4})
-	site := domain.NewManifest()
-	site.Add("index.html", domain.ManifestEntry{Key: "uploads/site/0", Size: 4})
-	broken := failingBlobReader{err: context.DeadlineExceeded}
-	cases := []struct {
-		name, target string
-		srv          *Server
-	}{
-		{"metadata", "/p/abc23456", &Server{PathMode: true, Pastes: failingPasteReader{err: context.DeadlineExceeded}, Blobs: broken}},
-		{"html blob", "/p/abc23456", &Server{PathMode: true, Pastes: doc(domain.KindHTML), Blobs: broken}},
-		{"raw blob", "/p/abc23456?raw=1", &Server{PathMode: true, Pastes: doc(domain.KindMarkdown), Blobs: broken}},
-		{"unsupported kind", "/p/abc23456", &Server{PathMode: true, Pastes: doc(domain.ContentKind("nope")), Blobs: broken}},
-		{"site file blob", "/p/abc23456/", &Server{PathMode: true, Sites: stubSiteReader{s: domain.Site{
-			Slug: "abc23456", Kind: domain.KindSite, Manifest: site, UpdatedAt: now,
-		}}, Blobs: broken}},
-		{"knowledge base document blob", "/p/abc23456/README.md?raw=1", &Server{PathMode: true, Pastes: stubPasteReader{p: domain.Paste{
-			Slug: "abc23456", Kind: domain.KindKnowledgeBase, Status: domain.PasteStatusReady, UpdatedAt: now, Manifest: kb,
-		}}, Blobs: broken}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			c.srv.Handler().ServeHTTP(w, httptest.NewRequest("GET", c.target, nil))
-			if w.Code != 500 {
-				t.Fatalf("status = %d, want 500", w.Code)
-			}
-			if got := w.Header().Get("Cache-Control"); got != "no-store" {
-				t.Errorf("Cache-Control = %q, want no-store", got)
-			}
-			for name := range w.Header() {
-				switch name {
-				case "Cache-Control", "Content-Type", "X-Content-Type-Options":
-				default:
-					t.Errorf("500 carries %s: %q", name, w.Header().Get(name))
-				}
-			}
-		})
-	}
-}
-
-// A stored file's ETag names the header set it was served with, so a change
-// to those headers gives every cached copy a new validator.
-func TestStoredETag_ChangesWithTheSandboxHeaders(t *testing.T) {
-	if got := storedETag("k"); got != `"k-p`+sandboxTag+`"` || len(sandboxTag) != 8 {
-		t.Fatalf("storedETag = %q", got)
-	}
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(sandboxPolicy))
-	if fmt.Sprintf("%08x", h.Sum32()) == sandboxTag {
-		t.Fatal("the tag does not cover X-Robots-Tag")
-	}
-}
-
-// Outside path mode a slug is served on its own host only: the apex answers
-// 404 for every /p/ path, so no paste runs on the apex origin.
-func TestPathURLs_ServedOnlyInPathMode(t *testing.T) {
-	srv := readyHTMLServer([]byte("<p>hi</p>"), time.Unix(1700000000, 0))
-	get := func(host, path string) int {
-		r := httptest.NewRequest("GET", path, nil)
-		r.Host = host
-		w := httptest.NewRecorder()
-		srv.Handler().ServeHTTP(w, r)
-		return w.Code
-	}
-
-	srv.PathMode = false
-	for _, path := range []string{"/p/abc23456", "/p/abc23456/", "/p/abc23456/x", "/p/abc23456/api/rooms", "/p/", "/p/nope"} {
-		for _, host := range []string{"paste.test", "www.elsewhere.test"} {
-			if code := get(host, path); code != 404 {
-				t.Errorf("subdomain mode: %s%s = %d, want 404", host, path, code)
-			}
-		}
-	}
-	if code := get("abc23456.paste.test", "/"); code != 200 {
-		t.Fatalf("subdomain mode: the slug's own host = %d, want 200", code)
-	}
-
-	srv.PathMode = true
-	if code := get("paste.test", "/p/abc23456"); code != 200 {
-		t.Fatalf("path mode: /p/abc23456 = %d, want 200", code)
+	if _, ok := (&Server{}).slugFromHost("abc23456.anything.com"); ok {
+		t.Fatal("matched a host without an apex configured")
 	}
 }
