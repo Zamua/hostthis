@@ -4358,7 +4358,9 @@ Every other request answers 404 with `404 page not found`,
 nosniff`. The apex `/` is one: the landing page is `hostthisd`'s, and so are
 its notes for agents (`/llms.txt`, `/AGENTS.md`); the front door routes those
 three apex paths to it (see "Apex landing page"). The apex `/_solid/` paths
-are the one exception (see "Pod storage"). The Worker never redirects between schemes;
+are the one exception (see "Pod storage"): the apex is not behind the edge,
+since SSH answers on it, so `hostthisd` forwards them to the Worker as
+forwarded requests for the apex. The Worker never redirects between schemes;
 that is the front door's job.
 
 ### The public surface
