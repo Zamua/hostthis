@@ -1,6 +1,6 @@
 // The rooms API, room push and the room WebSocket on an app's public origin
 // (docs/SPEC.md "Rooms (app persistence)", "Real-time room relay", "Room
-// push"), answering as hostthisd's internal/http does. Every cell request is
+// push"). Every cell request is
 // built here from parsed values: nothing from the client's URL, query,
 // headers or body is passed on as it came.
 

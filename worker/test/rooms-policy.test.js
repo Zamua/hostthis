@@ -105,7 +105,7 @@ test("keys are 1 to 256 bytes and never a reserved segment", () => {
   }
 });
 
-// The vectors internal/http runs against hostthisd's ipSubnet and clientSubnet.
+// The client address and subnet vectors.
 const CLIENT_IP = JSON.parse(readFileSync(new URL("../../testdata/client-ip-vectors.json", import.meta.url), "utf8"));
 
 test("client subnets match hostthisd's", () => {

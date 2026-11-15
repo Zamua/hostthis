@@ -1,5 +1,5 @@
-// The rooms, push and WebSocket rules hostthisd enforces in internal/http,
-// internal/service and internal/domain, for the Worker's public router
+// The rooms, push and WebSocket rules, shared with internal/service and
+// internal/domain where they apply on the SSH side, for the Worker's public router
 // (docs/SPEC.md "Rooms (app persistence)", "Real-time room relay", "Room
 // push"). Pure functions, no I/O. Paths and keys are byte strings: one char
 // per byte of the percent-decoded path, as a Go string holds them.

@@ -23,7 +23,7 @@ const vectors = JSON.parse(readFileSync(join(REPO, "testdata", "read-vectors.jso
 const SHELL_KINDS = Object.keys(golden).filter((k) => k.startsWith("shell/")).map((k) => k.slice("shell/".length));
 const RAW_SOURCE = "# title\n\nsome **body**\n";
 
-// internal/http's buildKBServer.
+// A knowledge base with markdown, an image, HTML and an index page.
 const KB_FILES = {
   "README.md": ["key-readme", "# notes\n"],
   "guide/setup.md": ["key-setup", "# setup\n"],
@@ -41,7 +41,7 @@ function kbWorld(w) {
   for (const [key, content] of Object.values(KB_FILES)) w.blob(key, content);
 }
 
-// internal/http's escapingKBPaths.
+// Paths that try to leave the knowledge base.
 const ESCAPING_PATHS = [
   "a<b>&c.md", "line\u2028sep\u2029.md", "quote\"back\\slash.md", "tab\tnl\n.md", "ctl\x01\x1f\b\f.md",
   "del\x7f.md", "\u00e9.md", "\u{1d11e}.md", "\ue000.md", "z.md",

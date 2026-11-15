@@ -1,5 +1,4 @@
-// The pending and failed pages, byte for byte as hostthisd serves them
-// (internal/http statusPage). testdata/shells-golden.json pins both.
+// The pending and failed pages. testdata/shells-golden.json pins both.
 
 function statusPage(title, refresh, style, card) {
   return `<!doctype html>

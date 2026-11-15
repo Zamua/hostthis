@@ -27,7 +27,6 @@ const internalPrefix = "github.com/Zamua/hostthis/internal/"
 //	archive, cache    mechanisms that speak in domain values.
 //	storage           repository adapters.
 //	service           use cases; declares the ports, never names an adapter.
-//	relay, relaygrpc  the room relay and its gRPC peer transport.
 //	http, ssh         transports; they reach service, never an adapter.
 var layerPolicy = map[string][]string{
 	"mime": {},

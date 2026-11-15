@@ -360,11 +360,11 @@ where wildcard DNS + certs are friction, the binary also supports a
 
 - Pastes live at `<apex>/p/<slug>` instead of `<slug>.<apex>`.
 - The SSH server emits the path-shape URL after upload.
-- In path mode the HTTP router accepts both forms. In subdomain mode it
-  serves a slug only on the slug's own host: `/p/<slug>` on the apex (or any
-  other host) is a 404, never a redirect, so no paste content is ever served
-  from the apex origin. Nothing emits a path URL in subdomain mode, so there
-  is nothing to redirect for.
+- The Worker's public surface takes the same setting (`HOSTTHIS_URL_MODE`).
+  In path mode it accepts both forms. In subdomain mode it serves a slug only
+  on the slug's own host: `/p/<slug>` on the apex is a 404, never a redirect,
+  so no paste content is ever served from the apex origin. Nothing emits a
+  path URL in subdomain mode, so there is nothing to redirect for.
 
 **Path mode is dev-only and breaks the origin-isolation property** -
 all pastes share the apex origin, so user-uploaded JS could read apex
@@ -1150,7 +1150,7 @@ The harness ships four committed site fixtures under
   real file served directly, never via the fallback.
 
 For each fixture the harness tars the build output, deploys it through the
-real `DeploySite` use case over a real repo + blob store, then fetches every built file back over the real HTTP serving
+real `DeploySite` use case over a real repo + blob store, then fetches every built file back from the Worker's public
 surface and asserts the served bytes are byte-identical to the fixture
 file, the content-type matches the extension, `/` serves the root
 `index.html`, the deep route serves the root `index.html` via the SPA
@@ -1294,12 +1294,10 @@ space: a site's manifest lookup never serves a file at `/api/rooms/...`,
 so the API path and the static-file path do not collide. (In dev path
 mode the same routes live under `<apex>/p/<app-slug>/api/rooms/...`.)
 
-Two servers answer these routes with the same rules: `hostthisd`, and the
-Worker's public router once the Worker has `HOSTTHIS_APEX_DOMAIN` set
-(see "Public and internal hosts"). Both take the app from the host (or the
-path-mode prefix) and the room from the parsed UUID, never from a body or
-query. Unless a server is named, every rule in "Rooms", "Real-time room
-relay" and "Room push" holds for both.
+The Worker's public router answers these routes once the Worker has
+`HOSTTHIS_APEX_DOMAIN` set (see "Public and internal hosts"). It takes the app
+from the host (or the path-mode prefix) and the room from the parsed UUID,
+never from a body or query.
 
 ```
 POST   /api/rooms                  mint a UUIDv4, create the room, return { "id": "<uuid>" }
@@ -1372,17 +1370,14 @@ The remaining rules, shared by every route above:
   rules differ) ever sees the raw bytes. Only the single-key GET returns the
   stored bytes as they are.
 - The text a value is encoded to is computed when it is written and stored
-  with it. The whole-room GET on both servers, the `snapshot` frame and the
-  `put` frame all carry that stored text byte for byte, in every mode, off
-  mode included: no reader parses and re-serializes it, so `1e400`, `-0`,
+  with it. The whole-room GET, the `snapshot` frame and the `put` frame all
+  carry that stored text byte for byte, in every mode, off mode included: no
+  reader parses and re-serializes it, so `1e400`, `-0`,
   `12345678901234567890`, `1.50`, whitespace and the order of an object's
-  names reach every client exactly as the value holds them. Text stored by
-  either server keeps its own spelling (`hostthisd` writes `<` in a string as
-  `<`). A value stored without text, or with text that is not JSON, is
-  encoded from its bytes by the rule above wherever it is read. A key's own
-  spelling may still differ between the servers' GETs (`hostthisd` escapes
-  `<`, `>`, `&`, U+2028 and U+2029 in it); the `snapshot` frame's `state` is
-  the Worker's whole-room GET object, byte for byte.
+  names reach every client exactly as the value holds them. Text stored by an
+  earlier writer keeps its own spelling. A value stored without text, or with text that is not JSON, is
+  encoded from its bytes by the rule above wherever it is read. The
+  `snapshot` frame's `state` is the whole-room GET object, byte for byte.
 - Every response under `/api/rooms` carries `Cache-Control: no-store`, errors
   included, since values change under fixed URLs and a CDN caches an
   undirected 404 by its own default. So does every `/api/push/key`
@@ -1398,32 +1393,23 @@ mutable, and per-room, so they belong with the metadata. Large blobs are
 explicitly out of scope for rooms - an app that needs to host files uses
 the archive/site feature, not a room value.
 
-The implementation follows the existing repo-behind-service pattern:
+Every address includes `(app_slug, room_id)`, so cross-app isolation is
+structural rather than a filter. The Room cell stores one whole Room document
+and coordinates app-wide allocations through the app's Paste cell. Pure `Room`
+and `RoomKV` domain types in `internal/domain` keep the identifier, cap and
+wire rules the SSH side shares (see "Owner room deletion").
 
-- Pure `Room` and `RoomKV` domain types live in `internal/domain` and import no
-  infrastructure. They own identifiers, values, byte/key counts, and cap checks.
-- The `RoomRepo` port in `internal/service` exposes creation, point reads,
-  snapshots, PUT, DELETE, and creation-ledger counts. The service applies use-case
-  policy; HTTP only translates requests and responses.
-- The Worker adapter implements the port. It stores one whole Room document per
-  Room cell and coordinates app-wide allocations through the app's Paste cell.
-- Every address includes `(app_slug, room_id)`, so cross-app isolation is
-  structural rather than a filter. The conformance suite pins the observable
-  contract.
+The slug-must-name-a-live-app **existence requirement** is enforced by the
+public router (it asks the app's Paste cell, whose read-only `exists` op
+reports whether a row is present), NOT inside the Room cell: room creation
+404s a slug that names no live site or paste.
 
-The slug-must-name-a-live-app **existence requirement** is enforced at the
-HTTP layer (`hostthisd` reads the site + paste readers its router already
-holds; the Worker asks the app's Paste cell, whose read-only `exists` op
-reports whether a row is present), NOT inside the room repo, so the room
-repo needs no separate existence reader: room creation 404s a slug that
-names no live site or paste.
-
-The Worker's public router reaches the same cell ops through its bindings:
+The Worker's public router reaches the cell ops through its bindings:
 `exists`, `roomcounts` and `pushkey` on the app's Paste cell, and on the
 Room cell (`<slug>|<uuid>`) `create`, `meta`, `scan`, `get`, `put`, `del`,
 the push ops and the join; `scan` answers each value's stored text beside its
 bytes. It computes the value's wire encoding itself and sends it with each
-PUT, as `hostthisd` does, and the Room cell stores it with the value.
+PUT, and the Room cell stores it with the value.
 
 ### Quota and abuse
 
@@ -1444,57 +1430,24 @@ informs them):
   right layer for raw request-rate abuse, the same division of labor the
   paste threat model already documents.)
 
-  **Trusted source-IP derivation.** The per-IP bucket is derived from the
-  TCP `RemoteAddr` by default, NOT from any client-supplied header. A
-  client-controlled `X-Forwarded-For` is ignored unless the operator
-  explicitly opts in by setting `HOSTTHIS_HTTP_TRUST_XFF=true` - the same
-  discipline the SSH side uses for `HOSTTHIS_SSH_PROXY_PROTOCOL`, and on
-  the SSH side the trust is enforced both ways: with the flag set, the
-  listener REQUIRES a PROXY header and refuses a connection that arrives
-  without one. A headerless connection there means something bypassed the
-  reverse proxy, and serving it would attribute the client to the proxy's
-  own address - precisely the mis-accounting the flag exists to prevent.
-  Deployments that enable the flag must therefore route ALL ssh traffic
-  through the header-sending proxy; a direct dial to the listener is
-  refused by design. Trusting
-  a client header by default is a rate-limit bypass: an attacker would set
-  a fresh `X-Forwarded-For` per `POST` and land in a new per-IP bucket each
-  time. When `HOSTTHIS_HTTP_TRUST_XFF=true` is set (because hostthis sits
-  behind a reverse proxy that appends the real client IP), the gate reads
-  the **right-most** value of the `X-Forwarded-For` list - the hop the
-  trusted proxy itself recorded, which the client cannot forge past the
-  proxy - not the left-most value, which is fully attacker-controlled. The
-  list is every `X-Forwarded-For` header line, in order, read as one, since a
-  client may send lines of its own ahead of the proxy's. An empty right-most
-  value names no address, and the TCP peer counts instead. An
-  operator who terminates TLS at a proxy MUST set this flag (otherwise
-  every request's `RemoteAddr` is the proxy's own IP and the per-IP gate
-  collapses to a single global bucket); an operator with hostthis directly
-  on the public internet MUST leave it unset.
-
-  `HOSTTHIS_HTTP_CLIENT_IP_SOURCE` names the source explicitly and wins over
-  the flag: `peer` (the default), `xff-rightmost` (what the flag means), or
-  `cloudflare`. `cloudflare` is `xff-rightmost` for a deployment whose proxy
-  sits behind Cloudflare for some hosts and faces clients directly for
-  others: when the right-most hop is inside Cloudflare's published address
-  ranges, the address is the `CF-Connecting-IP` header (Cloudflare's edge
-  sets it and overwrites a client's own); any other hop is the client
-  itself, and its `CF-Connecting-IP` is ignored, since a client reaching the
-  proxy directly can send one. An unknown value stops startup.
-
-  The Worker has no TCP peer address to read, so `HOSTTHIS_CLIENT_IP_SOURCE`
-  on the Worker names where the address comes from: `cf-connecting-ip` reads
-  the `CF-Connecting-IP` header Cloudflare's edge sets (a client cannot forge
-  it through the edge); `xff-rightmost` reads the right-most
-  `X-Forwarded-For` value across every line, as `hostthisd` does, for a
-  Worker behind a trusted proxy that appends it. Unset, or any other value,
-  or no address found, puts every client in one bucket. A
-  forwarded request (see "Public and internal hosts") takes the address from
-  `X-Hostthis-Client-IP`, which only a token holder can send. An address
-  that does not parse is the `unknown` bucket. The subnet strings are the
-  ones `hostthisd` derives (`a.b.c.0/24`, the canonical IPv6 text of the
-  `/48` prefix plus `/48`, and an IPv4-mapped IPv6 address counts as IPv4),
-  so both servers count against the same per-app ledger.
+  **Trusted source-IP derivation.** The per-IP bucket is never derived from
+  a header the client controls. Trusting one by default is a rate-limit
+  bypass: an attacker would set a fresh `X-Forwarded-For` per `POST` and land
+  in a new per-IP bucket each time. The Worker has no TCP peer address to
+  read, so `HOSTTHIS_CLIENT_IP_SOURCE` names where the address comes from:
+  `cf-connecting-ip` reads the `CF-Connecting-IP` header Cloudflare's edge
+  sets (a client cannot forge it through the edge); `xff-rightmost` reads the
+  **right-most** value of the `X-Forwarded-For` list, for a Worker behind a
+  trusted proxy that appends it - the hop that proxy itself recorded, not the
+  left-most value, which is fully attacker-controlled. The list is every
+  `X-Forwarded-For` header line, in order, read as one, since a client may
+  send lines of its own ahead of the proxy's; an empty right-most value names
+  no address. Unset, or any other value, or no address found, puts every
+  client in one bucket. A forwarded request (see "Public and internal hosts")
+  takes the address from `X-Hostthis-Client-IP`, which only a token holder
+  can send. An address that does not parse is the `unknown` bucket. The
+  subnet strings are `a.b.c.0/24`, the canonical IPv6 text of the `/48`
+  prefix plus `/48`, and an IPv4-mapped IPv6 address counts as IPv4.
 - **Per-room data cap.** A single room cannot store unbounded data:
   **default 256 KiB total value bytes** and **default 256 keys** per room.
   A `PUT` that would push the room past either cap is rejected (**413**)
@@ -1532,28 +1485,26 @@ informs them):
   place of the per-app ceiling above. An app already past it keeps every
   value: reads and deletes work, a write that does not raise the app's total
   is allowed, and growth is refused with the full-app **507**. The Room cell
-  applies the rules, so both servers answer alike; it asks the app cell
+  applies the rules; it asks the app cell
   whether the owner is protected and keeps the answer for ten minutes.
 - **Private rooms.** A private instance such as staging can close its rooms
   API: with `HOSTTHIS_ROOMS_ALLOW` (comma-separated CIDR prefixes) or
-  `HOSTTHIS_ROOMS_TOKEN` set (on `hostthisd`, and on the Worker for its
-  public surface, with the same values), a request under `/api/rooms`
+  `HOSTTHIS_ROOMS_TOKEN` set on the Worker, a request under `/api/rooms`
   (creation, reads, writes, push and the WebSocket) is served only when the
   client address, derived as for the rate limits, is in a listed prefix, or
   the request carries the token in `X-Hostthis-Rooms-Token`. Anything else is
   **403** `the rooms API is private on this instance`. Browsers cannot add a
   header to a WebSocket, so a browser client needs a listed network; scripts
   can use the token.
-- **Room value rules.** `HOSTTHIS_ROOM_DENY` (on `hostthisd` and the Worker)
-  is a JSON list of content rules a room write is checked against before it
+- **Room value rules.** `HOSTTHIS_ROOM_DENY` on the Worker is a JSON list of content rules a room write is checked against before it
   reaches the room: `{"rule", "pattern", "flags": "i", "message"}` matches
   the value read as UTF-8, `{"rule", "prefixHex", "message"}` its first
   bytes. A match answers **403** `room value refused: <message> (<rule>)`
   (the message defaults to `it matched a content rule`) and the room is
   untouched. The rules are deployment configuration, kept out of this
-  repository; patterns must mean the same in RE2 and ECMAScript. `hostthisd`
-  refuses to start on a list that does not parse; the Worker, which cannot,
-  logs it and applies no rules.
+  repository; patterns are ECMAScript regular expressions. The Worker
+  cannot refuse to start, so a list that does not parse is logged and no
+  rules apply.
 - **Room bytes count against the app owner's quota.** An app's room bytes
   (the per-app total above) are charged to the identity that owns the app's
   paste or site, inside the same 1 GiB `UserQuotaBytes` as its pastes and
@@ -1620,21 +1571,19 @@ GET (Upgrade: websocket) /api/rooms/<uuid>/ws
 
 The app slug must name a live paste or site, and the UUID must name an existing
 room. A malformed UUID is refused before upgrade; an unknown app or room is a
-404. A request that is not a valid WebSocket upgrade gets the answer
-`hostthisd`'s WebSocket library gives, from the first of these checks it
-fails: a 426 for a `Connection` header without the `Upgrade` token, a 426 for
-an `Upgrade` header without the `websocket` token, a 405 for a method other
-than GET, a 400 for a `Sec-WebSocket-Version` other than 13, and a 400 for a
-`Sec-WebSocket-Key` that is missing, repeated, or not 16 bytes of padded
-base64 (the Worker, which sees repeated header lines joined by commas, reads
-a key holding a comma as repeated). Two cases are the runtime's on the
-Worker. workerd hands the Worker any request carrying `Upgrade: websocket` as
-a GET, whatever its method, and fails a non-GET one with its own 500 once the
-Worker accepts it, so a handshake sent with another method is a 500 there
-rather than a 405. And workerd upgrades only a request whose `Upgrade` is
-`websocket` alone, so the Worker refuses one that lists other protocols
-beside it (`h2c, websocket`) with a 426, after the method check, where
-`hostthisd` accepts it. The origin is checked
+404. A request that is not a valid WebSocket upgrade gets, from the first of
+these checks it fails: a 426 for a `Connection` header without the `Upgrade`
+token, a 426 for an `Upgrade` header without the `websocket` token, a 405 for
+a method other than GET, a 400 for a `Sec-WebSocket-Version` other than 13,
+and a 400 for a `Sec-WebSocket-Key` that is missing, repeated, or not 16 bytes
+of padded base64 (repeated header lines arrive joined by commas, so a key
+holding a comma reads as repeated). Two cases are the runtime's. workerd hands
+the Worker any request carrying `Upgrade: websocket` as a GET, whatever its
+method, and fails a non-GET one with its own 500 once the Worker accepts it,
+so a handshake sent with another method is a 500 rather than a 405. And
+workerd upgrades only a request whose `Upgrade` is `websocket` alone, so the
+Worker refuses one that lists other protocols beside it (`h2c, websocket`)
+with a 426, after the method check. The origin is checked
 before the upgrade: a missing `Origin`, one whose host equals the request's
 host, and one whose host (port included, compared lowercase) matches
 `<apex>` or the glob `*.<apex>` are allowed; any other origin, or one that
@@ -1642,13 +1591,6 @@ does not parse, is a 403. The room UUID remains the entire participant
 capability.
 
 ### Cell-owned fan-out
-
-Two front ends reach the same Room cell. `hostthisd` terminates the public
-socket and opens one cluster-internal socket to the Room cell; its Go proxy
-owns per-process connection admission and a client-facing heartbeat, both
-`hostthisd` only. It pipes text and binary frames in both directions without
-interpreting them. The upstream socket is not pinged, so a quiet hibernatable
-Room is not woken merely to prove liveness.
 
 The Worker's public router makes the checks above and then sends the Room cell
 a new upgrade request, `/room/join?room=<slug>|<uuid>` with only
@@ -1658,8 +1600,7 @@ cell itself, with no proxy between them. The client's URL, query, headers and
 body never reach the cell, so no request can name a cell op.
 
 The Room cell is the only broadcast point. Exactly one cell owns one room, so
-there is no pod mesh and no cross-stream ordering problem. Sockets from both
-front ends share it, so clients of the two interoperate in one room.
+there is no pod mesh and no cross-stream ordering problem.
 
 Two frame classes share the socket:
 
@@ -1678,12 +1619,12 @@ Two frame classes share the socket:
   place.
 
 The Room cell's own liveness and admission rules (the ping frame, its frame
-limit, its socket cap and stale eviction, below) hold only while the Worker
-serves the public surface, that is, has `HOSTTHIS_APEX_DOMAIN` set (see
-"Public and internal hosts"). Without an apex the Worker is in off mode and the
-cell relays every client frame to its peers exactly as `hostthisd`'s proxy
-expects: a ping is an ordinary ephemeral frame, no frame size closes a socket,
-and every join is accepted. The proxy's own bounds are then the only ones.
+limit, its socket cap and stale eviction, below) hold while the Worker serves
+the public surface, that is, has `HOSTTHIS_APEX_DOMAIN` set (see "Public and
+internal hosts"). Without an apex the Worker is in off mode, serves no public
+socket, and the cell relays every frame of an internal join to its peers: a
+ping is an ordinary ephemeral frame, no frame size closes a socket, and every
+join is accepted.
 
 One client frame is reserved for liveness: the text frame `{"type":"ping"}`,
 exactly those 15 bytes. The runtime answers it on the same socket with the text
@@ -1693,11 +1634,9 @@ Any other spelling of a ping is an ordinary ephemeral frame.
 A client-sent ephemeral frame may carry at most 32 KiB, bounding one sender's
 fan-out amplification explicitly rather than inheriting the WebSocket library's
 default. The Room cell enforces it for every socket: a larger frame closes the
-sender with 1009 and reaches no peer. `hostthisd`'s proxy applies the same
-limit at its client read boundary in every mode. Server-generated snapshot and
-mirror frames may carry up to 2 MiB so a full 256 KiB room still fits after
-worst-case JSON escaping; the cell writes them, so only `hostthisd`'s proxy
-limits them, at its upstream read boundary. A dead or closing peer is skipped
+sender with 1009 and reaches no peer. Server-generated snapshot and mirror
+frames may carry up to 2 MiB so a full 256 KiB room still fits after
+worst-case JSON escaping. A dead or closing peer is skipped
 without blocking the remaining fan-out.
 
 Each socket also has a relay allowance: 60 frames a second with a burst of
@@ -1741,20 +1680,13 @@ too; one that does has already closed it.
 ### Lifecycle and bounds
 
 With the public surface on, a room holds at most 64 sockets, counted by its
-Room cell across both front ends. The cell decides at each join, in the same
-turn that would accept the socket: it counts the open sockets it holds, and at
-the cap first evicts stale ones (below) and counts again; a room still full
-answers the join with 429 instead of a 101. On the Worker path that 429 is the
-client's own handshake response. `hostthisd` accepts its client before it
-dials the cell, so there a refused join closes the client with 1011. The
-Worker path has no per-app cap: the creation limits bound how many rooms an
-app has. `hostthisd`'s proxy also admits at most 64 connections per room and
-1024 per app per process, answering 429 before its own handshake; these bound
-that process, not the room, and go away with the proxy. In off mode they are
-the only caps. Each of its connections is released exactly once when dialing
-fails or either side closes.
+Room cell. The cell decides at each join, in the same turn that would accept
+the socket: it counts the open sockets it holds, and at the cap first evicts
+stale ones (below) and counts again; a room still full answers the join with
+429 instead of a 101, the client's own handshake response. There is no
+per-app socket cap: the creation limits bound how many rooms an app has.
 
-Neither runtime pings or times out a hibernatable socket, so a client that
+The runtime never pings or times out a hibernatable socket, so a client that
 vanishes without closing stays counted until a write to it fails. Liveness is
 therefore the client's job: the canonical browser client sends the ping frame
 every 20 seconds. When a join finds the room at its cap, the cell closes every
@@ -1767,10 +1699,7 @@ the room failed, and reconnects for a fresh snapshot. A socket that has never
 pinged is not evicted this way; it leaves when it closes or a write to it
 fails.
 
-`hostthisd`'s proxy also pings its public client every 20 seconds at the
-WebSocket protocol level and requires a pong within 10 seconds. This is below
-normal reverse-proxy idle timeouts and reaps dead mobile connections; it exists
-only on the `hostthisd` path. The canonical browser client also reconnects with
+The canonical browser client also reconnects with
 exponential backoff and jitter, reconnects immediately on foreground recovery,
 and buffers only bounded durable actions while disconnected.
 
@@ -1851,7 +1780,7 @@ push `bodyKey` naming it is refused as reserved, too); `ice/x` and `ice:x` are
 ordinary keys. The route answers GET only (405 with `Allow: GET` otherwise). A malformed UUID is 400, then an unknown
 app 404, a method other than GET 405 and an unknown room 404, in that order;
 every answer carries `Cache-Control: no-store`, and the body is the TURN
-cell's JSON followed by a newline, from either server.
+cell's JSON followed by a newline.
 
 **Issuing is best effort.** Every way TURN can be unavailable answers the same
 200 with STUN only, so an app has one code path and the route never leaks why:
@@ -1891,9 +1820,8 @@ uses Cloudflare's SFU shares the free allowance with it.
 
 The TURN cell holds the reading, the hour's counters and, for revocation
 only, each unexpired credential's username and expiry. Nothing records which
-room or visitor holds which credential. Both servers ask the same cell
-(`hostthisd` checks the app and room, then calls the cell's `issue` op), so
-the two answer alike by construction.
+room or visitor holds which credential. The public router checks the app and
+room, then calls the cell's `issue` op.
 
 ## Persistence
 
@@ -2725,9 +2653,8 @@ A `Schedule` is:
 ```
 
 - `tz` is always present and names an IANA zone the runtime knows. The Room
-  cell, which schedules in `tz`, is the one judge of that: both servers pass
-  any non-empty `tz` to it (`utc` included, if the runtime knows it), so the
-  answer never depends on a server process's own zone database. `at` is
+  cell, which schedules in `tz`, is the one judge of that: the public router
+  passes any non-empty `tz` to it (`utc` included, if the runtime knows it). `at` is
   `HH:MM` local time in `tz` and `days` is a non-empty set of distinct weekdays
   (0 = Sunday); a one-shot item carries `when` (RFC 3339 with offset, in the
   future) instead of `at` and `days`.
@@ -2788,9 +2715,8 @@ app's own cell beside its room coordinator. No route returns the private key.
 A Room cell never holds it either: it asks the app cell for a signed VAPID
 token per push-service origin (`aud` is the origin, `sub` names the apex,
 `exp` is 12 hours out) and caches nothing across fires. The `sub` is the one
-the latest subscription or schedule write carried: `https://<apex>` from
-`hostthisd`, `<scheme>://<apex>` from the Worker, its scheme
-`HOSTTHIS_PUBLIC_SCHEME` (`https` when unset).
+the latest subscription or schedule write carried: `<scheme>://<apex>`, its
+scheme `HOSTTHIS_PUBLIC_SCHEME` (`https` when unset).
 
 ### Timer
 
@@ -3506,8 +3432,7 @@ has no pod support: `pod link` answers that pods
 are not available, and every other path behaves as if no owner had linked one.
 
 **The apex endpoints.** The Worker's public router serves these on the apex
-host, and `hostthisd` forwards every apex `/_solid/` request to it (see
-"Public and internal hosts"):
+host (see "Public and internal hosts"):
 
 | Path | Answer |
 | --- | --- |
@@ -4337,9 +4262,9 @@ The fleet bucket must never carry a storage quota. Payload growth shares it
 with celld's state and lease writes, and a quota that fills would refuse those
 as well.
 
-One fleet bucket serves one Worker application. `hostthisd` serves all public
-content unless a deployment routes public hosts to the Worker's public surface
-(see "Public and internal hosts"). The Worker's internal routes accept an optional shared token: when the Worker
+One fleet bucket serves one Worker application. The Worker's public surface
+serves all public content (see "Public and internal hosts"); `hostthisd`
+serves only the apex landing page beside it. The Worker's internal routes accept an optional shared token: when the Worker
 has `HOSTTHIS_WORKER_TOKEN` set, every route except `/healthz` (the cell
 routes, `/blob`, and the room join) requires `Authorization: Bearer <token>`
 and answers 401 without it, compared in constant time. `hostthisd` sends the
@@ -4361,9 +4286,8 @@ decided from its host, before any path is looked at.
 
 `HOSTTHIS_APEX_DOMAIN` on the Worker turns the split on. Unset or empty, the
 Worker runs only the internal router, exactly as above, whatever the Host and
-headers, and its Room cells relay every frame as `hostthisd`'s proxy expects
-(see "Real-time room relay"); every existing deployment runs this way. Set,
-each request is classified in this order:
+headers, and serves nothing public (see "Real-time room relay" for its Room
+cells in that mode). Set, each request is classified in this order:
 
 1. **Public host.** A request whose host is the apex or any name under it
    (`<apex>`, `<slug>.<apex>`, `www.<apex>`, `a.b.<apex>`) goes to the public
@@ -4389,8 +4313,8 @@ Hosts compare after normalization: lowercase, no port, no trailing dot. The
 apex value is normalized the same way, so `Example.COM.:443` names
 `example.com`.
 
-The public router first does what Go's server and `ServeMux` do before
-`hostthisd` routes, for every request: a malformed percent escape is a 400;
+The public router first normalizes the request, as Go's `ServeMux` does, for
+every request: a malformed percent escape is a 400;
 `/_hostthis` without its slash is redirected 307 to `/_hostthis/`; a path that
 cleaning changes (a doubled slash, a `.` or `..` segment; a trailing slash is
 kept) is redirected 307 to its cleaned form with the query kept; and the path
@@ -4405,7 +4329,7 @@ It serves an app on a slug host, `<slug>.<apex>` whose one label parses as a
 slug, and, with `HOSTTHIS_URL_MODE=path` (dev and tests only; `subdomain` is
 the default), under `/p/<slug>/` on the apex host. An app's rooms API, room
 push and room WebSocket (`/api/rooms[/...]` and `/api/push/key`, see "Rooms",
-"Real-time room relay" and "Room push") come first, as in `hostthisd`; every
+"Real-time room relay" and "Room push") come first; every
 other path is the app's read path (see "The public surface"). It builds every
 cell request from parsed values: the slug from the host or the path-mode
 prefix, the room from the parsed UUID, the key or read path from the decoded
@@ -4423,23 +4347,20 @@ warns.
 
 Every other request answers 404 with `404 page not found`,
 `Content-Type: text/plain; charset=utf-8` and `X-Content-Type-Options:
-nosniff`, the 404 `hostthisd` gives an unknown slug. The apex `/` is one: the
-landing page stays `hostthisd`'s, and so do its notes for agents. The apex `/_solid/` paths are the one
-exception (see "Pod storage"). The Worker never redirects between schemes;
+nosniff`. The apex `/` is one: the landing page is `hostthisd`'s, and so are
+its notes for agents (`/llms.txt`, `/AGENTS.md`); the front door routes those
+three apex paths to it (see "Apex landing page"). The apex `/_solid/` paths
+are the one exception (see "Pod storage"). The Worker never redirects between schemes;
 that is the front door's job.
 
 ### The public surface
 
-With an apex set, the Worker answers paste and site reads itself, by the
-rules `hostthisd`'s read path follows, so the same URL gives the same answer
-from either server (statuses, the content headers, bodies byte for byte).
-Nothing changes for a deployment until it routes public traffic to the Worker
-(a Workers route, or forwarded mode); `hostthisd` keeps its own read path.
+With an apex set, the Worker answers every paste and site read. `hostthisd`
+serves none: a deployment routes its public hosts to the Worker (a Workers
+route, or forwarded mode), apart from the landing page's three apex paths.
 
 The URL parser resolves `.` and `..` segments (`%2e` included) before the
-Worker sees the path, so such a request is served at the resolved path, where
-`hostthisd` redirects a literal dot segment to that path and looks an escaped
-one up as part of the path.
+Worker sees the path, so such a request is served at the resolved path.
 
 **The read path.** Reads answer GET and HEAD; any other method gets `405`
 with `Allow: GET, HEAD`. Each request makes one call to the slug's Paste cell,
@@ -4448,7 +4369,7 @@ host (or the path, in path mode), the decoded path, and the `raw` and `files`
 flags. The flags are read as Go's `URL.Query().Has` reads them: pairs split on
 `&`, a pair holding `;` dropped, keys percent-decoded, any value (`?raw`,
 `?raw=0` and `?r%61w` all ask for raw bytes). The client's URL and query are
-never forwarded. The answer maps to a response as `hostthisd` maps the same
+never forwarded. The answer maps to a response by its
 case:
 
 | answer | response |
@@ -4472,7 +4393,7 @@ Content responses carry the sandbox headers (see "HTML sandboxing"),
 conditional requests before any payload is read (see "Cache-Control
 posture"). Raw bytes take the kind's raw type (`text/plain; charset=utf-8`
 when it has none), a site or knowledge base file its stored type
-(`application/octet-stream` when empty). Every 500 is bare, as `hostthisd`'s:
+(`application/octet-stream` when empty). Every 500 is bare:
 its text with `Content-Type`, `X-Content-Type-Options: nosniff` and
 `Cache-Control: no-store`, no sandbox headers or validators. It logs one
 warning naming the slug and the cause, and nothing else (see "5xx
@@ -4527,7 +4448,7 @@ HEAD never opens the object.
 
 **Renderer assets.** On Cloudflare, the build's static assets answer every
 known `/_hostthis/<name>` before the Worker runs. A request that reaches the
-Worker resolves the name as `hostthisd` does, by the path's last segment, so
+Worker resolves the name by the path's last segment, so
 `/_hostthis/mdshell/md.js` serves `md.js`; an unknown name is the 404. A name
 too large for static assets (listed in `static-r2.json`) streams from
 `PAYLOADS` at `static/<shell version>/<name>`, stored as is; so does every
@@ -4535,11 +4456,10 @@ asset when the Worker has no `ASSETS` binding. Either way the response carries
 the asset's Content-Type and `public, max-age=31536000, immutable`. Assets
 answer GET and HEAD, and a HEAD reads nothing. The static assets layer
 answers a known name on every host, the internal endpoint's included, with a
-validator of its own (an `ETag`, which `hostthisd`'s assets do not carry), and
-answers any other method with a 405 of its own, without `Allow`.
+validator of its own (an `ETag`), and answers any other method with a 405 of
+its own, without `Allow`.
 
-**Deliberate differences** from `hostthisd`, each where the Worker is
-stricter or the runtime decides:
+Also:
 
 - Reads and assets answer only GET and HEAD (405 otherwise).
 - A HEAD never opens the object, so a damaged object is 200 to HEAD, 500 to
@@ -4548,11 +4468,7 @@ stricter or the runtime decides:
   response turns its ETag into `W/"..."`, which must still match.
 - A stored kind with no shell is a 500 even to a conditional request.
 - Hosts compare lowercased, and in path mode `/p/` is served only on the apex
-  host (`hostthisd` serves it on any host that is not a slug's).
-- `.` and `..` segments are resolved by the URL parser rather than redirected
-  (or, escaped, looked up as written).
-- An asset the static assets layer answers carries that layer's `ETag`, and
-  its 405 no `Allow`.
+  host.
 
 **Caches.** Both are decorators around the read path, wired at the entrypoint,
 off unless configured, and used only where the runtime has a Cache API
@@ -4659,19 +4575,6 @@ A site file's name is never taken as proof that its bytes are fixed: a name
 that looks content-hashed can carry different bytes after a redeploy, and a
 browser's stored copy cannot be recalled.
 
-**CDN freshness.** `HOSTTHIS_CDN_TTL` (a duration, default off) adds
-`CDN-Cache-Control: public, max-age=<seconds>` (RFC 9213) to a site file's
-response, on a 200 and a 304 alike, when its decoded size is known and at most
-8 MiB. A CDN then answers that file, and its browsers' revalidations, without
-asking the origin; browsers keep `public, no-cache`. The entry stays
-recallable: every write that changes what a slug serves purges its host (see
-"Active invalidation"), and so does a quarantine, an owner ban and a delete, so
-a reader sees a change within the purge bound. The TTL bounds what a purge
-misses: a failed purge, or a fill still running after a write's second purge,
-15 seconds on, which the size limit makes unlikely. An error or a 416 never
-carries the header. `hostthisd` refuses to start with a TTL and no purging backend. The
-Worker's public surface has its own edge cache and does not set this header.
-
 The versioned renderer assets under `/_hostthis/` are
 `public, max-age=31536000, immutable`: their URLs carry the shell version.
 
@@ -4737,8 +4640,8 @@ actor and writes no `active`.
 A page view is a GET by a browser that the Worker answered with a paste's
 HTML (200), or revalidated on a navigation (304). Status pages, subresources,
 HEAD requests, a request with no User-Agent and one naming an automated client
-are not counted. Only reads the Worker answers directly are counted: a read
-hostthisd answers, itself or by forwarding to the Worker, is not.
+are not counted. Only reads the Worker answers directly are counted: a
+forwarded read is not.
 
 Test traffic writes nothing. A read that carries `X-Activity-Skip: 1` is not
 counted; the header is no secret, it only hides the caller's own reads. A
@@ -4770,22 +4673,18 @@ edge's classification of a direct request (null on a forwarded one).
 
 ### Abuse log on hostthisd
 
-`hostthisd` writes the same line for the abuse events it answers itself, and
+`hostthisd` writes the same line for the abuse events on its SSH surface, and
 nothing for normal traffic: `{"event","route","status","addr","subnet"}`, with
 no `country` or `asn`. The subnet grouping is the Worker's (IPv4 /24, IPv6 /40,
 IPv4-mapped IPv6 as IPv4, `unknown` for anything that does not parse), held to
-the same vectors (`testdata/abuse-subnet-vectors.json`). The events are a
-created room (201 on the collection), an SSH key seen for the first time on its
-subnet (`created`, route `ssh`, status 0, only when the fresh-key cap is wired;
-a transport-failure replay can read a fresh key as known and skip the line),
-a rate or connection limit (429, a room
-socket over its cap, an SSH session refused by the fresh-key cap), a
-capacity refusal (507), an oversize write (413), a rejected write (a value
-refused or not text, an upload refused by screening) and an authentication
-refusal (the rooms API private to its allow-list, an SSH session refused by the
-allow-list or the denylist, or without a usable key). `route` is the room route
-kind (`collection`, `room`, `value`, `ws`), `rooms` for the private-API
-refusal, or `ssh`, and `status` is the HTTP status or the SSH exit code.
+the same vectors (`testdata/abuse-subnet-vectors.json`). The events are an SSH
+key seen for the first time on its subnet (`created`, status 0, only when the
+fresh-key cap is wired; a transport-failure replay can read a fresh key as
+known and skip the line), a session refused by the fresh-key cap or by the
+same-identity create gate, an upload refused by screening, and an
+authentication refusal (a session refused by the allow-list or the
+denylist, or without a usable key). `route` is `ssh`, and `status` is the SSH
+exit code.
 
 ### Command log on the SSH surface
 
@@ -5055,7 +4954,7 @@ stricter policy (`form-action 'none'`) must not be replaced by it.
 Because a 304 cannot refresh them, those headers are folded into the
 validator instead: a stored file's ETag is its object validator plus
 `-p<8 hex>`, an FNV-1a hash of the policy text, a newline and the
-`X-Robots-Tag` value, computed alike by both servers. When the policy changes, every cached copy's validator stops
+`X-Robots-Tag` value. When the policy changes, every cached copy's validator stops
 matching, so the next revalidation answers 200 with the new headers rather
 than a 304 that would keep the old ones.
 
@@ -5065,7 +4964,7 @@ Pastes and sites are link-only: nothing lists them, and they are kept out of
 search indexes. Every response that carries the framing headers (an HTML
 paste, a render shell, `?raw` bytes, a site or knowledge base file, a file
 list, a single-page fallback, the pending and failed pages) also carries
-`X-Robots-Tag: noindex, nofollow`, from both servers, on a 200 and a 304
+`X-Robots-Tag: noindex, nofollow`, on a 200 and a 304
 alike. An uploaded page cannot turn it off: crawlers take the most
 restrictive rule they see, whatever the page's own markup says. A bare 5xx
 does not carry it.
@@ -5477,7 +5376,7 @@ file). Defaults in parens:
 
 ```
 --ssh-addr               / HOSTTHIS_SSH_ADDR                listen for ssh                          (:2222)
---http-addr              / HOSTTHIS_HTTP_ADDR               listen for http                         (:8080)
+--http-addr              / HOSTTHIS_HTTP_ADDR               listen for http (landing, health)       (:8080)
 --apex-domain            / HOSTTHIS_APEX_DOMAIN             public apex                             (hostthis.dev)
 --mode                   / HOSTTHIS_URL_MODE                subdomain (prod) | path (dev)           (path)
 --scheme                 / HOSTTHIS_PUBLIC_SCHEME           https | http                            (https)
@@ -5503,13 +5402,9 @@ file). Defaults in parens:
 # CDN / cache purger
                          / HOSTTHIS_CACHE_BACKEND           noop | worker (the Worker's purge queue) (noop)
                          / HOSTTHIS_CACHE_SKIP_OWNERS       owners whose writes purge nothing        (unset)
-                         / HOSTTHIS_CDN_TTL                 CDN-only freshness of small site files  (off; needs a purging backend)
 
 # Admission and screening
                          / HOSTTHIS_SSH_ALLOW               keys/CIDRs a private instance admits    (unset: public)
-                         / HOSTTHIS_ROOMS_ALLOW             CIDRs a private rooms API serves        (unset: public)
-                         / HOSTTHIS_ROOMS_TOKEN             token that opens a private rooms API    (unset)
-                         / HOSTTHIS_ROOM_DENY               room value rules (JSON)                 (unset)
                          / HOSTTHIS_SCREEN_URL              pre-publish screening service base URL  (unset: off)
                          / HOSTTHIS_SCREEN_TOKEN            bearer token for the screening service  (unset)
                          / HOSTTHIS_SCREEN_EXEMPT           key fingerprints that skip screening     (unset)
@@ -5536,6 +5431,8 @@ HOSTTHIS_INTERNAL_ALLOW        addresses and CIDRs the full token is accepted fr
 HOSTTHIS_READ_TOKEN            read-only token for operator tools                (unset)
 HOSTTHIS_ROOMS_ALLOW           addresses and CIDRs a private rooms API serves     (unset: public)
 HOSTTHIS_ROOMS_TOKEN           token that opens a private rooms API               (unset)
+HOSTTHIS_ROOM_DENY             room value rules (JSON)                           (unset)
+HOSTTHIS_CLIENT_IP_SOURCE      cf-connecting-ip | xff-rightmost                  (unset: one bucket)
 HOSTTHIS_ADMIN_TOKEN           abuse-admin token for operator tools              (unset)
 HOSTTHIS_PROTECTED_OWNERS      owners the watcher may not act on, and owners
                                the default room rules skip                       (unset)
@@ -5552,11 +5449,8 @@ See "Public and internal hosts". A deployment runs the bundled Worker,
 
 ### Process shutdown
 
-`SIGINT` and `SIGTERM` start one bounded shutdown sequence. Room relay admission
-stops synchronously; an upgrade racing a new room socket receives HTTP 503.
-Public HTTP, private metrics, and existing room relays then drain concurrently.
-Active room sockets receive WebSocket 1012 with `service restart`; sockets that
-do not close are force-closed before the process exits.
+`SIGINT` and `SIGTERM` start one bounded shutdown sequence. The HTTP listener
+and private metrics drain concurrently with SSH.
 
 SSH stops accepting new connections at the same time and receives at most 20
 seconds for existing sessions. The server then force-closes every remaining SSH
