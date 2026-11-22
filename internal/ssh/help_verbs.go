@@ -78,14 +78,27 @@ var verbDescriptors = map[string]verbDescriptor{
 	},
 	"delete": {
 		Name:      "delete",
-		Signature: "ssh {{apex}} delete <slug> [<ver>]",
+		Signature: "ssh {{apex}} delete <slug> [<ver> | <from>-<to>]",
 		Description: "One-arg form wipes the whole paste (all versions). Two-arg " +
-			"form deletes one earlier version's bytes. Cannot " +
-			"delete the currently-served version; pin a different version " +
-			"first.",
+			"form deletes one earlier version's bytes, or every live version " +
+			"in a range. Cannot delete the currently-served version: a single " +
+			"one is refused (pin a different version first), a range skips it.",
 		Examples: []string{
 			"ssh {{apex}} delete abc12345",
 			"ssh {{apex}} delete abc12345 2",
+			"ssh {{apex}} delete abc12345 3-120",
+		},
+	},
+	"prune": {
+		Name:      "prune",
+		Signature: "ssh {{apex}} prune <slug> [--keep N] [--dry-run]",
+		Description: "Delete old versions to free quota: keeps the served version " +
+			"plus the newest N other live ones (default 3). --dry-run lists what " +
+			"would go, one version per line on stdout, and deletes nothing.",
+		Examples: []string{
+			"ssh {{apex}} prune abc12345 --dry-run",
+			"ssh {{apex}} prune abc12345",
+			"ssh {{apex}} prune abc12345 --keep 0",
 		},
 	},
 	"have": {

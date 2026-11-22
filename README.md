@@ -48,6 +48,9 @@ pin <slug> <ver>             serve <ver> until unpinned
 unpin <slug>                 serve the latest version
 delete <slug>                delete everything
 delete <slug> <ver>          delete one version's bytes
+delete <slug> <from>-<to>    delete a range of versions (skips the served one)
+prune <slug> [--keep N]      keep the served + newest N versions (default 3);
+                             --dry-run lists what would go
 have <slug> [-o json]        a site's files as a keep list (see SITES)
 pod link|status|unlink       keep your bytes in your Solid pod (see PODS)
 ```

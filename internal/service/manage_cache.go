@@ -19,6 +19,7 @@ type PasteManager interface {
 	Delete(slug domain.Slug, owner domain.Owner) error
 	Versions(slug domain.Slug, owner domain.Owner) ([]domain.Version, error)
 	DeleteVersion(slug domain.Slug, owner domain.Owner, verNum int) (DeleteVersionResult, error)
+	DeleteVersions(slug domain.Slug, owner domain.Owner, pick VersionPicker, dryRun bool) (DeleteVersionsResult, error)
 	Pin(slug domain.Slug, owner domain.Owner, verNum int) (domain.Version, error)
 	Unpin(slug domain.Slug, owner domain.Owner) error
 	Whoami(owner domain.Owner, subnet string) (WhoamiInfo, error)
