@@ -561,12 +561,12 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 		// A gzip-tar archive piped at an owned site slug re-deploys in place;
 		// the slug positional decides new-vs-update.
 		if isArchive {
-			res, err := s.Deploy.DeployToSlug(slug, peeked, owner)
+			res, err := s.Deploy.DeployToSlug(sess.Context(), slug, peeked, owner)
 			s.emitSite(sess, owner, res, err)
 			return
 		}
 
-		res, err := s.Manage.Update(slug, owner, limited, args.Type)
+		res, err := s.Manage.Update(sess.Context(), slug, owner, limited, args.Type)
 		if err != nil {
 			// Through emitServiceErr like every other verb, so a foreign slug
 			// reports the same not-found text `get` and `delete` do.
@@ -600,12 +600,12 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 	// Create path. A gzip magic prefix (with no explicit type hint) routes to
 	// the site deploy; everything else is a single-file paste.
 	if isArchive {
-		res, err := s.Deploy.Deploy(peeked, owner)
+		res, err := s.Deploy.Deploy(sess.Context(), peeked, owner)
 		s.emitSite(sess, owner, res, err)
 		return
 	}
 
-	res, err := s.Upload.Create(limited, owner, args.Name, args.Type)
+	res, err := s.Upload.Create(sess.Context(), limited, owner, args.Name, args.Type)
 	if err != nil {
 		emitServiceErr(sess, err)
 		return

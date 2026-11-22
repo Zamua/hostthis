@@ -44,7 +44,7 @@ func TestUpload_Create_LookalikeErrorIsNotARemint(t *testing.T) {
 	repo := &slugLookalikeErrRepo{}
 	u := NewUpload(repo, fakeBlobUnit())
 
-	_, err := u.Create(bytes.NewReader([]byte("# body")), ownerOf("key:owner"), "", "")
+	_, err := u.Create(context.Background(), bytes.NewReader([]byte("# body")), ownerOf("key:owner"), "", "")
 	if !errors.Is(err, errSlugLookalike) {
 		t.Fatalf("Create = %v, want the repo's own error surfaced verbatim", err)
 	}

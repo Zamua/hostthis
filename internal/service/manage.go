@@ -155,7 +155,10 @@ type UpdateResult struct {
 // Update appends a new version to an existing slug. On an UNPINNED paste the
 // new version also becomes the served one; on a PINNED paste the pin holds and
 // the new version is recorded but not served.
-func (m *Manage) Update(slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error) {
+//
+// ctx ends the blob write early (a client that left); the metadata commit
+// runs to its end regardless, so its outcome is never left unknown.
+func (m *Manage) Update(ctx context.Context, slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error) {
 	uploadID, err := m.UploadIDs.next(owner)
 	if err != nil {
 		return UpdateResult{}, fmt.Errorf("upload id: %w", err)
@@ -190,7 +193,6 @@ func (m *Manage) Update(slug domain.Slug, owner domain.Owner, body io.Reader, ty
 		return UpdateResult{}, err
 	}
 	now := m.Now().UTC()
-	ctx := context.Background()
 	key := domain.UploadObjectKey(uploadID, 0)
 	if err := m.Blob.StagePrecompressed(ctx, key, staged.File, staged.encodedSize()); err != nil {
 		// A failed put can still leave a partial object, and no metadata names it.
@@ -201,7 +203,7 @@ func (m *Manage) Update(slug domain.Slug, owner domain.Owner, body io.Reader, ty
 		return UpdateResult{}, fmt.Errorf("blob write: %w", err)
 	}
 	res, err := m.Repo.AppendVersionWithQuotaCheck(
-		ctx, slug, existing.Generation, kind, uploadID, documentManifest(key, kind, staged),
+		context.Background(), slug, existing.Generation, kind, uploadID, documentManifest(key, kind, staged),
 		staged.CompressedSize, int64(domain.UserQuotaBytes), now,
 	)
 	if err != nil {

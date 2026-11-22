@@ -72,7 +72,7 @@ func TestDeploySite_HappyPath(t *testing.T) {
 		"css/style.css": "body{margin:0}",
 		"app.js":        "console.log(1)",
 	})
-	res, err := d.Deploy(bytes.NewReader(arc), ownerOf("key:test"))
+	res, err := d.Deploy(context.Background(), bytes.NewReader(arc), ownerOf("key:test"))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestDeploySite_HappyPath(t *testing.T) {
 func TestDeploySite_Delete(t *testing.T) {
 	d, sites, _, root := deployStack(t)
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})
-	res, err := d.Deploy(bytes.NewReader(arc), ownerOf("key:owner"))
+	res, err := d.Deploy(context.Background(), bytes.NewReader(arc), ownerOf("key:owner"))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestDeploySite_ShapeFromManifest(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d, sites, _ := deployFixture(t)
-			res, err := d.Deploy(bytes.NewReader(gzipTar(t, tc.files)), ownerOf("key:shape"))
+			res, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, tc.files)), ownerOf("key:shape"))
 			if err != nil {
 				t.Fatalf("deploy: %v", err)
 			}
@@ -166,14 +166,14 @@ func TestDeploySite_ShapeFromManifest(t *testing.T) {
 func TestDeployToSlug_ReDecidesShape(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 	const owner = "key:reshape"
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"README.md": "# notes\n"})), ownerOf(owner))
+	r1, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"README.md": "# notes\n"})), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy knowledge base: %v", err)
 	}
 	if r1.Site.Kind != domain.KindKnowledgeBase {
 		t.Fatalf("first deploy kind: got %q, want knowledgebase", r1.Site.Kind)
 	}
-	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>site now</h1>"})), ownerOf(owner)); err != nil {
+	if _, err := d.DeployToSlug(context.Background(), r1.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>site now</h1>"})), ownerOf(owner)); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	got, err := sites.Get(r1.Site.Slug)
@@ -197,7 +197,7 @@ func TestDeploySite_ChargesCompressedFinalManifest(t *testing.T) {
 		{"./index.html", "first body"},
 		{"index.html", raw},
 	})
-	r, err := d.Deploy(bytes.NewReader(archive), ownerOf(owner))
+	r, err := d.Deploy(context.Background(), bytes.NewReader(archive), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -223,11 +223,11 @@ func TestDeploySite_ChargesCompressedFinalManifest(t *testing.T) {
 func TestDeploySite_UploadsShareNothing(t *testing.T) {
 	d, _, blobs := deployFixture(t)
 	shared := "<!doctype html><h1>shared</h1>"
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": shared})), ownerOf("key:a"))
+	r1, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": shared})), ownerOf("key:a"))
 	if err != nil {
 		t.Fatalf("deploy 1: %v", err)
 	}
-	r2, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": shared})), ownerOf("key:b"))
+	r2, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": shared})), ownerOf("key:b"))
 	if err != nil {
 		t.Fatalf("deploy 2: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 	// exceeds the smaller v2; with tiny or compressible content the per-file
 	// zstd overhead would dominate and mask the shrink.
 	v1 := gzipTar(t, map[string]string{"index.html": incompressible(t, 4000)})
-	r1, err := d.Deploy(bytes.NewReader(v1), ownerOf(owner))
+	r1, err := d.Deploy(context.Background(), bytes.NewReader(v1), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestDeployToSlug_ReplacesInPlace(t *testing.T) {
 		"index.html": incompressible(t, 500),
 		"about.html": "<h1>about</h1>",
 	})
-	r2, err := d.DeployToSlug(slug, bytes.NewReader(v2), ownerOf(owner))
+	r2, err := d.DeployToSlug(context.Background(), slug, bytes.NewReader(v2), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("DeployToSlug should succeed for owned site: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 	// charge actually nears the cap. The headroom is enough that zstd's
 	// block-header expansion of random data cannot overrun.
 	nearCap := incompressible(t, domain.UserQuotaBytes-20000)
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": nearCap})), ownerOf(owner))
+	r1, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": nearCap})), ownerOf(owner))
 	if err != nil {
 		t.Fatalf("deploy near-cap site: %v", err)
 	}
@@ -323,17 +323,17 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 	// At the original size, a 30 KB NEW deploy does NOT fit (only ~20 KB free):
 	// the combined-usage budget is computed before the untar.
 	tooBig := gzipTar(t, map[string]string{"index.html": incompressible(t, 30000)})
-	if _, err := d.Deploy(bytes.NewReader(tooBig), ownerOf(owner)); !errors.Is(err, ErrOverQuota) {
+	if _, err := d.Deploy(context.Background(), bytes.NewReader(tooBig), ownerOf(owner)); !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("a 30 KB new deploy should not fit at the original size: got %v", err)
 	}
 
 	// Shrink the existing site in place to a few bytes, freeing the budget.
-	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>tiny</h1>"})), ownerOf(owner)); err != nil {
+	if _, err := d.DeployToSlug(context.Background(), r1.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>tiny</h1>"})), ownerOf(owner)); err != nil {
 		t.Fatalf("shrink in place: %v", err)
 	}
 
 	// The freed budget now admits a NEW deploy.
-	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("Z"), 5000))})), ownerOf(owner)); err != nil {
+	if _, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": string(bytes.Repeat([]byte("Z"), 5000))})), ownerOf(owner)); err != nil {
 		t.Fatalf("5000B new deploy should fit after the shrink freed budget: %v", err)
 	}
 }
@@ -344,7 +344,7 @@ func TestDeployToSlug_FreesOldChargesNewDelta(t *testing.T) {
 func TestDeployToSlug_NonexistentSlug(t *testing.T) {
 	d, _, _ := deployFixture(t)
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})
-	_, err := d.DeployToSlug(domain.Slug("nosuch12"), bytes.NewReader(arc), ownerOf("key:test"))
+	_, err := d.DeployToSlug(context.Background(), domain.Slug("nosuch12"), bytes.NewReader(arc), ownerOf("key:test"))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("re-deploy to a missing slug: got %v, want ErrNotFound", err)
 	}
@@ -356,14 +356,14 @@ func TestDeployToSlug_NonexistentSlug(t *testing.T) {
 func TestDeployToSlug_ForeignSlug(t *testing.T) {
 	d, sites, _ := deployFixture(t)
 
-	r, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>alice</h1>"})), ownerOf("key:alice"))
+	r, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>alice</h1>"})), ownerOf("key:alice"))
 	if err != nil {
 		t.Fatalf("alice deploy: %v", err)
 	}
 	slug := r.Site.Slug
 	aliceKey := r.Site.Manifest.Files["index.html"].Key
 
-	_, err = d.DeployToSlug(slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>mallory</h1>"})), ownerOf("key:mallory"))
+	_, err = d.DeployToSlug(context.Background(), slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>mallory</h1>"})), ownerOf("key:mallory"))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign re-deploy: got %v, want ErrNotFound (no ownership leak)", err)
 	}
@@ -383,13 +383,13 @@ func TestDeploySite_ChargesEveryStoredCopy(t *testing.T) {
 	body := "<!doctype html><h1>same bytes</h1>"
 
 	d, _, _ := deployFixture(t)
-	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": body})), ownerOf("key:one")); err != nil {
+	if _, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": body})), ownerOf("key:one")); err != nil {
 		t.Fatalf("deploy one: %v", err)
 	}
 	single := ownerCharge(t, "key:one")
 
 	// The same bytes at a second path: stored twice, so charged twice.
-	if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{
+	if _, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{
 		"index.html": body,
 		"copy.html":  body,
 	})), ownerOf("key:two")); err != nil {
@@ -423,7 +423,7 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 		"app.css":    "body{}",
 		"index.html": string(bytes.Repeat([]byte("A"), 2<<20)),
 	})
-	_, err := d.Deploy(bytes.NewReader(arc), ownerOf(owner))
+	_, err := d.Deploy(context.Background(), bytes.NewReader(arc), ownerOf(owner))
 	if !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("bomb deploy: got %v, want ErrOverQuota", err)
 	}
@@ -439,7 +439,7 @@ func TestGuard_DeployBombStoresNothing(t *testing.T) {
 	// The abort is non-destructive: a small site from the same identity still
 	// deploys cleanly afterward.
 	good := gzipTar(t, map[string]string{"index.html": "<h1>recovered</h1>"})
-	if _, err := d.Deploy(bytes.NewReader(good), ownerOf(owner)); err != nil {
+	if _, err := d.Deploy(context.Background(), bytes.NewReader(good), ownerOf(owner)); err != nil {
 		t.Fatalf("post-bomb legitimate deploy failed: %v", err)
 	}
 }
@@ -455,7 +455,7 @@ func TestGuard_DeployTraversalStoresNothing(t *testing.T) {
 		{"assets/app.css", "body{}"},
 		{"../../etc/passwd", "root:x:0:0"},
 	})
-	_, err := d.Deploy(bytes.NewReader(arc), ownerOf("key:test"))
+	_, err := d.Deploy(context.Background(), bytes.NewReader(arc), ownerOf("key:test"))
 	if !errors.Is(err, domain.ErrUnsafeArchive) {
 		t.Fatalf("traversal deploy: got %v, want ErrUnsafeArchive", err)
 	}
@@ -478,7 +478,7 @@ func TestGuard_DeployManifestSizeCapStoresNothing(t *testing.T) {
 	}
 	arc := gzipTar(t, files)
 
-	_, err := d.Deploy(bytes.NewReader(arc), ownerOf("key:test"))
+	_, err := d.Deploy(context.Background(), bytes.NewReader(arc), ownerOf("key:test"))
 	if !errors.Is(err, domain.ErrTooManyFiles) {
 		t.Fatalf("manifest cap deploy: got %v, want ErrTooManyFiles", err)
 	}
@@ -523,7 +523,7 @@ func TestDeploySite_FailedInsertObjects(t *testing.T) {
 			_, _, blobs, root := deployStack(t)
 			d := NewDeploySite(scriptedSiteRepo{Sites: storage.NewSites(newRepo(t)), insertErr: tc.insertErr},
 				newRepo(t), blobs)
-			if _, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})), ownerOf("key:owner")); err == nil {
+			if _, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>x</h1>"})), ownerOf("key:owner")); err == nil {
 				t.Fatal("deploy succeeded against a failing insert")
 			}
 			if kept := objectsUnder(t, root) > 0; kept != tc.wantKept {
@@ -537,7 +537,7 @@ func TestDeploySite_FailedInsertObjects(t *testing.T) {
 // stay readable.
 func TestDeployToSlug_RefusedRedeployDeletesItsUpload(t *testing.T) {
 	d, sites, blobs, root := deployStack(t)
-	r1, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), ownerOf("key:owner"))
+	r1, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), ownerOf("key:owner"))
 	if err != nil {
 		t.Fatalf("deploy v1: %v", err)
 	}
@@ -545,7 +545,7 @@ func TestDeployToSlug_RefusedRedeployDeletesItsUpload(t *testing.T) {
 
 	d.Sites = scriptedSiteRepo{Sites: sites, replaceErr: domain.ErrOverUserQuota}
 	v2 := gzipTar(t, map[string]string{"index.html": "<h1>v2</h1>", "app.js": "1"})
-	if _, err := d.DeployToSlug(r1.Site.Slug, bytes.NewReader(v2), ownerOf("key:owner")); !errors.Is(err, ErrOverQuota) {
+	if _, err := d.DeployToSlug(context.Background(), r1.Site.Slug, bytes.NewReader(v2), ownerOf("key:owner")); !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("refused redeploy = %v, want ErrOverQuota", err)
 	}
 	if after := objectsUnder(t, root); after != before {
@@ -580,7 +580,7 @@ func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
 	files := map[string]string{"index.html": "<h1>hi</h1>", "app.js": "console.log(1)"}
 	baseline := func() int {
 		d, _, _, root := deployStack(t)
-		if _, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:baseline")); err != nil {
+		if _, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, files)), ownerOf("key:baseline")); err != nil {
 			t.Fatalf("baseline deploy: %v", err)
 		}
 		return objectsUnder(t, root)
@@ -589,7 +589,7 @@ func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
 	t.Run("one collision then lands", func(t *testing.T) {
 		d, sites, blobs, root := deployStack(t)
 		d.Sites = &collidingSites{SiteRepo: sites, left: 1}
-		res, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:owner"))
+		res, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, files)), ownerOf("key:owner"))
 		if err != nil {
 			t.Fatalf("deploy: %v", err)
 		}
@@ -610,7 +610,7 @@ func TestDeploySite_SlugCollisionDoesNotRestageArchive(t *testing.T) {
 	t.Run("budget exhausted", func(t *testing.T) {
 		d, sites, _, root := deployStack(t)
 		d.Sites = &collidingSites{SiteRepo: sites, left: maxDeployRetries}
-		if _, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:owner")); !errors.Is(err, ErrSlugTaken) {
+		if _, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, files)), ownerOf("key:owner")); !errors.Is(err, ErrSlugTaken) {
 			t.Fatalf("deploy = %v, want ErrSlugTaken", err)
 		}
 		noSites(t, d, sites, "key:owner")
@@ -646,7 +646,7 @@ func TestGuard_DeployArchiveCap(t *testing.T) {
 			d, sites, _, root := deployStack(t)
 			d.MaxArchiveBytes = tc.limit
 			owner := "key:archive-cap"
-			_, err := d.Deploy(bytes.NewReader(tc.body), ownerOf(owner))
+			_, err := d.Deploy(context.Background(), bytes.NewReader(tc.body), ownerOf(owner))
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("deploy: got %v, want %v", err, tc.want)
 			}

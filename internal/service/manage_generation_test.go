@@ -110,7 +110,7 @@ func TestManageMutationsFenceReplacementIncarnation(t *testing.T) {
 		mutate func(m *Manage, old domain.Paste) error
 	}{
 		{"update", nil, func(m *Manage, old domain.Paste) error {
-			_, err := m.Update(old.Slug, ownerOf(old.Identity.String()), bytes.NewBufferString("# update"), "")
+			_, err := m.Update(context.Background(), old.Slug, ownerOf(old.Identity.String()), bytes.NewBufferString("# update"), "")
 			return err
 		}},
 		{"pin", nil, func(m *Manage, old domain.Paste) error {

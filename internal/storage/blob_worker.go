@@ -31,17 +31,37 @@ type WorkerBlobStore struct {
 	// long, so a stuck upstream cannot hold the write (and whatever admitted
 	// it) forever. Zero disables it.
 	StallTimeout time.Duration
+	// WriteFloor and WriteMinRate bound a whole Put of known size, response
+	// included, to WriteFloor plus the time to send the body at WriteMinRate
+	// bytes per second. That ends a write the stall timeout cannot, such as
+	// one the Worker reads a trickle at a time or never answers in full. A
+	// zero WriteFloor disables the bound.
+	WriteFloor   time.Duration
+	WriteMinRate int64
 }
 
-// DefaultBlobStallTimeout is how long a Put's body may sit unread.
-const DefaultBlobStallTimeout = time.Minute
+const (
+	// DefaultBlobStallTimeout is how long a Put's body may sit unread.
+	DefaultBlobStallTimeout = time.Minute
+	// DefaultBlobWriteFloor is the least time any Put gets; it matches the
+	// transport's wait for a response, so a small write keeps that allowance.
+	DefaultBlobWriteFloor = time.Minute
+	// DefaultBlobWriteMinRate is the slowest sustained transfer a Put may
+	// make, in bytes per second.
+	DefaultBlobWriteMinRate = 256 << 10
+)
 
-// errBlobStalled is the cause of a Put ended by StallTimeout.
-var errBlobStalled = errors.New("the store stopped reading the body")
+var (
+	// errBlobStalled is the cause of a Put ended by StallTimeout.
+	errBlobStalled = errors.New("the store stopped reading the body")
+	// errBlobDeadline is the cause of a Put ended by its write deadline.
+	errBlobDeadline = errors.New("the write ran past its deadline")
+)
 
 // NewWorkerBlobStore talks to the Worker at base. A nil client gets one over
 // WorkerBlobTransport with no overall deadline, since a body of any size streams
-// through it; a write is bounded by progress instead (StallTimeout).
+// through it; a write is bounded by progress (StallTimeout) and by a deadline
+// that grows with its size (WriteFloor, WriteMinRate) instead.
 func NewWorkerBlobStore(base string, client *http.Client) (*WorkerBlobStore, error) {
 	if base == "" {
 		return nil, errors.New("blob worker: endpoint required")
@@ -51,6 +71,7 @@ func NewWorkerBlobStore(base string, client *http.Client) (*WorkerBlobStore, err
 	}
 	return &WorkerBlobStore{
 		base: strings.TrimRight(base, "/"), client: client, StallTimeout: DefaultBlobStallTimeout,
+		WriteFloor: DefaultBlobWriteFloor, WriteMinRate: DefaultBlobWriteMinRate,
 	}, nil
 }
 
@@ -76,11 +97,21 @@ func (s *WorkerBlobStore) objectURL(key string) string {
 // an occasional stream, and a PUT of the same bytes to the same key is
 // idempotent.
 func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
+	return s.PutContext(context.Background(), key, r, size)
+}
+
+// PutContext is Put ended early when ctx is done.
+func (s *WorkerBlobStore) PutContext(ctx context.Context, key string, r io.Reader, size int64) error {
 	if err := checkKey(key); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancelCause(context.Background())
+	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	if limit := s.writeDeadline(size); limit > 0 {
+		var stop context.CancelFunc
+		ctx, stop = context.WithTimeoutCause(ctx, limit, fmt.Errorf("%w of %s", errBlobDeadline, limit))
+		defer stop()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.objectURL(key), r)
 	if err != nil {
 		return fmt.Errorf("blob worker: put %s: %w", key, err)
@@ -104,7 +135,9 @@ func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 		}
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	watch := watchBodyProgress(req, s.StallTimeout, func() { cancel(errBlobStalled) })
+	watch := watchBodyProgress(req, s.StallTimeout, func() {
+		cancel(fmt.Errorf("%w for %s", errBlobStalled, s.StallTimeout))
+	})
 	defer watch.stop()
 	resp, err := s.client.Do(req)
 	if err != nil && req.GetBody != nil && req.Context().Err() == nil {
@@ -114,12 +147,25 @@ func (s *WorkerBlobStore) Put(key string, r io.Reader, size int64) error {
 		}
 	}
 	if err != nil {
-		if cause := context.Cause(ctx); errors.Is(cause, errBlobStalled) {
-			return fmt.Errorf("blob worker: put %s: %w for %s", key, cause, s.StallTimeout)
+		if cause := context.Cause(ctx); errors.Is(cause, errBlobStalled) || errors.Is(cause, errBlobDeadline) {
+			return fmt.Errorf("blob worker: put %s: %w", key, cause)
 		}
 		return fmt.Errorf("blob worker: put %s: %w", key, err)
 	}
 	return expectNoContent(resp, "put "+key)
+}
+
+// writeDeadline is how long a Put of size bytes may take in all, or zero for
+// no bound. A body of unknown length has only the stall timeout.
+func (s *WorkerBlobStore) writeDeadline(size int64) time.Duration {
+	if s.WriteFloor <= 0 || size < 0 {
+		return 0
+	}
+	limit := s.WriteFloor
+	if s.WriteMinRate > 0 {
+		limit += time.Duration(float64(size) / float64(s.WriteMinRate) * float64(time.Second))
+	}
+	return limit
 }
 
 // bodyWatch ends a request whose body goes unread for too long. Only the

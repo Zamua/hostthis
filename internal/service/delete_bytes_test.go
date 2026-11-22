@@ -32,7 +32,7 @@ func bytesStack(t *testing.T) (*Upload, *Manage, *worker.PasteRepo, *storage.Com
 
 func createReady(t *testing.T, up *Upload, body string) domain.Paste {
 	t.Helper()
-	res, err := up.Create(strings.NewReader(body), ownerOf(bytesOwner), "", "")
+	res, err := up.Create(context.Background(), strings.NewReader(body), ownerOf(bytesOwner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestDelete_RemovesEveryVersionsBytes(t *testing.T) {
 	keep := createReady(t, up, "<!doctype html><p>keep</p>")
 	doomed := createReady(t, up, "<!doctype html><p>v1</p>")
 	for _, body := range []string{"<!doctype html><p>v2</p>", "<!doctype html><p>v3</p>"} {
-		if _, err := m.Update(doomed.Slug, ownerOf(bytesOwner), strings.NewReader(body), ""); err != nil {
+		if _, err := m.Update(context.Background(), doomed.Slug, ownerOf(bytesOwner), strings.NewReader(body), ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 	}
@@ -70,7 +70,7 @@ func TestDelete_RemovesEveryVersionsBytes(t *testing.T) {
 func TestDeleteVersion_RemovesOnlyThatVersionsBytes(t *testing.T) {
 	up, m, repo, blobs, _ := bytesStack(t)
 	p := createReady(t, up, "<!doctype html><p>v1</p>")
-	if _, err := m.Update(p.Slug, ownerOf(bytesOwner), strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
+	if _, err := m.Update(context.Background(), p.Slug, ownerOf(bytesOwner), strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	v2, err := repo.GetVersion(p.Slug, 2)
@@ -115,7 +115,7 @@ func TestDelete_VersionWithoutUploadRemovesMetadataOnly(t *testing.T) {
 	if err := repo.InsertWithQuotaCheck(context.Background(), unkeyed, 0, fixedNow); err != nil {
 		t.Fatalf("insert paste: %v", err)
 	}
-	if _, err := m.Update(unkeyed.Slug, ownerOf(bytesOwner), strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
+	if _, err := m.Update(context.Background(), unkeyed.Slug, ownerOf(bytesOwner), strings.NewReader("<!doctype html><p>v2</p>"), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	v2, err := repo.GetVersion(unkeyed.Slug, 2)

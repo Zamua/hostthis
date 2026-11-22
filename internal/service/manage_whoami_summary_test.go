@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +29,7 @@ func TestWhoami_ReportsTheQuotaFigure(t *testing.T) {
 		t.Fatalf("new owner: %+v", empty)
 	}
 
-	if _, err := upload.Create(strings.NewReader("# a paste\n\nbody\n"), owner, "", ""); err != nil {
+	if _, err := upload.Create(context.Background(), strings.NewReader("# a paste\n\nbody\n"), owner, "", ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	upload.WaitFinalize()
@@ -40,7 +41,7 @@ func TestWhoami_ReportsTheQuotaFigure(t *testing.T) {
 		t.Fatalf("after a paste: %+v", pasted)
 	}
 
-	if _, err := deploy.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})), owner); err != nil {
+	if _, err := deploy.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>hi</h1>"})), owner); err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	both, err := manage.Whoami(owner, "")

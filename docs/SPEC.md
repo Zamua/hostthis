@@ -3324,9 +3324,15 @@ uploads arrive at once:
   paste that did get its URL never waits in this queue.
 - **A stalled write gives its budget back.** A write whose body the store
   stops reading for a minute ends with an error, like any failed write, so a
-  stuck store cannot hold budget forever. A write of any size may take as long
-  as it needs while bytes keep moving; once the whole body is sent, the store
-  has a minute to answer.
+  stuck store cannot hold budget forever; once the whole body is sent, the
+  store has a minute to answer. Every write of known size also has a
+  deadline for the whole exchange: a minute plus its size at 256 KiB/s, so a
+  store that reads a trickle at a time or never finishes its answer ends too.
+  A failed write releases its admission and deletes what its upload staged.
+- **A client that leaves cancels its synchronous writes.** A paste update or
+  a site deploy writes on the SSH session's context, so a disconnect ends the
+  write in flight. A new paste's write runs after its URL is handed out and
+  is not tied to the session.
 - **Reads and deletes are not queued.** `GetReader` streams without growing
   the runtime's memory, and `DeletePrefix` carries no body.
 

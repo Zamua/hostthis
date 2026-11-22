@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -60,7 +61,7 @@ const testOwner = "key:test-id"
 // newPaste uploads a fresh HTML paste.
 func newPaste(t *testing.T, upload *Upload) domain.Slug {
 	t.Helper()
-	res, err := upload.Create(bytes.NewReader(htmlBody(200)), ownerOf(testOwner), "", "")
+	res, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(200)), ownerOf(testOwner), "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	t.Run("update", func(t *testing.T) {
 		purger.reset()
 		slug := newPaste(t, upload)
-		if _, err := mgr.Update(slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
+		if _, err := mgr.Update(context.Background(), slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		if got := purger.calls(); len(got) != 1 || got[0] != slug {
@@ -86,7 +87,7 @@ func TestCacheInvalidating_MutationsPurge(t *testing.T) {
 	})
 	t.Run("pin then unpin", func(t *testing.T) {
 		slug := newPaste(t, upload)
-		if _, err := mgr.Update(slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
+		if _, err := mgr.Update(context.Background(), slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		purger.reset()
@@ -113,7 +114,7 @@ func TestCacheInvalidating_DeleteIsARemoval(t *testing.T) {
 	purger := &recordingPurger{}
 	mgr := NewCacheInvalidating(manage, purger, nil)
 	slug := newPaste(t, upload)
-	if _, err := mgr.Update(slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
+	if _, err := mgr.Update(context.Background(), slug, ownerOf(testOwner), bytes.NewReader(htmlBody(300)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if len(purger.removed) != 0 {
@@ -134,7 +135,7 @@ func TestCacheInvalidating_ExemptOwnersPurgeNothing(t *testing.T) {
 	exempt := ownerOf(testOwner)
 	mgr := NewCacheInvalidating(manage, purger, func(o domain.Owner) bool { return o == exempt })
 	slug := newPaste(t, upload)
-	if _, err := mgr.Update(slug, exempt, bytes.NewReader(htmlBody(300)), ""); err != nil {
+	if _, err := mgr.Update(context.Background(), slug, exempt, bytes.NewReader(htmlBody(300)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if err := mgr.Delete(slug, exempt); err != nil {
@@ -145,7 +146,7 @@ func TestCacheInvalidating_ExemptOwnersPurgeNothing(t *testing.T) {
 	}
 
 	other := ownerOf("key:someone-else")
-	res, err := upload.Create(bytes.NewReader(htmlBody(200)), other, "", "")
+	res, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(200)), other, "", "")
 	if err != nil {
 		t.Fatalf("upload: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestCacheInvalidating_PurgeErrorDoesNotFailOp(t *testing.T) {
 func TestCacheInvalidating_NilPurgerServesMutations(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := ownerOf("key:nil-purger")
-	res, err := upload.Create(strings.NewReader("# doc\n"), owner, "", "")
+	res, err := upload.Create(context.Background(), strings.NewReader("# doc\n"), owner, "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -216,7 +217,7 @@ type stubManager struct {
 
 func (s stubManager) Delete(domain.Slug, domain.Owner) error { return s.err }
 
-func (s stubManager) Update(domain.Slug, domain.Owner, io.Reader, string) (UpdateResult, error) {
+func (s stubManager) Update(context.Context, domain.Slug, domain.Owner, io.Reader, string) (UpdateResult, error) {
 	return UpdateResult{}, s.err
 }
 
@@ -231,7 +232,7 @@ func (s stubManager) Unpin(domain.Slug, domain.Owner) error { return s.err }
 func TestMutationsPurgeUnlessNothingWasTouched(t *testing.T) {
 	verbs := map[string]func(PasteManager, domain.Slug) error{
 		"update": func(m PasteManager, s domain.Slug) error {
-			_, err := m.Update(s, ownerOf(testOwner), strings.NewReader("x"), "")
+			_, err := m.Update(context.Background(), s, ownerOf(testOwner), strings.NewReader("x"), "")
 			return err
 		},
 		"pin": func(m PasteManager, s domain.Slug) error {
@@ -285,7 +286,7 @@ func TestUpdateOfAnotherOwnersPasteDoesNotPurge(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			purger.reset()
-			if _, err := mgr.Update(slug, ownerOf("key:someone-else"), body, ""); err == nil {
+			if _, err := mgr.Update(context.Background(), slug, ownerOf("key:someone-else"), body, ""); err == nil {
 				t.Fatal("want an error updating another owner's paste")
 			}
 			if got := purger.calls(); len(got) != 0 {

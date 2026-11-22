@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"io"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -24,8 +25,8 @@ func NewSiteCacheInvalidating(inner SiteDeployer, purger CachePurger, exempt Pur
 	return &SiteCacheInvalidating{SiteDeployer: inner, purges: purges{purger, exempt}}
 }
 
-func (c *SiteCacheInvalidating) DeployToSlug(slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error) {
-	res, err := c.SiteDeployer.DeployToSlug(slug, body, owner)
+func (c *SiteCacheInvalidating) DeployToSlug(ctx context.Context, slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error) {
+	res, err := c.SiteDeployer.DeployToSlug(ctx, slug, body, owner)
 	c.changed(slug, owner, err)
 	return res, err
 }

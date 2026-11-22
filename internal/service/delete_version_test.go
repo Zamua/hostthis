@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"testing"
 )
@@ -14,15 +15,15 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 	// v1 = 300K, v2 = 600K -> 900K used (v2 serves, v1 idle)
 	// v3 = 300K would total 1.2M -> ErrOverQuota
 	// delete-version v1 frees 300K -> 600K, so v3 then fits at 900K
-	r, err := upload.Create(bytes.NewReader(htmlBody(300_000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(300_000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create v1: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(600_000)), ""); err != nil {
+	if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(600_000)), ""); err != nil {
 		t.Fatalf("update v2: %v", err)
 	}
 	// Baseline: the v3 attempt fails before delete-version.
-	if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(300_000)), ""); !errors.Is(err, ErrOverQuota) {
+	if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(300_000)), ""); !errors.Is(err, ErrOverQuota) {
 		t.Fatalf("expected over-quota baseline, got %v", err)
 	}
 	dr, err := manage.DeleteVersion(r.Paste.Slug, ownerOf(owner), 1)
@@ -33,7 +34,7 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 		t.Fatalf("delete result unexpected: %+v", dr)
 	}
 	// With v1 freed, v3 should now fit.
-	if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(300_000)), ""); err != nil {
+	if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(300_000)), ""); err != nil {
 		t.Fatalf("after delete-version v1, 300K update should fit: %v", err)
 	}
 }
@@ -41,7 +42,7 @@ func TestDeleteVersion_FreesQuota(t *testing.T) {
 func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-current"
-	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -55,11 +56,11 @@ func TestDeleteVersion_RefusesCurrent(t *testing.T) {
 func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-pinned"
-	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000)), ""); err != nil {
+	if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	// Pinning makes v1 the served version even though v2 is newer.
@@ -78,11 +79,11 @@ func TestDeleteVersion_RefusesPinnedCurrent(t *testing.T) {
 func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-already"
-	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000)), ""); err != nil {
+	if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.DeleteVersion(r.Paste.Slug, ownerOf(owner), 1); err != nil {
@@ -96,7 +97,7 @@ func TestDeleteVersion_AlreadyDeleted(t *testing.T) {
 func TestDeleteVersion_NotFound(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-notfound"
-	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -108,11 +109,11 @@ func TestDeleteVersion_NotFound(t *testing.T) {
 func TestDeleteVersion_VersionsListShowsTombstone(t *testing.T) {
 	upload, manage, _ := newStack(t)
 	owner := "key:dv-list"
-	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000)), ""); err != nil {
+	if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000)), ""); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	if _, err := manage.DeleteVersion(r.Paste.Slug, ownerOf(owner), 1); err != nil {

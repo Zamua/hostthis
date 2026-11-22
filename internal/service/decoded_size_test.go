@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 func TestUpload_StoredDocumentRecordsDecodedSize(t *testing.T) {
 	u, m, repo := newStack(t)
 	body := strings.Repeat("# notes\n\nsome body text\n", 50)
-	res, err := u.Create(strings.NewReader(body), ownerOf("key:decoded"), "", "")
+	res, err := u.Create(context.Background(), strings.NewReader(body), ownerOf("key:decoded"), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +22,7 @@ func TestUpload_StoredDocumentRecordsDecodedSize(t *testing.T) {
 	assertRootDecodedSize(t, repo.Get, res.Paste.Slug, len(body))
 
 	updated := "<!doctype html><p>v2</p>"
-	if _, err := m.Update(res.Paste.Slug, ownerOf("key:decoded"), strings.NewReader(updated), ""); err != nil {
+	if _, err := m.Update(context.Background(), res.Paste.Slug, ownerOf("key:decoded"), strings.NewReader(updated), ""); err != nil {
 		t.Fatal(err)
 	}
 	assertRootDecodedSize(t, repo.Get, res.Paste.Slug, len(updated))
@@ -46,7 +47,7 @@ func TestDeploySite_StoredFilesRecordDecodedSize(t *testing.T) {
 		{"index.html": "<h1>site</h1>", "app.js": strings.Repeat("console.log(1);\n", 300)},
 		{"README.md": "# kb\n", "guide/intro.md": strings.Repeat("text ", 400)},
 	} {
-		res, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:decoded-site"))
+		res, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, files)), ownerOf("key:decoded-site"))
 		if err != nil {
 			t.Fatal(err)
 		}

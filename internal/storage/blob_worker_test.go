@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -257,6 +258,85 @@ func TestWorkerBlob_PutEndsWhenTheStoreStopsReading(t *testing.T) {
 	store.StallTimeout = 200 * time.Millisecond
 	if err := store.Put("uploads/x/0", io.LimitReader(zeros{}, 1<<20), 1<<20); err != nil {
 		t.Fatalf("put to a store slow to answer: %v", err)
+	}
+}
+
+// stuckWorker accepts a Put, reads a little of its body and then stops reading
+// until the test ends.
+func stuckWorker(t *testing.T) *storage.WorkerBlobStore {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadFull(r.Body, make([]byte, 1024))
+		<-release
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	store, err := storage.NewWorkerBlobStore(srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the bound under test may end the write.
+	store.StallTimeout = 0
+	store.WriteFloor = 0
+	return store
+}
+
+// A write the store stops reading fails at its deadline (floor plus size at
+// the minimum rate) even with no stall timeout, and gives its admission back,
+// so the next write is admitted.
+func TestWorkerBlob_StalledWriteEndsAtItsDeadlineAndFreesItsAdmission(t *testing.T) {
+	store := stuckWorker(t)
+	store.WriteFloor = 200 * time.Millisecond
+	store.WriteMinRate = 1 << 30
+	const size = 64 << 20 // far more than the socket buffers hold
+	gate, err := storage.NewGatedBlobStore(store, size, 500*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := storage.NewCompressedBlobStore(gate)
+
+	ctx, release, err := blobs.AdmitWrite(context.Background(), size)
+	if err != nil {
+		t.Fatalf("first admission: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer release()
+		done <- blobs.StagePrecompressed(ctx, "uploads/x/0", io.LimitReader(zeros{}, size), size)
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "ran past its deadline") {
+			t.Fatalf("put = %v, want the deadline error", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("put still running long after its deadline")
+	}
+
+	_, release, err = blobs.AdmitWrite(context.Background(), size)
+	if err != nil {
+		t.Fatalf("admission after the stalled write ended: %v", err)
+	}
+	release()
+}
+
+// A write ends when its caller's context does, with no deadline of its own.
+func TestWorkerBlob_PutEndsWithItsContext(t *testing.T) {
+	store := stuckWorker(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	const size = 64 << 20
+	done := make(chan error, 1)
+	go func() { done <- store.PutContext(ctx, "uploads/x/0", io.LimitReader(zeros{}, size), size) }()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("put = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("put still running long after its context ended")
 	}
 }
 

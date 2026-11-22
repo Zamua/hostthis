@@ -77,10 +77,7 @@ func NewCompressedBlobStore(inner InnerBlobStore) *CompressedBlobStore {
 
 // StagePrecompressed streams a body already in the at-rest format.
 func (c *CompressedBlobStore) StagePrecompressed(ctx context.Context, key string, r io.Reader, size int64) error {
-	if inner, ok := c.Inner.(admittingStore); ok {
-		return inner.PutContext(ctx, key, r, size)
-	}
-	return c.Inner.Put(key, r, size)
+	return putContext(ctx, c.Inner, key, r, size)
 }
 
 // AdmitWrite takes the store's admission for a later StagePrecompressed of
@@ -98,7 +95,20 @@ func (c *CompressedBlobStore) AdmitWrite(ctx context.Context, size int64) (conte
 // admittingStore is an inner store that queues its writes.
 type admittingStore interface {
 	Admit(ctx context.Context, size int64) (context.Context, func(), error)
+	contextPutter
+}
+
+// contextPutter is an inner store whose writes end when their context does.
+type contextPutter interface {
 	PutContext(ctx context.Context, key string, r io.Reader, size int64) error
+}
+
+// putContext writes through inner, passing ctx along when inner takes one.
+func putContext(ctx context.Context, inner InnerBlobStore, key string, r io.Reader, size int64) error {
+	if p, ok := inner.(contextPutter); ok {
+		return p.PutContext(ctx, key, r, size)
+	}
+	return inner.Put(key, r, size)
 }
 
 // StageEncoding spills the encoded body to disk, so the store receives a known
@@ -218,11 +228,11 @@ func (p *blobPack) AppendStored(r io.Reader) (int64, int64, error) {
 func (p *blobPack) Len() int64 { return p.n }
 
 // Commit writes the pack as one object.
-func (p *blobPack) Commit(context.Context) error {
+func (p *blobPack) Commit(ctx context.Context) error {
 	if _, err := p.spill.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind pack spill: %w", err)
 	}
-	return p.inner.Put(p.key, p.spill, p.n)
+	return putContext(ctx, p.inner, p.key, p.spill, p.n)
 }
 
 // Close removes the spill.
