@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"fmt"
 	"testing"
@@ -23,7 +24,7 @@ func TestDeploySite_PacksSmallFiles(t *testing.T) {
 	_, _ = rand.Read(large)
 	files["model.bin"] = string(large)
 
-	res, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:pack"))
+	res, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, files)), ownerOf("key:pack"))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestDeploySite_PackSplitsAtTarget(t *testing.T) {
 		_, _ = rand.Read(b)
 		files[fmt.Sprintf("f%d.bin", i)] = string(b)
 	}
-	res, err := d.Deploy(bytes.NewReader(gzipTar(t, files)), ownerOf("key:split"))
+	res, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, files)), ownerOf("key:split"))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
@@ -88,7 +89,7 @@ func TestDeploySite_PackWriteFailureFailsDeploy(t *testing.T) {
 	d := NewDeploySite(sites, newRepo(t), storage.NewCompressedBlobStore(raw))
 	d.Now = func() time.Time { return fixedNow }
 	arc := gzipTar(t, map[string]string{"index.html": "<h1>never</h1>"})
-	if _, err := d.Deploy(bytes.NewReader(arc), ownerOf("key:packfail")); err == nil {
+	if _, err := d.Deploy(context.Background(), bytes.NewReader(arc), ownerOf("key:packfail")); err == nil {
 		t.Fatal("deploy with a failing pack write succeeded")
 	}
 	noSites(t, d, sites, "key:packfail")

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"io"
 
@@ -14,7 +15,7 @@ import (
 type PasteManager interface {
 	List(owner domain.Owner) ([]domain.Paste, error)
 	Show(slug domain.Slug, owner domain.Owner) (domain.Paste, io.ReadCloser, error)
-	Update(slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error)
+	Update(ctx context.Context, slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error)
 	Rename(slug domain.Slug, owner domain.Owner, name string) error
 	Delete(slug domain.Slug, owner domain.Owner) error
 	Versions(slug domain.Slug, owner domain.Owner) ([]domain.Version, error)
@@ -51,8 +52,8 @@ func NewCacheInvalidating(inner PasteManager, purger CachePurger, exempt PurgeEx
 	return &CacheInvalidating{PasteManager: inner, purges: purges{purger, exempt}}
 }
 
-func (c *CacheInvalidating) Update(slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error) {
-	res, err := c.PasteManager.Update(slug, owner, body, typeHint)
+func (c *CacheInvalidating) Update(ctx context.Context, slug domain.Slug, owner domain.Owner, body io.Reader, typeHint string) (UpdateResult, error) {
+	res, err := c.PasteManager.Update(ctx, slug, owner, body, typeHint)
 	c.changed(slug, owner, err)
 	return res, err
 }

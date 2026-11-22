@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -14,7 +15,7 @@ func TestUpload_FinalizeAfterDeleteRemovesTheObject(t *testing.T) {
 	blobs := newFakeBlobs()
 	blobs.holdPut = make(chan struct{})
 	u, repo, done := newStackWithBlobs(t, blobs)
-	res, err := u.Create(strings.NewReader("<!doctype html><p>gone</p>"), ownerOf("key:owner"), "", "")
+	res, err := u.Create(context.Background(), strings.NewReader("<!doctype html><p>gone</p>"), ownerOf("key:owner"), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

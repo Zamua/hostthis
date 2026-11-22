@@ -14,6 +14,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"net/http"
 	"os"
@@ -168,7 +169,7 @@ func deployFixture(t *testing.T, demo string) ([]distFile, deployedSite) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := deploy.Deploy(bytes.NewReader(arc), owner)
+	res, err := deploy.Deploy(context.Background(), bytes.NewReader(arc), owner)
 	if err != nil {
 		t.Fatalf("deploy %s fixture: %v", demo, err)
 	}

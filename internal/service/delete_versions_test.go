@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/Zamua/hostthis/internal/domain"
@@ -10,12 +11,12 @@ import (
 // fiveVersions uploads v1..v5 of one paste and returns its slug.
 func fiveVersions(t *testing.T, upload *Upload, manage *Manage, owner string) domain.Slug {
 	t.Helper()
-	r, err := upload.Create(bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
+	r, err := upload.Create(context.Background(), bytes.NewReader(htmlBody(1000)), ownerOf(owner), "", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	for i := 2; i <= 5; i++ {
-		if _, err := manage.Update(r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000+i)), ""); err != nil {
+		if _, err := manage.Update(context.Background(), r.Paste.Slug, ownerOf(owner), bytes.NewReader(htmlBody(1000+i)), ""); err != nil {
 			t.Fatalf("update v%d: %v", i, err)
 		}
 	}

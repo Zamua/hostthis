@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"testing"
@@ -16,7 +17,7 @@ type stubSites struct {
 	err error
 }
 
-func (s stubSites) DeployToSlug(domain.Slug, io.Reader, domain.Owner) (SiteResult, error) {
+func (s stubSites) DeployToSlug(context.Context, domain.Slug, io.Reader, domain.Owner) (SiteResult, error) {
 	return SiteResult{}, s.err
 }
 
@@ -27,7 +28,7 @@ func (s stubSites) Delete(domain.Slug, domain.Owner) error { return s.err }
 func TestSiteWritesPurgeUnlessNothingWasTouched(t *testing.T) {
 	verbs := map[string]func(SiteDeployer, domain.Slug) error{
 		"redeploy": func(d SiteDeployer, s domain.Slug) error {
-			_, err := d.DeployToSlug(s, bytes.NewReader(nil), ownerOf(testOwner))
+			_, err := d.DeployToSlug(context.Background(), s, bytes.NewReader(nil), ownerOf(testOwner))
 			return err
 		},
 		"delete": func(d SiteDeployer, s domain.Slug) error { return d.Delete(s, ownerOf(testOwner)) },
@@ -66,14 +67,14 @@ func TestSiteCacheInvalidating_RealService(t *testing.T) {
 	arc := func(body string) io.Reader {
 		return bytes.NewReader(gzipTar(t, map[string]string{"index.html": body}))
 	}
-	res, err := d.Deploy(arc("<h1>v1</h1>"), ownerOf(testOwner))
+	res, err := d.Deploy(context.Background(), arc("<h1>v1</h1>"), ownerOf(testOwner))
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
 	slug := res.Site.Slug
 	purger.reset()
 
-	if _, err := d.DeployToSlug(slug, arc("<h1>hijack</h1>"), ownerOf("key:someone-else")); err == nil {
+	if _, err := d.DeployToSlug(context.Background(), slug, arc("<h1>hijack</h1>"), ownerOf("key:someone-else")); err == nil {
 		t.Fatal("want an error redeploying another owner's site")
 	}
 	if err := d.Delete(slug, ownerOf("key:someone-else")); err == nil {
@@ -83,7 +84,7 @@ func TestSiteCacheInvalidating_RealService(t *testing.T) {
 		t.Fatalf("foreign writes purged %v", got)
 	}
 
-	if _, err := d.DeployToSlug(slug, arc("<h1>v2</h1>"), ownerOf(testOwner)); err != nil {
+	if _, err := d.DeployToSlug(context.Background(), slug, arc("<h1>v2</h1>"), ownerOf(testOwner)); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	if got := purger.calls(); len(got) != 1 || got[0] != slug {
@@ -103,11 +104,11 @@ func TestSiteCacheInvalidating_NilPurgerServesMutations(t *testing.T) {
 	inner, _, _ := deployFixture(t)
 	d := NewSiteCacheInvalidating(inner, nil, nil)
 	owner := ownerOf("key:nil-purger")
-	res, err := d.Deploy(bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), owner)
+	res, err := d.Deploy(context.Background(), bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v1</h1>"})), owner)
 	if err != nil {
 		t.Fatalf("deploy: %v", err)
 	}
-	if _, err := d.DeployToSlug(res.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v2</h1>"})), owner); err != nil {
+	if _, err := d.DeployToSlug(context.Background(), res.Site.Slug, bytes.NewReader(gzipTar(t, map[string]string{"index.html": "<h1>v2</h1>"})), owner); err != nil {
 		t.Fatalf("redeploy: %v", err)
 	}
 	if err := d.Delete(res.Site.Slug, owner); err != nil {

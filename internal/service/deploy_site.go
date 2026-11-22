@@ -82,8 +82,8 @@ var ErrSiteArchiveTooLarge = fmt.Errorf("site archive exceeds the %d MiB cap", d
 // SiteDeployer is the site surface the SSH layer consumes, an interface so
 // cache invalidation can be a decorator the composition root layers on.
 type SiteDeployer interface {
-	Deploy(body io.Reader, owner domain.Owner) (SiteResult, error)
-	DeployToSlug(slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error)
+	Deploy(ctx context.Context, body io.Reader, owner domain.Owner) (SiteResult, error)
+	DeployToSlug(ctx context.Context, slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error)
 	Delete(slug domain.Slug, owner domain.Owner) error
 	ListSites(owner domain.Owner) ([]domain.Site, error)
 	Have(slug domain.Slug, owner domain.Owner) (Held, error)
@@ -154,9 +154,9 @@ const maxDeployRetries = 5
 //     caught mid-untar by the decompression-bomb guard or at persistence time
 //     by the atomic check
 //   - ErrTooManyFiles-family errors surfaced verbatim via domain
-func (d *DeploySite) Deploy(body io.Reader, owner domain.Owner) (SiteResult, error) {
+func (d *DeploySite) Deploy(ctx context.Context, body io.Reader, owner domain.Owner) (SiteResult, error) {
 	now := d.Now().UTC()
-	man, uploadID, err := d.extract(body, owner, now, nil)
+	man, uploadID, err := d.extract(ctx, body, owner, now, nil)
 	if err != nil {
 		return SiteResult{}, err
 	}
@@ -199,7 +199,7 @@ func (d *DeploySite) Deploy(body io.Reader, owner domain.Owner) (SiteResult, err
 // classifier; ErrUnsafeArchive / ErrTooManyFiles surface verbatim so the
 // SSH layer can message them precisely. A failed extract deletes whatever it
 // staged.
-func (d *DeploySite) extract(body io.Reader, owner domain.Owner, now time.Time, base *siteBase) (domain.Manifest, string, error) {
+func (d *DeploySite) extract(ctx context.Context, body io.Reader, owner domain.Owner, now time.Time, base *siteBase) (domain.Manifest, string, error) {
 	usedPaste, err := d.Pastes.SumActiveBytesByOwner(owner.String(), now)
 	if err != nil {
 		return domain.Manifest{}, "", fmt.Errorf("sum paste bytes: %w", err)
@@ -214,7 +214,7 @@ func (d *DeploySite) extract(body io.Reader, owner domain.Owner, now time.Time, 
 	if err != nil {
 		return domain.Manifest{}, "", fmt.Errorf("upload id: %w", err)
 	}
-	sink := &blobSink{blob: d.Blob, uploadID: uploadID, base: base.standalone(), stagingDir: d.StagingDir}
+	sink := &blobSink{ctx: ctx, blob: d.Blob, uploadID: uploadID, base: base.standalone(), stagingDir: d.StagingDir}
 	defer sink.Close()
 	if d.Screen.applies(owner) {
 		bundle, err := newScreenBundle(d.StagingDir)
@@ -323,7 +323,7 @@ func (d *DeploySite) Delete(slug domain.Slug, owner domain.Owner) error {
 //   - domain.ErrUnsupportedKind: not a valid gzip-tar
 //   - ErrOverQuota: over the per-identity cap
 //   - ErrEmptySite: the archive safe-untars to zero files
-func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error) {
+func (d *DeploySite) DeployToSlug(ctx context.Context, slug domain.Slug, body io.Reader, owner domain.Owner) (SiteResult, error) {
 	now := d.Now().UTC()
 
 	// Verify ownership BEFORE reading the body.
@@ -347,7 +347,7 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner domain
 	}
 	base := &siteBase{ver: baseVer, man: baseMan}
 
-	man, uploadID, err := d.extract(body, owner, now, base)
+	man, uploadID, err := d.extract(ctx, body, owner, now, base)
 	if err != nil {
 		return SiteResult{}, err
 	}
@@ -385,6 +385,8 @@ func (d *DeploySite) DeployToSlug(slug domain.Slug, body io.Reader, owner domain
 // bytes unreferenced in that same prefix, which the upload's delete still
 // covers.
 type blobSink struct {
+	// ctx ends the sink's blob writes early.
+	ctx      context.Context
 	blob     BlobUnit
 	uploadID string
 	// base maps the digest of each standalone file of the version this deploy
@@ -437,7 +439,7 @@ func (s *blobSink) store(p string, r, read io.Reader, size int64) (domain.BlobRe
 	// than its own size. The untar guard admits a single file up to the owner's
 	// whole remaining allowance, so buffering would size peak memory to the
 	// QUOTA.
-	compressedSize, err := s.blob.StageEncoding(context.Background(), key, read)
+	compressedSize, err := s.blob.StageEncoding(s.ctx, key, read)
 	if err != nil {
 		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
@@ -465,7 +467,7 @@ func (s *blobSink) storeUnlessHeld(p string, read io.Reader, d *domain.DigestRea
 		return domain.BlobRef{}, 0, fmt.Errorf("rewind file spill: %w", err)
 	}
 	key := s.nextKey()
-	compressedSize, err := s.blob.StageEncoding(context.Background(), key, spill)
+	compressedSize, err := s.blob.StageEncoding(s.ctx, key, spill)
 	if err != nil {
 		return domain.BlobRef{}, 0, storeErr(p, err)
 	}
@@ -509,7 +511,7 @@ func (s *blobSink) Flush() error {
 	if s.pack == nil {
 		return nil
 	}
-	err := s.pack.Commit(context.Background())
+	err := s.pack.Commit(s.ctx)
 	_ = s.pack.Close()
 	s.pack = nil
 	if err != nil {
@@ -629,8 +631,8 @@ func storeErr(p string, err error) error {
 // there are two services behind it.
 type ArchiveAdapter struct{ Deployer *DeploySite }
 
-func (a ArchiveAdapter) Deploy(body io.Reader, owner domain.Owner) (Result, error) {
-	res, err := a.Deployer.Deploy(body, owner)
+func (a ArchiveAdapter) Deploy(ctx context.Context, body io.Reader, owner domain.Owner) (Result, error) {
+	res, err := a.Deployer.Deploy(ctx, body, owner)
 	if err != nil {
 		return Result{}, err
 	}

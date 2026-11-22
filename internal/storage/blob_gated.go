@@ -56,14 +56,14 @@ func (g *GatedBlobStore) Put(key string, r io.Reader, size int64) error {
 // (from Admit, carried in ctx): then nothing more is acquired or released.
 func (g *GatedBlobStore) PutContext(ctx context.Context, key string, r io.Reader, size int64) error {
 	if held, _ := ctx.Value(admissionKey{}).(*admission); held != nil && held.gate == g {
-		return g.Inner.Put(key, r, size)
+		return putContext(ctx, g.Inner, key, r, size)
 	}
 	release, err := g.acquire(size)
 	if err != nil {
 		return fmt.Errorf("blob put %s: %w", key, err)
 	}
 	defer release()
-	return g.Inner.Put(key, r, size)
+	return putContext(ctx, g.Inner, key, r, size)
 }
 
 // Admit takes the admission of a later write of size bytes now, so the wait

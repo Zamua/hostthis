@@ -91,7 +91,7 @@ type Result struct {
 // the two can be merged without a circular dependency and the transport keeps
 // one entry point either way (docs/SPEC.md "One paste, not two aggregates").
 type ArchiveDeployer interface {
-	Deploy(body io.Reader, owner domain.Owner) (Result, error)
+	Deploy(ctx context.Context, body io.Reader, owner domain.Owner) (Result, error)
 }
 
 // archivePeek is the buffered-reader size for the gzip-magic peek. Only 2
@@ -126,7 +126,10 @@ var errStaging = errors.New("staging")
 // body is consumed in a single streaming pass; type detection runs on the
 // captured prefix so the source is never re-read. Unsupported types return
 // domain.ErrUnsupportedKind for the caller to surface verbatim.
-func (u *Upload) Create(body io.Reader, owner domain.Owner, name string, typeHint string) (Result, error) {
+//
+// ctx bounds only the synchronous work: the background write of a new paste
+// outlives the request, so a client that leaves after its URL does not undo it.
+func (u *Upload) Create(ctx context.Context, body io.Reader, owner domain.Owner, name string, typeHint string) (Result, error) {
 	// A gzip-tar archive is the SAME paste at a different cardinality, so the
 	// decision is made here, once, rather than by each transport (docs/SPEC.md
 	// "One paste, not two aggregates"). It must precede staging, which consumes
@@ -135,7 +138,7 @@ func (u *Upload) Create(body io.Reader, owner domain.Owner, name string, typeHin
 		peeked := bufio.NewReaderSize(body, archivePeek)
 		head, _ := peeked.Peek(2)
 		if domain.HasGzipMagic(head) {
-			return u.Archive.Deploy(peeked, owner)
+			return u.Archive.Deploy(ctx, peeked, owner)
 		}
 		body = peeked
 	}
