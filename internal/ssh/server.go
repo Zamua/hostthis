@@ -510,8 +510,11 @@ func (s *Server) handleSession(sess gossh.Session) {
 			s.verbUpload(sess, owner, argv) // pass slug as first arg
 			return
 		}
-		fmt.Fprintf(sess.Stderr(), "hostthis: unknown command %q\n\n", first)
-		emitHelp(sess.Stderr(), sess, s.apex())
+		msg := unknownCommandMessage(first, s.apex())
+		if _, _, hasPty := sess.Pty(); hasPty {
+			msg = strings.ReplaceAll(msg, "\n", "\r\n")
+		}
+		fmt.Fprint(sess.Stderr(), msg) //nolint:errcheck
 		_ = sess.Exit(ExitUsage)
 	}
 }

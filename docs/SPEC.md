@@ -2617,6 +2617,18 @@ LIMITS
 `<verb> --help`. There is no `show` or `put` verb: reads are `get`, and upload
 is verbless.
 
+A first word that is neither a verb nor a slug does not print the banner: it
+gets one error line on stderr and exit 2, plus one line naming where help
+lives. When the word is within a small edit distance of a verb (one edit for
+a word of up to four letters, two for a longer one, an adjacent swap counting
+as one), the error names that verb:
+
+```
+$ ssh hostthis.dev versons abc23456
+hostthis: unknown command "versons", did you mean "versions"?
+run `ssh hostthis.dev help` for the list of commands
+```
+
 ### Color output
 
 hostthis emits plain text by default and may add ANSI color escapes in
