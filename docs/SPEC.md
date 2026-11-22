@@ -2424,9 +2424,43 @@ Refused with a stderr error when:
 Freed bytes are subtracted from the per-identity quota immediately,
 so an `upload` can use the space in the same shell session.
 
+**Range delete:**
+```
+ssh hostthis.dev delete abc12345 3-120
+v120
+...
+v3
+deleted 117 version(s). freed 312.4M.
+```
+
+Deletes every live version numbered from..to (inclusive), newest first, each
+through the per-version delete above, so each keeps its own guards. The served
+version is skipped, not refused, and tombstones are left alone. Stdout lists
+each version deleted, one per line; stderr carries the summary. A malformed
+range (`5-2`, `0-3`) exits 2 with `invalid version range`. On a failure partway
+the summary reports what was already freed and the error follows.
+
 Dispatch rule for the verb: `delete <slug>` (one arg) → whole-paste
-delete; `delete <slug> <verN>` (two args) → per-version delete.
-Anything else → exit 2 with `usage: delete <slug> [<ver>]`.
+delete; `delete <slug> <verN>` (two args) → per-version delete;
+`delete <slug> <from>-<to>` → range delete. Anything else → exit 2 with
+`usage: delete <slug> [<ver> | <from>-<to>]`.
+
+### Prune old versions
+```
+ssh hostthis.dev prune abc12345 --dry-run
+v9	1.2M
+v8	1.2M
+would delete 2 version(s), up to 2.4M (files shared with kept versions free nothing).
+ssh hostthis.dev prune abc12345 --keep 1
+```
+
+Keeps the served version (latest, or the pin) plus the newest `--keep N` other
+live versions (default 3, `--keep 0` keeps only the served one) and deletes the
+rest, exactly as a range delete would. `--dry-run` (or `-n`) lists the versions
+it would delete on stdout with their sizes and deletes nothing; the total is an
+upper bound, since a file shared with a kept version frees nothing. Owner-only:
+another key gets the standard not-found. Nothing prunes on its own; old
+versions go only when their owner runs this or `delete`.
 
 ### Identity
 ```
@@ -2510,6 +2544,8 @@ VERSION HISTORY
     ssh hostthis.dev versions <slug>            timeline of every version
     ssh hostthis.dev pin <slug> <ver>           stick the URL to <ver> (survives updates)
     ssh hostthis.dev unpin <slug>               URL follows latest again
+    ssh hostthis.dev delete <slug> 3-120        delete a range of old versions
+    ssh hostthis.dev prune <slug> [--keep N]    keep the served + newest N (default 3)
 
 LINK TO A PLACE INSIDE A PASTE
 
@@ -2768,7 +2804,7 @@ EVERY non-deleted version of an updated paste) cannot exceed
 `UserQuotaBytes` (1 GiB; not operator-configurable). "Identity" is
 the SHA256 fingerprint of the uploader's ssh public key. When pastes
 get deleted, or have older versions explicitly
-deleted via `delete <slug> <ver>`, the cap frees up. Over-quota uploads
+deleted via `delete <slug> <ver>`, a range or `prune`, the cap frees up. Over-quota uploads
 error with `would exceed your 1 GiB quota`.
 
 The per-identity quota and per-paste cap are distinct: 1 GiB total and
@@ -2796,6 +2832,12 @@ size, and that is what it occupies.
 Deleted versions contribute zero bytes to quota and are inaccessible. Their
 metadata remains as a tombstone, and their bytes are deleted once the
 tombstone commits.
+
+**Warning before the cap.** A successful create, update or deploy that leaves
+its owner past 80% of the quota ends with a note on stderr: how full the quota
+is, the owner's largest paste or site, and the `prune <slug> --dry-run` that
+would show what its old versions hold. The note is best-effort (a failed lookup
+prints nothing) and never changes the exit code or stdout.
 
 ### Same-identity create admission: a width-2 gate
 

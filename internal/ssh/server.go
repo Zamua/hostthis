@@ -492,6 +492,8 @@ func (s *Server) handleSession(sess gossh.Session) {
 		s.verbHave(sess, owner, argv[1:])
 	case "versions":
 		s.verbVersions(sess, owner, argv[1:])
+	case "prune":
+		s.verbPrune(sess, owner, argv[1:])
 	case "rooms":
 		s.verbRooms(sess, owner, argv[1:])
 	case "pin":
@@ -560,7 +562,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 		// the slug positional decides new-vs-update.
 		if isArchive {
 			res, err := s.Deploy.DeployToSlug(slug, peeked, owner)
-			s.emitSite(sess, res, err)
+			s.emitSite(sess, owner, res, err)
 			return
 		}
 
@@ -591,7 +593,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 			fmt.Fprintf(sess.Stderr(), "  ssh %s unpin %s        # always serve latest\n", s.apex(), slug)
 			fmt.Fprintf(sess.Stderr(), "  ssh %s pin %s %d       # serve this new version\n", s.apex(), slug, res.NewVer)
 		}
-		s.emitURL(sess, res.Paste.Slug)
+		s.emitURL(sess, owner, res.Paste.Slug)
 		return
 	}
 
@@ -599,7 +601,7 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 	// the site deploy; everything else is a single-file paste.
 	if isArchive {
 		res, err := s.Deploy.Deploy(peeked, owner)
-		s.emitSite(sess, res, err)
+		s.emitSite(sess, owner, res, err)
 		return
 	}
 
@@ -611,14 +613,14 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 	if res.Paste.Name != "" {
 		_, _ = fmt.Fprintf(sess.Stderr(), "labeled %q.\n", res.Paste.Name)
 	}
-	s.emitURL(sess, res.Paste.Slug)
+	s.emitURL(sess, owner, res.Paste.Slug)
 }
 
 // emitSite ends a site deploy with the same response shape a single-file
 // upload gets. A foreign-owned or absent site exits with a not-found
 // byte-identical to any other, so a non-owner cannot probe existence or
 // ownership. Sites have no name field, so --name is ignored.
-func (s *Server) emitSite(sess gossh.Session, res service.SiteResult, err error) {
+func (s *Server) emitSite(sess gossh.Session, owner domain.Owner, res service.SiteResult, err error) {
 	if err != nil {
 		emitServiceErr(sess, err)
 		return
@@ -630,16 +632,54 @@ func (s *Server) emitSite(sess gossh.Session, res service.SiteResult, err error)
 		kind = "knowledge base"
 	}
 	_, _ = fmt.Fprintf(sess.Stderr(), "%s: %d file(s).\n", kind, len(res.Site.Manifest.Files))
-	s.emitURL(sess, res.Site.Slug)
+	s.emitURL(sess, owner, res.Site.Slug)
 }
 
 // emitURL ends a successful create or update: the URL alone on stdout, so a
-// `$(... | ssh -T apex)` capture stays clean, and its QR code on stderr.
-func (s *Server) emitURL(sess gossh.Session, slug domain.Slug) {
+// `$(... | ssh -T apex)` capture stays clean, its QR code on stderr, then the
+// quota warning when the owner is nearly full.
+func (s *Server) emitURL(sess gossh.Session, owner domain.Owner, slug domain.Slug) {
 	url := s.BuildURL(slug)
 	_, _ = fmt.Fprintln(sess, url)
 	writeQR(sess.Stderr(), url)
+	s.warnQuota(sess, owner)
 	_ = sess.Exit(ExitOK)
+}
+
+// warnQuota tells an owner past domain.QuotaWarnPercent of their quota how
+// full it is and where the space went, before an upload is first refused.
+// Best-effort: any lookup error stays silent, the upload already succeeded.
+func (s *Server) warnQuota(sess gossh.Session, owner domain.Owner) {
+	if s.Manage == nil {
+		return
+	}
+	info, err := s.Manage.Whoami(owner, "")
+	if err != nil || !domain.QuotaNearlyFull(info.UsedBytes, info.QuotaBytes) {
+		return
+	}
+	_, _ = fmt.Fprintf(sess.Stderr(), "note: quota %d%% full (%s of %s).\n",
+		info.UsedBytes*100/info.QuotaBytes, humanBytes(info.UsedBytes), humanBytes(info.QuotaBytes))
+	pastes, err := s.Manage.List(owner)
+	if err != nil {
+		return
+	}
+	var sites []domain.Site
+	if s.Deploy != nil {
+		if sites, err = s.Deploy.ListSites(owner); err != nil {
+			return
+		}
+	}
+	var largest listItemView
+	for _, it := range newListView(pastes, sites) {
+		if it.SizeBytes > largest.SizeBytes {
+			largest = it
+		}
+	}
+	if largest.Slug == "" {
+		return
+	}
+	_, _ = fmt.Fprintf(sess.Stderr(), "  largest: %s (%s). free old versions: ssh %s prune %s --dry-run\n",
+		largest.Slug, humanBytes(largest.SizeBytes), s.apex(), largest.Slug)
 }
 
 // -- list -------------------------------------------------------------------
@@ -805,10 +845,11 @@ func (s *Server) verbDelete(sess gossh.Session, owner domain.Owner, argv []strin
 	// Two-shape dispatch:
 	//   delete <slug>           → wipe the whole paste
 	//   delete <slug> <verN>    → tombstone just that version
+	//   delete <slug> <a>-<b>   → tombstone every live version in a..b but the served one
 	// Anything else → usage error.
 	switch len(argv) {
 	case 0:
-		fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver>]")
+		_, _ = fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver> | <from>-<to>]")
 		_ = sess.Exit(ExitUsage)
 		return
 	case 1:
@@ -842,6 +883,16 @@ func (s *Server) verbDelete(sess gossh.Session, owner domain.Owner, argv []strin
 			emitUsageErr(sess, err)
 			return
 		}
+		if lo, hi, isRange, err := domain.ParseVersionRange(argv[1]); isRange {
+			if err != nil {
+				emitUsageErr(sess, err)
+				return
+			}
+			s.deleteVersions(sess, owner, slug, func(vers []domain.Version, served int) []domain.Version {
+				return domain.VersionsInRange(vers, served, lo, hi)
+			}, false)
+			return
+		}
 		verNum, err := parseVersionArg(argv[1])
 		if err != nil {
 			emitUsageErr(sess, err)
@@ -863,10 +914,74 @@ func (s *Server) verbDelete(sess gossh.Session, owner domain.Owner, argv []strin
 		}
 		return
 	default:
-		fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver>]")
+		_, _ = fmt.Fprintln(sess.Stderr(), "usage: delete <slug> [<ver> | <from>-<to>]")
 		_ = sess.Exit(ExitUsage)
 		return
 	}
+}
+
+// verbPrune deletes every version of a slug except the served one and the
+// newest --keep (default domain.DefaultPruneKeep) live ones.
+func (s *Server) verbPrune(sess gossh.Session, owner domain.Owner, argv []string) {
+	keep, dryRun := domain.DefaultPruneKeep, false
+	var rest []string
+	for i := 0; i < len(argv); i++ {
+		switch a := argv[i]; {
+		case a == "--dry-run" || a == "-n":
+			dryRun = true
+		case a == "--keep" && i+1 < len(argv):
+			i++
+			n, err := strconv.Atoi(argv[i])
+			if err != nil || n < 0 {
+				emitUsageErr(sess, fmt.Errorf("invalid --keep %q (want 0 or more)", argv[i]))
+				return
+			}
+			keep = n
+		default:
+			rest = append(rest, a)
+		}
+	}
+	slug, err := requireSlug(rest)
+	if err != nil {
+		emitUsageErr(sess, err)
+		return
+	}
+	s.deleteVersions(sess, owner, slug, func(vers []domain.Version, served int) []domain.Version {
+		return domain.VersionsToPrune(vers, served, keep)
+	}, dryRun)
+}
+
+// deleteVersions runs a multi-version delete and reports it: the picked
+// versions on stdout (one per line, so a dry run pipes cleanly), the summary
+// on stderr.
+func (s *Server) deleteVersions(sess gossh.Session, owner domain.Owner, slug domain.Slug, pick service.VersionPicker, dryRun bool) {
+	res, err := s.Manage.DeleteVersions(slug, owner, pick, dryRun)
+	if dryRun {
+		if err != nil {
+			emitServiceErr(sess, err)
+			return
+		}
+		size := 0
+		for _, v := range res.Picked {
+			_, _ = fmt.Fprintf(sess, "v%d\t%s\n", v.VerNum, humanBytes(v.Size))
+			size += v.Size
+		}
+		_, _ = fmt.Fprintf(sess.Stderr(), "would delete %d version(s), up to %s (files shared with kept versions free nothing).\n",
+			len(res.Picked), humanBytes(size))
+		_ = sess.Exit(ExitOK)
+		return
+	}
+	for _, d := range res.Deleted {
+		_, _ = fmt.Fprintf(sess, "v%d\n", d.VerNum)
+	}
+	if len(res.Deleted) > 0 || err == nil {
+		_, _ = fmt.Fprintf(sess.Stderr(), "deleted %d version(s). freed %s.\n", len(res.Deleted), humanBytes(res.FreedBytes))
+	}
+	if err != nil {
+		emitServiceErr(sess, err)
+		return
+	}
+	_ = sess.Exit(ExitOK)
 }
 
 // parseVersionArg parses "2" or "v2" → 2. Rejects negatives and zero.
@@ -1169,6 +1284,8 @@ VERSION HISTORY
     ssh {{apex}} versions <slug>            timeline of every version
     ssh {{apex}} pin <slug> <ver>           stick the URL to <ver> (survives updates)
     ssh {{apex}} unpin <slug>               URL follows latest again
+    ssh {{apex}} delete <slug> 3-120        delete a range of old versions
+    ssh {{apex}} prune <slug> [--keep N]    keep the served + newest N (default 3)
 
 LINK TO A PLACE INSIDE A PASTE
 
