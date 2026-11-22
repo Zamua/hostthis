@@ -183,6 +183,38 @@ test("errors, misses and lifecycle pages are never stored", async () => {
   assert.ok(!cache.calls.some((c) => c.startsWith("put")));
 });
 
+test("a site's 404.html answers a miss with a 404 the edge never stores, even after its own 200", async () => {
+  const cache = new FakeCache();
+  const page = "<h1>not here</h1>";
+  await withCaches(cache, async () => {
+    const w = world(TTL);
+    const entry = (key, type) => ({ Key: key, Size: page.length, DecodedSize: page.length, ContentType: type, Kind: "" });
+    w.row(SLUG, {
+      kind: "site", status: "ready", updatedAt: Date.UTC(2026, 0, 1), uploadId: "u404",
+      manifest: { Files: { "index.html": entry("k-index", "text/html; charset=utf-8"), "404.html": entry("k-404", "text/html; charset=utf-8") } },
+    });
+    w.blob("k-index", page);
+    w.blob("k-404", page);
+    const own = await w.fetch(at("/404.html"));
+    assert.equal(own.status, 200);
+    assert.equal(await own.text(), page);
+    await settle(w);
+    const stored = cache.entries.size;
+    assert.equal(stored, 1, "the page's own URL is a 200 and fills");
+    for (const path of ["/missing.js", "/route", "/nope/"]) {
+      for (const headers of [{}, { "If-None-Match": "*" }, { Range: "bytes=0-1" }]) {
+        const res = await w.fetch(at(path), { headers });
+        assert.equal(res.status, 404, `${path} ${JSON.stringify(headers)}`);
+        assert.equal(res.headers.get("content-type"), "text/html; charset=utf-8");
+        assert.equal(res.headers.get("cache-control"), "no-store");
+        assert.equal(await res.text(), page);
+        await settle(w);
+      }
+    }
+    assert.equal(cache.entries.size, stored, "no miss is stored");
+  });
+});
+
 test("a forwarded read is stored under the public host, where a direct read finds it", async () => {
   const cache = new FakeCache();
   const w = htmlWorld(TTL);

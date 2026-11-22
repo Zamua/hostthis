@@ -157,6 +157,30 @@ func TestManifest_LookupWithSPAFallback_NoRootIndex(t *testing.T) {
 	}
 }
 
+// A root 404.html makes the site multi-page: every miss stays a miss (the
+// read path serves the page with a 404), routes included, while real files,
+// directory indexes and the page itself still hit.
+func TestManifest_LookupWithSPAFallback_NotFoundPage(t *testing.T) {
+	m := mustManifest(map[string]string{
+		"index.html":       "root",
+		"404.html":         "not found",
+		"about/index.html": "about",
+	})
+	if e, ok := m.NotFoundPage(); !ok || e.Key != "key-404.html" {
+		t.Fatalf("NotFoundPage = (%q, %v), want key-404.html", e.Key, ok)
+	}
+	for _, req := range []string{"/", "/about", "/about/", "/404.html"} {
+		if _, hit, via := m.LookupWithSPAFallback(req); !hit || via {
+			t.Errorf("%s: hit=%v via=%v, want a direct hit", req, hit, via)
+		}
+	}
+	for _, req := range []string{"/missing.js", "/users/123", "/missing.html", "/nope/", "/about/nope"} {
+		if _, hit, _ := m.LookupWithSPAFallback(req); hit {
+			t.Errorf("%s: a hit, want a miss", req)
+		}
+	}
+}
+
 // An extracted archive's shape follows the root lookup alone: a root index.html
 // is a site, anything else is a knowledge base. Nothing else about the files
 // participates, so an archive holding no web content is still a directory.

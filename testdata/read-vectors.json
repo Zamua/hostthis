@@ -304,6 +304,33 @@
         }
       }
     },
+    "siteWithNotFoundPage": {
+      "kind": "site",
+      "status": "ready",
+      "updatedAt": 1760163800441,
+      "uploadId": "unotfound",
+      "manifest": {
+        "Files": {
+          "index.html": {"Key": "uploads/unotfound/0", "Size": 40, "DecodedSize": 40, "CompressedSize": 20, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "404.html": {"Key": "uploads/unotfound/1", "Size": 41, "DecodedSize": 41, "CompressedSize": 20, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "about/index.html": {"Key": "uploads/unotfound/2", "Size": 42, "DecodedSize": 42, "CompressedSize": 21, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "app.js": {"Key": "uploads/unotfound/3", "Size": 43, "DecodedSize": 43, "CompressedSize": 21, "ContentType": "text/javascript; charset=utf-8", "Kind": ""},
+          "keyless.css": {"Key": "", "Size": 7, "DecodedSize": 7, "CompressedSize": 3, "ContentType": "text/css; charset=utf-8", "Kind": ""}
+        }
+      }
+    },
+    "siteWithKeylessNotFoundPage": {
+      "kind": "site",
+      "status": "ready",
+      "updatedAt": 1760163800442,
+      "uploadId": "ukeyless404",
+      "manifest": {
+        "Files": {
+          "index.html": {"Key": "uploads/ukeyless404/0", "Size": 40, "DecodedSize": 40, "CompressedSize": 20, "ContentType": "text/html; charset=utf-8", "Kind": ""},
+          "404.html": {"Key": "", "Size": 41, "DecodedSize": 41, "CompressedSize": 20, "ContentType": "text/html; charset=utf-8", "Kind": ""}
+        }
+      }
+    },
     "sitePending": {
       "kind": "site",
       "status": "pending",
@@ -1181,6 +1208,144 @@
         "uploadId": "unoindex",
         "entry": {"key": "uploads/unoindex/1", "contentType": "text/html; charset=utf-8", "decodedSize": 11}
       }
+    },
+    {
+      "name": "site with 404.html: root",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/0", "contentType": "text/html; charset=utf-8", "decodedSize": 40}
+      }
+    },
+    {
+      "name": "site with 404.html: directory",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/about", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/2", "contentType": "text/html; charset=utf-8", "decodedSize": 42}
+      }
+    },
+    {
+      "name": "site with 404.html: asset",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/app.js", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/3", "contentType": "text/javascript; charset=utf-8", "decodedSize": 43}
+      }
+    },
+    {
+      "name": "site with 404.html: the page itself is a 200",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/404.html", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with 404.html: missing asset",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/missing.js", "raw": false, "files": false},
+      "want": {
+        "action": "notfoundpage",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with 404.html: unknown route",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/users/123/edit", "raw": false, "files": false},
+      "want": {
+        "action": "notfoundpage",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with 404.html: missing .html",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/missing.html", "raw": false, "files": false},
+      "want": {
+        "action": "notfoundpage",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with 404.html: directory without index",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/nope/", "raw": false, "files": false},
+      "want": {
+        "action": "notfoundpage",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with 404.html: wrong nested path",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/about/nope", "raw": false, "files": false},
+      "want": {
+        "action": "notfoundpage",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with 404.html: entry without a key",
+      "row": "siteWithNotFoundPage",
+      "request": {"path": "/keyless.css", "raw": false, "files": false},
+      "want": {
+        "action": "notfoundpage",
+        "kind": "site",
+        "updatedAt": 1760163800441,
+        "uploadId": "unotfound",
+        "entry": {"key": "uploads/unotfound/1", "contentType": "text/html; charset=utf-8", "decodedSize": 41}
+      }
+    },
+    {
+      "name": "site with a keyless 404.html keeps the SPA fallback",
+      "row": "siteWithKeylessNotFoundPage",
+      "request": {"path": "/route", "raw": false, "files": false},
+      "want": {
+        "action": "file",
+        "kind": "site",
+        "updatedAt": 1760163800442,
+        "uploadId": "ukeyless404",
+        "entry": {"key": "uploads/ukeyless404/0", "contentType": "text/html; charset=utf-8", "decodedSize": 40}
+      }
+    },
+    {
+      "name": "site with a keyless 404.html: missing asset",
+      "row": "siteWithKeylessNotFoundPage",
+      "request": {"path": "/missing.js", "raw": false, "files": false},
+      "want": {"action": "notfound", "kind": "site", "updatedAt": 1760163800442, "uploadId": "ukeyless404"}
     },
     {
       "name": "pending site serves",

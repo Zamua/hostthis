@@ -73,6 +73,8 @@ Sizes are stored bytes after compression, the unit of the quota.
 tar czf - <dir> | ssh -T hostthis.dev [<slug>]   deploy, or redeploy in place
 routing                      a missing path without a file extension serves
                              index.html; a missing asset is 404
+404.html                     a root 404.html answers every missing path,
+                             with status 404 (no index.html fallback)
 layout                       one top-level directory is flattened
 no index.html                browsable knowledge base
 redeploy                     stores only changed files

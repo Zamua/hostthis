@@ -143,6 +143,18 @@ function expectFor(v, row) {
         headers: { ...validators(`"${shell.version}"`), "content-type": "text/html; charset=utf-8", "content-security-policy": shell.csp },
       };
     }
+    case "notfoundpage":
+      return {
+        status: 404,
+        body: entryBytes(want.entry),
+        blob: want.entry.key,
+        length: want.entry.decodedSize > 0 ? String(want.entry.decodedSize) : null,
+        headers: {
+          "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "etag": null, "last-modified": null,
+          "x-frame-options": "DENY",
+          "content-security-policy": "default-src 'self' https: data: blob: 'unsafe-inline' 'unsafe-eval'; connect-src 'self' https: wss:; form-action 'self'",
+        },
+      };
     case "files":
       return {
         status: 200, json: want.files,
