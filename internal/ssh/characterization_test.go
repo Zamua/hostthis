@@ -503,8 +503,8 @@ func TestHelp_Characterization(t *testing.T) {
 			}
 		}
 		out, stderr, _ := s.run("totallybogus", nil)
-		if out != "" || !strings.Contains(stderr, "Pipe a rendered file in") {
-			t.Fatalf("help after an error: stdout %q, want it on stderr alone (%d bytes there)", out, len(stderr))
+		if out != "" || stderr == "" {
+			t.Fatalf("an unknown command: stdout %q, stderr %q; want its error on stderr alone", out, stderr)
 		}
 	})
 
@@ -528,16 +528,36 @@ func TestHelp_Characterization(t *testing.T) {
 		}
 	})
 
-	t.Run("UnknownVerb_PrefixesErrorThenHelp_Exit2", func(t *testing.T) {
+	t.Run("UnknownVerb_ErrorAndHelpHint_NoBanner_Exit2", func(t *testing.T) {
 		_, stderr, exit := s.run("totallybogus", nil)
 		if exit != 2 {
 			t.Fatalf("expected exit 2 for unknown verb, got %d", exit)
 		}
-		if !strings.Contains(stderr, `unknown command "totallybogus"`) {
-			t.Fatalf("expected canonical unknown-command line, got %q", stderr)
+		want := "hostthis: unknown command \"totallybogus\"\nrun `ssh paste.test help` for the list of commands\n"
+		if stderr != want {
+			t.Fatalf("unknown command stderr:\n got %q\nwant %q", stderr, want)
 		}
-		if !strings.Contains(stderr, "Pipe a rendered file in") {
-			t.Fatalf("expected help after error, got %q", stderr)
+	})
+
+	t.Run("UnknownVerb_NearMiss_SuggestsTheVerb", func(t *testing.T) {
+		_, stderr, exit := s.run("versons 1", nil)
+		if exit != 2 {
+			t.Fatalf("expected exit 2 for unknown verb, got %d", exit)
+		}
+		want := "hostthis: unknown command \"versons\", did you mean \"versions\"?\nrun `ssh paste.test help` for the list of commands\n"
+		if stderr != want {
+			t.Fatalf("near-miss stderr:\n got %q\nwant %q", stderr, want)
+		}
+	})
+
+	t.Run("UnknownVerb_Pty_CRLF", func(t *testing.T) {
+		out, stderr, exit := s.runPty("totallybogus")
+		if exit != 2 {
+			t.Fatalf("expected exit 2 for unknown verb, got %d", exit)
+		}
+		got := out + stderr
+		if !strings.Contains(got, "help` for the list of commands\r\n") || strings.Contains(strings.ReplaceAll(got, "\r\n", ""), "\n") {
+			t.Fatalf("unknown command over a PTY should be CRLF, got %q", got)
 		}
 	})
 
