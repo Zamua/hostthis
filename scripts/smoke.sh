@@ -378,11 +378,12 @@ code_after=$(curl -sS -o /dev/null -w "%{http_code}" "$URL1")
   && ok "delete makes URL 404" \
   || bad "delete" "URL serves $code_after"
 
-# ---- 13. unknown verb → help -----------------------------------------------
-step "unknown verb → help"
+# ---- 13. unknown verb → one-line error -------------------------------------
+step "unknown verb → one-line error"
 unk=$($SSH "$HOST" notarealverb 2>&1; true)
-echo "$unk" | grep -q "unknown command" && echo "$unk" | grep -q "Pipe a rendered file" \
-  && ok "unknown verb prints help" \
+echo "$unk" | grep -q "unknown command" && echo "$unk" | grep -q " help\` for the list of commands" \
+  && ! echo "$unk" | grep -q "UPDATE & MANAGE" \
+  && ok "unknown verb names help, without the banner" \
   || bad "unknown verb" "$unk"
 
 # ---- 14. help directly -----------------------------------------------------
