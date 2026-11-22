@@ -4,7 +4,8 @@
     "Each vector runs request (path already percent-decoded; raw and files flags) against rows[row] as the Paste cell holds it; null is no row.",
     "extensions is the known-extension table's asset flag: a miss on an asset extension is a 404, any other a route.",
     "entry.decodedSize is the stored entry's DecodedSize, 0 for an entry without one; only a positive one is a response's Content-Length, whatever the entry's Size.",
-    "entry.offset and entry.length are present only for a pack member, whose ETag is its key, \"@\" and its offset. An entry with a digest has the ETag \"sha256-\" and its digest instead, wherever it is stored."
+    "entry.offset and entry.length are present only for a pack member, whose ETag is its key, \"@\" and its offset. An entry with a digest has the ETag \"sha256-\" and its digest instead, wherever it is stored.",
+    "title is on a document's shell answer only, when its root entry has a Title. The row's name (the owner's label) never reaches an answer, and no entry carries the title."
   ],
   "extensions": {
     ".html": false,
@@ -427,6 +428,45 @@
           "app.js": {"Key": "uploads/usitelegacy/1", "Size": 0, "CompressedSize": 30, "ContentType": "text/javascript; charset=utf-8", "Kind": ""}
         }
       }
+    },
+    "markdownTitled": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760208800529,
+      "uploadId": "umdtitled",
+      "manifest": {"Files": {"/": {"Key": "uploads/umdtitled/0", "Size": 30, "DecodedSize": 30, "CompressedSize": 20, "ContentType": "", "Kind": "markdown", "Title": "Design <notes> & \"plans\""}}}
+    },
+    "markdownTitledAndNamed": {
+      "kind": "markdown",
+      "status": "ready",
+      "updatedAt": 1760208800529,
+      "uploadId": "umdnamed",
+      "name": "my label",
+      "manifest": {"Files": {"/": {"Key": "uploads/umdnamed/0", "Size": 30, "DecodedSize": 30, "CompressedSize": 20, "ContentType": "", "Kind": "markdown", "Title": "Design notes"}}}
+    },
+    "textNamedEmptyTitle": {
+      "kind": "text",
+      "status": "ready",
+      "updatedAt": 1760208800529,
+      "uploadId": "utextnamed",
+      "name": "",
+      "manifest": {"Files": {"/": {"Key": "uploads/utextnamed/0", "Size": 30, "DecodedSize": 30, "CompressedSize": 20, "ContentType": "", "Kind": "text", "Title": ""}}}
+    },
+    "htmlTitled": {
+      "kind": "html",
+      "status": "ready",
+      "updatedAt": 1760208800529,
+      "uploadId": "uhtmltitled",
+      "name": "a label",
+      "manifest": {"Files": {"/": {"Key": "uploads/uhtmltitled/0", "Size": 30, "DecodedSize": 30, "CompressedSize": 20, "ContentType": "", "Kind": "html", "Title": "stray"}}}
+    },
+    "kbNamed": {
+      "kind": "knowledgebase",
+      "status": "ready",
+      "updatedAt": 1760208800529,
+      "uploadId": "ukbnamed",
+      "name": "team notes",
+      "manifest": {"Files": {"README.md": {"Key": "uploads/ukbnamed/0", "Size": 40, "DecodedSize": 40, "CompressedSize": 20, "ContentType": "text/plain; charset=utf-8", "Kind": ""}}}
     }
   },
   "vectors": [
@@ -2124,6 +2164,42 @@
       "row": "siteDigest",
       "request": {"path": "/", "raw": false, "files": false},
       "want": {"action": "file", "kind": "site", "updatedAt": 1760158400431, "uploadId": "udig", "entry": {"key": "uploads/uold/0", "contentType": "text/html; charset=utf-8", "decodedSize": 4, "digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}}
+    },
+    {
+      "name": "a document's stored title titles its shell",
+      "row": "markdownTitled",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "markdown", "updatedAt": 1760208800529, "uploadId": "umdtitled", "shell": "markdown", "title": "Design <notes> & \"plans\""}
+    },
+    {
+      "name": "a titled document's ?raw entry carries no title",
+      "row": "markdownTitled",
+      "request": {"path": "/", "raw": true, "files": false},
+      "want": {"action": "raw", "kind": "markdown", "updatedAt": 1760208800529, "uploadId": "umdtitled", "entry": {"key": "uploads/umdtitled/0", "contentType": "", "decodedSize": 30}}
+    },
+    {
+      "name": "the owner's label never titles the shell",
+      "row": "markdownTitledAndNamed",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "markdown", "updatedAt": 1760208800529, "uploadId": "umdnamed", "shell": "markdown", "title": "Design notes"}
+    },
+    {
+      "name": "no label and an empty title leave the shell untitled",
+      "row": "textNamedEmptyTitle",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "shell", "kind": "text", "updatedAt": 1760208800529, "uploadId": "utextnamed", "shell": "text"}
+    },
+    {
+      "name": "an HTML paste serves its own bytes, never a title",
+      "row": "htmlTitled",
+      "request": {"path": "/", "raw": false, "files": false},
+      "want": {"action": "html", "kind": "html", "updatedAt": 1760208800529, "uploadId": "uhtmltitled", "entry": {"key": "uploads/uhtmltitled/0", "contentType": "", "decodedSize": 30}}
+    },
+    {
+      "name": "a knowledge base's shell is untitled, whatever its label",
+      "row": "kbNamed",
+      "request": {"path": "/guide/missing", "raw": false, "files": false},
+      "want": {"action": "kbshell", "kind": "knowledgebase", "updatedAt": 1760208800529, "uploadId": "ukbnamed", "shell": "knowledgebase"}
     }
   ]
 }

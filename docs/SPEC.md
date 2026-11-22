@@ -47,6 +47,29 @@ constant regardless of paste size, mirroring the HTML serve path. The
 shell follows the same sandboxing rules as user-supplied HTML, and
 DOMPurify sanitizes the rendered output in the browser.
 
+**Link-preview title.** Chat and message apps unfurl a shared link from
+its markup alone and run no script, so a shell's title cannot come from
+the client-side render. Each document version therefore records a title
+when it is written: hostthisd derives it from the same leading bytes
+`DetectKind` classifies (`domain.DocumentTitle`), with no second read.
+Markdown takes its first ATX heading outside code fences and a leading
+front matter block; every textual kind otherwise takes its first line
+containing a letter or digit. The result is one line of printable text,
+whitespace collapsed, capped at 80 characters with an ellipsis. HTML
+serves its own bytes and its own `<title>`, and PDFs and directories
+have no text prefix, so they record none. The title is stored as the
+`Title` field of the version's root manifest entry, so it travels with
+the version through every write, pin and unpin the manifest already
+takes.
+
+The served title is the served version's recorded title. The owner's
+label (`--name` / `rename`) stays owner-only and never reaches the page.
+A titled shell replaces the template's generic `<title>hostthis</title>`
+with that title plus `og:title`, `og:type` (`article`) and
+`twitter:card` (`summary`) meta tags, all HTML-escaped; an untitled shell (a version written before
+titles or with none) is the template byte for byte. A knowledge base's
+shell is untitled. A static site's files are never altered.
+
 A **diff** paste is a unified diff (`git diff` / `diff -u` output). It is
 served exactly like Markdown - a fixed, content-independent HTML shell
 that loads a bundled client-side renderer, here
@@ -4164,7 +4187,8 @@ Two read-only Paste ops answer a read without handing out the row:
   other is 400 `invalid-path`. The answer is `{found: false}` without a row,
   `{status}` for a pending or failed document at its root, or
   `{action, kind, updatedAt, uploadId}` with, by action, the served entry's
-  `{key, contentType, size}`, the `shell` whose template renders, or a
+  `{key, contentType, size}`, the `shell` whose template renders (with a
+  document's `title` when it has one, see "Link-preview title"), or a
   knowledge base's `files` in byte order. `action` is one of `html`, `shell`,
   `raw`, `file`, `kbshell`, `kbraw`, `files` and `notfound`. A manifest that
   fails to decode reads as none (see "Entries without an object key").
@@ -4476,7 +4500,7 @@ case:
 | `pending` | 200 loading page, `no-store`, `Retry-After: 1` |
 | `failed` | 410 error page, `no-store` |
 | `html`, `raw`, `file`, `kbraw` | 200, the stored bytes, ETag the entry's validator (`sha256-<digest>` when it has a digest, else its key, plus its offset when packed), `Content-Length` the entry's decoded size when it has one |
-| `shell`, `kbshell` | 200, the kind's shell with its CSP, ETag the shell version |
+| `shell`, `kbshell` | 200, the kind's shell with its CSP and title, ETag the shell version, plus `-t` and 16 hex digits of the title's SHA-256 when titled |
 | `files` | 200, the sorted path list as `json.Encoder` writes it, ETag `files-<upload id>` |
 | a kind with no shell | 500 `unsupported kind` |
 | a metadata or blob failure | 500 `internal error` |
@@ -4650,8 +4674,9 @@ Last-Modified: <RFC1123 from the paste's updatedAt>
 That covers an HTML paste, a render shell, `?raw` bytes, a site or knowledge
 base file, a knowledge base's shell and its `?files=1` list. The validator is
 the served file's object key for stored bytes (a key never names different
-bytes), the shell version for a shell page, and `files-<upload id>` for a file
-list.
+bytes), the shell version for a shell page (with a digest of its title when
+it has one, so a version with another title revalidates to the new page),
+and `files-<upload id>` for a file list.
 
 `no-cache` lets a browser or shared cache store the response but makes it
 revalidate before every reuse, so a reader always sees the version the slug

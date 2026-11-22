@@ -88,6 +88,7 @@ func documentManifest(key string, kind domain.ContentKind, s stagedUpload) domai
 		DecodedSize:    s.RawSize,
 		CompressedSize: s.CompressedSize,
 		Kind:           string(kind),
+		Title:          domain.DocumentTitle(kind, s.Prefix),
 	})
 }
 

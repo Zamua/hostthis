@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 import { listAssets, loadTable, MAX_ASSET_BYTES, REPO, SHELLS_DIR, shellsPlugin } from "../build/shells.mjs";
-import { asset, rawContentType, renderShell } from "../src/public/shells.js";
+import { asset, GENERIC_TITLE, rawContentType, renderShell } from "../src/public/shells.js";
 
 // The pinned public responses for every shell, asset and kind: a snapshot of
 // the served bytes and headers. A change to web/shells updates it by hand, so
@@ -90,6 +90,24 @@ test("bundled through the build's plugin, shells.js renders what the source does
   const bundled = await import(`data:text/javascript;base64,${Buffer.from(text).toString("base64")}`);
   for (const kind of Object.keys(loadTable().kinds)) {
     assert.deepEqual(bundled.renderShell(kind), renderShell(kind), kind);
+  }
+});
+
+// A link unfurler runs no script, so a titled shell carries its title in the
+// markup, escaped as text and as an attribute value alike.
+test("a title replaces the generic one and adds the preview tags", () => {
+  for (const kind of Object.keys(loadTable().kinds)) {
+    const plain = renderShell(kind);
+    assert.equal(plain.body.split(GENERIC_TITLE).length, 2, `${kind}: one generic title`);
+    assert.equal(renderShell(kind, "").body, plain.body, kind);
+    const got = renderShell(kind, "Q&A <b> \"x\" 'y' $& $1");
+    const esc = "Q&#38;A &#60;b&#62; &#34;x&#34; &#39;y&#39; $&#38; $1";
+    assert.equal(got.body, plain.body.replace(GENERIC_TITLE, () => `<title>${esc}</title>
+<meta property="og:title" content="${esc}">
+<meta property="og:type" content="article">
+<meta name="twitter:card" content="summary">`), kind);
+    assert.equal(got.version, plain.version, kind);
+    assert.equal(got.csp, plain.csp, kind);
   }
 });
 
