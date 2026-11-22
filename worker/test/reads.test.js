@@ -7,7 +7,7 @@ import test from "node:test";
 import { listAssets, REPO } from "../build/shells.mjs";
 import { entryValidator } from "../src/read.js";
 import { goStringList } from "../src/public/gojson.js";
-import { storedETag } from "../src/public/reads.js";
+import { shellETag, storedETag } from "../src/public/reads.js";
 import { cleanRedirect } from "../src/public/path.js";
 import { rawContentType, renderShell } from "../src/public/shells.js";
 import { publicReads } from "../src/public/surface.js";
@@ -109,7 +109,7 @@ function entryBytes(entry) {
 }
 
 // The answer each shared read vector names, served as hostthisd serves it.
-function expectFor(v, row) {
+async function expectFor(v, row) {
   const want = v.want;
   if (want.found === false || want.action === "notfound") return { status: 404, body: "404 page not found\n" };
   if (want.status === "pending") return { status: 200, golden: "status/pending" };
@@ -136,11 +136,13 @@ function expectFor(v, row) {
     }
     case "shell":
     case "kbshell": {
-      const shell = renderShell(want.shell);
+      const shell = renderShell(want.shell, want.title);
       if (!shell) return { status: 500, body: "unsupported kind\n" };
       return {
         status: 200, body: shell.body,
-        headers: { ...validators(`"${shell.version}"`), "content-type": "text/html; charset=utf-8", "content-security-policy": shell.csp },
+        headers: {
+          ...validators(await shellETag(shell.version, want.title)), "content-type": "text/html; charset=utf-8", "content-security-policy": shell.csp,
+        },
       };
     }
     case "notfoundpage":
@@ -187,7 +189,7 @@ for (const v of vectors.vectors) {
     } else if (v.want.entry?.key) {
       w.blob(v.want.entry.key, entryBytes(v.want.entry));
     }
-    const want = expectFor(v, row);
+    const want = await expectFor(v, row);
     for (const method of ["GET", "HEAD"]) {
       w.payloadCalls.length = 0;
       const res = await w.fetch(vectorURL(v), { method });
@@ -297,6 +299,46 @@ test("a conditional request is answered before any payload is read, comparing we
   const res = await w.fetch(at("/"), { headers: { "If-None-Match": `"${shell.version}"` } });
   assert.equal(res.status, 304);
   assert.equal(res.headers.get("Content-Security-Policy"), null);
+});
+
+// The title a link unfurler reads is the served version's stored title, never
+// the owner's label. The page changes with it, so its ETag does too, and an
+// untitled paste keeps the bare shell version.
+test("a shell carries its paste's title, and its ETag follows the title", async () => {
+  const w = world();
+  const row = documentRow("markdown");
+  w.row(SLUG, row);
+  const plain = renderShell("markdown");
+  let res = await w.fetch(at("/"));
+  assert.equal(res.headers.get("ETag"), `"${plain.version}"`);
+  assert.equal(await res.text(), plain.body);
+
+  row.manifest.Files["/"].Title = "Design <notes>";
+  w.row(SLUG, row);
+  res = await w.fetch(at("/"));
+  const titled = res.headers.get("ETag");
+  assert.match(titled, new RegExp(`^"${plain.version}-t[0-9a-f]{16}"$`));
+  const body = await res.text();
+  assert.equal(body, renderShell("markdown", "Design <notes>").body);
+  assert.ok(body.includes("<title>Design &#60;notes&#62;</title>"));
+  assert.ok(body.includes("<meta property=\"og:title\" content=\"Design &#60;notes&#62;\">"));
+  assert.equal((await w.fetch(at("/"), { headers: { "If-None-Match": titled } })).status, 304);
+  assert.equal((await w.fetch(at("/"), { headers: { "If-None-Match": `"${plain.version}"` } })).status, 200);
+
+  w.row(SLUG, { ...row, name: "owner label" });
+  res = await w.fetch(at("/"));
+  assert.equal(res.headers.get("ETag"), titled);
+  assert.ok(!(await res.text()).includes("owner label"), "the label never reaches the page");
+
+  row.manifest.Files["/"].Title = "Second draft";
+  w.row(SLUG, row);
+  res = await w.fetch(at("/"));
+  assert.notEqual(res.headers.get("ETag"), titled);
+  assert.equal(await res.text(), renderShell("markdown", "Second draft").body);
+  assert.equal((await w.fetch(at("/"), { headers: { "If-None-Match": titled } })).status, 200);
+  // ?raw serves the stored bytes, untouched by any title.
+  w.blob("uploads/a/0", RAW_SOURCE);
+  assert.equal(await (await w.fetch(at("/?raw=1"))).text(), RAW_SOURCE);
 });
 
 test("reads answer GET and HEAD only, before any cell call", async () => {

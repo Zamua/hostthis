@@ -42,6 +42,18 @@ export function storedETag(validator) {
   return `"${validator}-p${SANDBOX_TAG}"`;
 }
 
+// A shell's ETag: its template version, plus a digest of the title it
+// carries, so a rename or a version with another title revalidates to the new
+// page. An untitled shell keeps the bare version it always had.
+export async function shellETag(version, title) {
+  if (!title) {
+    return `"${version}"`;
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(title)));
+  const hex = [...digest.subarray(0, 8)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `"${version}-t${hex}"`;
+}
+
 function sandbox() {
   return { "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer", "X-Robots-Tag": ROBOTS_TAG };
 }
@@ -210,13 +222,13 @@ export function readPath(openBlob) {
       return new Response(reported, { status: 404, headers });
     };
 
-    const shellPage = (shellKind) => {
-      const shell = renderShell(shellKind);
+    const shellPage = async (shellKind, title) => {
+      const shell = renderShell(shellKind, title);
       if (!shell) {
         warn(target, `unsupported stored kind ${JSON.stringify(kind)}`);
         return failure("unsupported kind");
       }
-      const headers = content(`"${shell.version}"`);
+      const headers = content(await shellETag(shell.version, title));
       if (unchanged(headers)) {
         return new Response(null, { status: 304, headers });
       }
@@ -240,7 +252,7 @@ export function readPath(openBlob) {
         return stored(rawContentType("knowledgebase"), "document");
       case "shell":
       case "kbshell":
-        return shellPage(answer.shell);
+        return shellPage(answer.shell, answer.title ?? "");
       case "files": {
         const headers = content(`"files-${answer.uploadId}"`);
         if (unchanged(headers)) {

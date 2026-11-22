@@ -6,7 +6,7 @@
 // An answer is one of:
 //   { found: false }                       no row
 //   { status: "pending" | "failed" }       a document still writing, or never written
-//   { action, kind, updatedAt, uploadId, entry?, shell?, files? }
+//   { action, kind, updatedAt, uploadId, entry?, shell?, title?, files? }
 // action is html | shell | raw | file | kbshell | kbraw | files | notfound |
 // notfoundpage, the last a site's own 404.html (entry) answering a miss.
 // entry ({ key, contentType, decodedSize }, plus offset and length for a pack
@@ -14,6 +14,10 @@
 // Size is for display and may be wrong, so it never leaves the cell). Which
 // Content-Type serves it is the caller's choice per action. shell names
 // the kind whose template renders; a kind without one is the caller's 500.
+// title, on a document's shell answer only and only when it has one, is the
+// page title a link unfurler reads: the root entry's Title, written by
+// hostthisd from the upload's first bytes. The owner's label never leaves the
+// cell.
 
 const ROOT = "/";
 const HTML = "html";
@@ -68,17 +72,18 @@ export function resolveRead(row, { path, raw = false, files = false, manifest: d
   if (row.status === "pending" || row.status === "failed") {
     return { status: row.status };
   }
-  const root = lookup(manifest, ROOT);
-  if (!root?.key) {
+  const found = lookup(manifest, ROOT);
+  if (!found?.key) {
     return answer("notfound");
   }
+  const { title = "", ...root } = found;
   if (kind === HTML) {
     return answer("html", { entry: root });
   }
   if (raw && SHELL_KINDS.has(kind)) {
     return answer("raw", { entry: root });
   }
-  return answer("shell", { shell: kind });
+  return answer("shell", title ? { shell: kind, title } : { shell: kind });
 }
 
 // A site with a root 404.html is a multi-page site, as static hosts treat
@@ -232,6 +237,8 @@ const ENTRY_FIELDS = {
   CONTENTTYPE: ["contentType", "string"],
   KIND: [null, "string"],
   DIGEST: ["digest", "string"],
+  // A document's title, which only its shell answer carries.
+  TITLE: ["title", "string"],
 };
 
 function decodeManifest(value, accounting = false) {
@@ -329,6 +336,9 @@ function decodeEntry(value, accounting) {
   if (!(entry.length > 0)) {
     delete entry.offset;
     delete entry.length;
+  }
+  if (!entry.title) {
+    delete entry.title;
   }
   return entry;
 }

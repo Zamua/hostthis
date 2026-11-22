@@ -57,6 +57,10 @@ type ManifestEntry struct {
 	// Digest is the hex SHA-256 of the decoded bytes. A redeploy reuses by it,
 	// and it is the entry's ETag. Empty on entries written before it.
 	Digest string `json:",omitempty"`
+	// Title is a single document's title for link previews (DocumentTitle),
+	// stored with the version it describes. Empty on a file inside a
+	// directory, on a document with none, and on entries written before it.
+	Title string `json:",omitempty"`
 }
 
 // Ref is where the entry's stored bytes live.
