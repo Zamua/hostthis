@@ -914,10 +914,37 @@ real file during normal navigation (its links point at real `.html`
 files or real directories, which the manifest lookup already resolves),
 and any asset it does request still 404s correctly when absent. So
 default-on costs a plain static site nothing and saves every SPA the
-broken-on-refresh experience. If a future need for opt-OUT appears
-(e.g. a site that wants hard 404s on unknown routes), it can be added as
-a flag then; until a concrete second case shows up, the simpler
-default-on shape wins.
+broken-on-refresh experience. The opt-out is a file, not a flag: see the
+next section.
+
+### A site's own 404 page (`404.html`)
+
+A site that ships a **root `404.html`** is a multi-page site, by the
+convention static hosts share (Cloudflare Pages, GitHub Pages, Netlify):
+static generators (Hugo, Jekyll, Astro, Docusaurus, a static Next.js
+export) emit one, while SPA builds (Vite, Create React App) do not. Such a
+site has **no SPA fallback**: every request that misses the manifest
+(a missing asset, an unknown route, a directory without an index, a wrong
+nested path) is answered with the bytes of that `404.html` and **status
+404**. Real files, directory indexes and `/404.html` itself still serve
+200 as before.
+
+Unknown extensionless routes 404 too, not only missing assets, because a
+site that declares its own not-found page is saying unknown paths are not
+found; serving `index.html` with a 200 for them would hide broken links
+from both visitors and crawlers. A client-routed SPA keeps working because
+it ships no `404.html` (and a SPA that uses the GitHub Pages trick of a
+`404.html` redirecting into the app still works through that redirect).
+A site **without** a root `404.html` behaves exactly as the SPA fallback
+above describes, with the bare `404 page not found` for a missing asset.
+
+The 404 page is the site's stored HTML, so it carries the same sandbox
+headers and policy as any stored file, with `Content-Type: text/html;
+charset=utf-8` whatever its entry says. It carries **no validators**
+(no `ETag`, no `Last-Modified`), ignores `Range` and the conditionals,
+and is `Cache-Control: no-store`, so neither the edge cache nor a browser
+ever keeps it as the missing path's answer, and no `304` or `206` ever
+stands for a miss.
 
 Content-type is derived purely from the path's extension (an I/O-free
 domain decision). An unknown extension is served as
@@ -1132,7 +1159,8 @@ The static-site contract is "what you upload is what is served": every
 file round-trips **byte-for-byte**, with the content-type its extension
 implies; `/` and `/<dir>/` serve that directory's `index.html`; an
 unmatched route serves the root `index.html` via the SPA fallback; and a
-genuinely-missing asset 404s. That contract is pinned by a validation
+genuinely-missing asset 404s (with the site's own `404.html`, when it has
+one). That contract is pinned by a validation
 harness that deploys **real, framework-built sites** through the SAME
 archive pipeline an `ssh` tar upload hits.
 

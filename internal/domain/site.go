@@ -345,19 +345,33 @@ func LooksLikeAsset(reqPath string) bool {
 	return ok
 }
 
+// NotFoundPage is a site's own not-found page, by the static-host
+// convention: a site holding one at its root is a multi-page site, whose
+// every miss serves that page with a 404 and never falls back to index.html.
+const NotFoundPage = "404.html"
+
+// NotFoundPage returns the site's root 404.html, when it has a stored one.
+func (m Manifest) NotFoundPage() (ManifestEntry, bool) {
+	e, ok := m.Files[NotFoundPage]
+	return e, ok && e.Key != ""
+}
+
 // LookupWithSPAFallback resolves reqPath like Lookup, but on a miss a path
 // that looks like a client-side ROUTE (no extension, or ".html") resolves to
-// the site's ROOT index.html, while a missing static ASSET stays a miss.
+// the site's ROOT index.html, while a missing static ASSET stays a miss. A
+// site with a NotFoundPage has no fallback: every miss stays a miss, which
+// the read path answers with that page.
 //
 //   - hit && !viaFallback: a direct manifest entry.
 //   - hit && viaFallback: the root index.html for a client-side route, served
 //     200 exactly as if "/" were requested.
-//   - !hit: a 404, a missing asset or a route on a site with no root index.
+//   - !hit: a 404, a missing asset, a route on a site with no root index, or
+//     any miss on a site with a NotFoundPage.
 func (m Manifest) LookupWithSPAFallback(reqPath string) (entry ManifestEntry, hit, viaFallback bool) {
 	if e, ok := m.Lookup(reqPath); ok {
 		return e, true, false
 	}
-	if LooksLikeAsset(reqPath) {
+	if _, ok := m.NotFoundPage(); ok || LooksLikeAsset(reqPath) {
 		return ManifestEntry{}, false, false
 	}
 	if e, ok := m.Files["index.html"]; ok {

@@ -7,7 +7,8 @@
 //   { found: false }                       no row
 //   { status: "pending" | "failed" }       a document still writing, or never written
 //   { action, kind, updatedAt, uploadId, entry?, shell?, files? }
-// action is html | shell | raw | file | kbshell | kbraw | files | notfound.
+// action is html | shell | raw | file | kbshell | kbraw | files | notfound |
+// notfoundpage, the last a site's own 404.html (entry) answering a miss.
 // entry ({ key, contentType, decodedSize }, plus offset and length for a pack
 // member) is the stored entry whose bytes to stream; decodedSize is its recorded decoded length, 0 when it has none (its
 // Size is for display and may be wrong, so it never leaves the cell). Which
@@ -18,6 +19,8 @@ const ROOT = "/";
 const HTML = "html";
 const SITE = "site";
 const KNOWLEDGE_BASE = "knowledgebase";
+// A site's own not-found page, by the static-host convention.
+const NOT_FOUND_PAGE = "404.html";
 
 // Kinds a fixed shell renders from their ?raw bytes.
 const SHELL_KINDS = new Set(["markdown", "diff", "mermaid", "pdf", "csv", "json", "flamegraph", "text", "log"]);
@@ -56,7 +59,7 @@ export function resolveRead(row, { path, raw = false, files = false, manifest: d
     return knowledgeBase(manifest, path, raw, files, answer);
   }
   if (kind === SITE) {
-    return servedFile(lookupWithSPAFallback(manifest, path), answer);
+    return site(manifest, path, answer);
   }
   // A document answers only at its own URL, and status gates it only there.
   if (path !== ROOT) {
@@ -76,6 +79,19 @@ export function resolveRead(row, { path, raw = false, files = false, manifest: d
     return answer("raw", { entry: root });
   }
   return answer("shell", { shell: kind });
+}
+
+// A site with a root 404.html is a multi-page site, as static hosts treat
+// one: every miss serves that page (with a 404), and no route falls back to
+// index.html. Without one it is a single-page app, whose route-shaped misses
+// serve the root index.html and asset-shaped ones stay a bare 404.
+function site(manifest, path, answer) {
+  const notFoundPage = manifest.get(NOT_FOUND_PAGE);
+  if (!notFoundPage?.key) {
+    return servedFile(lookupWithSPAFallback(manifest, path), answer);
+  }
+  const entry = lookup(manifest, path);
+  return entry?.key ? answer("file", { entry }) : answer("notfoundpage", { entry: notFoundPage });
 }
 
 function servedFile(entry, answer) {

@@ -177,6 +177,39 @@ export function readPath(openBlob) {
       return new Response(reported, { status, headers });
     };
 
+    // A site's own 404.html answering a miss (read.js): its bytes under the
+    // stored-bytes policy, as HTML, with a 404 no cache keeps. It carries no
+    // validators and ignores Range, so no 304 or 206 ever stands for a miss.
+    const notFoundPage = async () => {
+      const headers = {
+        ...sandbox(),
+        "Permissions-Policy": STORED_PERMISSIONS_POLICY,
+        "Content-Security-Policy": SANDBOX_POLICY,
+        "Cache-Control": "no-store",
+        "Content-Type": HTML,
+      };
+      const size = entry.decodedSize;
+      const sized = Number.isSafeInteger(size) && size > 0;
+      if (sized) {
+        headers["Content-Length"] = String(size);
+      }
+      if (method === "HEAD") {
+        return new Response(null, { status: 404, headers });
+      }
+      let body;
+      try {
+        body = await openBlob(env, entry, ctx);
+      } catch (error) {
+        warn(target, `404 page blob read: ${error.message}`);
+        return error instanceof StorageOfflineError ? storageOffline() : failure();
+      }
+      if (sized) {
+        body = exactLength(body, size);
+      }
+      const reported = reportingErrors(body, (error) => warn(target, `404 page blob read: ${error.message}`));
+      return new Response(reported, { status: 404, headers });
+    };
+
     const shellPage = (shellKind) => {
       const shell = renderShell(shellKind);
       if (!shell) {
@@ -195,6 +228,8 @@ export function readPath(openBlob) {
     switch (answer.action) {
       case "notfound":
         return notFound();
+      case "notfoundpage":
+        return notFoundPage();
       case "html":
         return stored(HTML, "html");
       case "raw":
