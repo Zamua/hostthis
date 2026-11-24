@@ -608,18 +608,30 @@ A row with no persisted status is read as **`ready`**.
 
 `Create` does, synchronously, before returning the URL:
 
-1. mint the upload id, then stream + compress into a spill file on local
-   disk,
+1. stream + compress into a spill file on local disk,
 2. detect the content kind,
 3. wait for the object store to admit the write (see "Worker upload
    admission"); a store too busy to take it refuses the upload here,
-4. **check quota + write the authoritative paste row with
-   `status=pending`**, whose manifest already names the object key
+4. mint the upload id, then **check quota + write the authoritative paste
+   row with `status=pending`**, whose manifest already names the object key
    `uploads/<upload-id>/0`,
 5. return the URL.
 
 Quota is enforced here, inside the serialized metadata commit, so an
 over-quota upload is rejected before any URL is handed out.
+
+Step 4 is ONE request from `hostthisd` to the Worker, its publish route (see
+"The publish route"), which runs the reservation, the row write and the
+confirmation against the cells itself. Apart from the Sybil gate's admission
+of the session (see "Sybil rate limit"), it is the only Worker request a
+plain upload waits on. The upload id is minted for no pod link, and the
+commit checks that against the owner's link: when the owner has linked a pod
+(see "Pod storage") the commit refuses, writing nothing and naming the link,
+and the create mints the id for that link and sends the publish again. A
+collision on the random slug is likewise answered by the commit and retried
+under a fresh slug. The answer carries the owner's charged total after the
+create, which is what the quota warning (see "Per-identity quota") reads, so a
+create that leaves the quota below the warning line makes no further request.
 
 Over SSH, the end of the body is confirmed before step 2: a channel reads as
 ended both when the client closes its input and when the whole connection
@@ -3604,7 +3616,8 @@ owner signed in through that key's own link URL. A link URL that expires, was
 already used, or whose secret is wrong fails without contacting the pod.
 
 **Where an object goes.** An upload made while its key has a link mints an
-upload id of the form `pod_<link-id>_<random>`, so its keys stay
+upload id of the form `pod_<link-id>_<random>` (a new paste confirms the link
+inside its own commit, see "Create: the synchronous half"), so its keys stay
 `uploads/<upload-id>/<n>` (see "Object keys") and every prefix, receipt and
 reuse rule is unchanged. The Worker's payload store sends a key whose upload
 id names a link to `<storage>hostthis/uploads/<upload-id>/<n>` in that link's
@@ -3699,7 +3712,10 @@ and outside every cell.
 Whatever backend is in use, the rest of the app depends on it only
 through small Go interfaces declared in `internal/service`:
 
-- `PasteRepo` (upload): `InsertWithQuotaCheck`, `Get`.
+- `PasteRepo` (upload): `Publish`, `Get`, `MarkReady`, `MarkFailed`.
+  `Publish` is the create: the same commit as `InsertWithQuotaCheck`, which
+  site deploys use, plus the pod link check of "Create: the synchronous
+  half" and the owner's charged total in its answer.
 - `PasteAdmin` (manage): `Get`, `ListByOwner`, `Delete`, `SetName`,
   `SetPinnedVersion`, `Unpin`, `AppendVersionWithQuotaCheck`,
   `ListVersions`, `GetVersion`, `DeleteVersion`, `SumActiveBytesByOwner`,
@@ -4234,6 +4250,39 @@ per page and `start=<next>` resumes.
 per page, `start=<next>` resuming. A deployment without the `FEED` binding
 records nothing. Cost: one feed write per paste change, and at most six an
 hour per app with room activity.
+
+### The publish route
+
+`POST /publish/paste` commits a new paste in one request. Its body is
+`{row, generation, fingerprint, intentId, userCap, now, pod?}`: the row names
+the slug and the owner, and the route addresses both cells from it, so a
+reservation can never name one slug while its row names another. It runs the
+same three cell ops a caller could send one at a time:
+
+1. `reserve` on the owner's Identity cell, with the intent derived from the
+   body; when `pod` is present (a link id, `""` for none) the same commit
+   checks it against the owner's pod link;
+2. `put` on the slug's Paste cell, sent a second time when the first gets no
+   answer, which the cell replays for the same generation and fingerprint;
+3. `confirm` on the Identity cell.
+
+Every guarantee of those ops holds unchanged, and so does every record they
+write (the change feed's `paste` entry among them). The answer is
+`200 {active}`, the owner's charged total after the create, or the refusal
+the failing op gave: `507 over-quota`; `409 slug-taken` (from the reserve, or
+from a put whose slug another paste holds or whose create recovery already
+aborted, its charge then released); `409 pod-moved {pod}`, naming the owner's
+link, with nothing written; `413 version-too-large`, its charge released. A
+put that never answers is `502 put-unanswered` and a refused confirm `502
+confirm-refused`: the durable create intent then settles the paste, as it
+does for any create interrupted between cells. An unanswered confirm is a
+committed paste, which recovery confirms. A caller does not resend a publish
+whose answer it lost: if that create completed, the resend reads as a taken
+slug. Only the full token reaches the route.
+
+The separate ops stay served, so a `hostthisd` older than the Worker keeps
+creating pastes. A release deploys the Worker before `hostthisd`, which then
+requires the route.
 
 ### Concurrency and local atomicity
 

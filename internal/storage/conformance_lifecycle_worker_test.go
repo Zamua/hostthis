@@ -78,6 +78,14 @@ func (n namespacedRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste
 	return n.inner.InsertWithQuotaCheck(ctx, p, userCap, now)
 }
 
+func (n namespacedRepo) Publish(ctx context.Context, p domain.Paste, userCap int64, now time.Time,
+	podLink string,
+) (int64, error) {
+	p.Slug = n.slug(p.Slug)
+	p.Identity = domain.Identity(n.owner(p.Identity.String()))
+	return n.inner.Publish(ctx, p, userCap, now, podLink)
+}
+
 func (n namespacedRepo) Get(s domain.Slug) (domain.Paste, error) {
 	got, err := n.inner.Get(n.slug(s))
 	if err != nil {

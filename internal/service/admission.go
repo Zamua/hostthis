@@ -85,7 +85,7 @@ func (a *CreateAdmission) keyCount() int {
 	return len(a.keys)
 }
 
-// gatedCreateRepo decorates a PasteRepo so that InsertWithQuotaCheck, the one
+// gatedCreateRepo decorates a PasteRepo so that Publish, the one
 // write a same-owner storm amplifies, passes through the per-identity admission
 // gate. Every other method (reads, MarkReady/MarkFailed, update, delete) passes
 // through ungated. The upload service stays unaware of admission: the decorator
@@ -101,8 +101,10 @@ func GateCreates(repo PasteRepo, gate *CreateAdmission) PasteRepo {
 	return &gatedCreateRepo{PasteRepo: repo, gate: gate}
 }
 
-func (g *gatedCreateRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
+func (g *gatedCreateRepo) Publish(ctx context.Context, p domain.Paste, userCap int64, now time.Time,
+	podLink string,
+) (int64, error) {
 	release := g.gate.Acquire(p.Identity.String())
 	defer release()
-	return g.PasteRepo.InsertWithQuotaCheck(ctx, p, userCap, now)
+	return g.PasteRepo.Publish(ctx, p, userCap, now, podLink)
 }

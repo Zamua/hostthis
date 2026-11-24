@@ -616,7 +616,15 @@ func (s *Server) verbUpload(sess gossh.Session, owner domain.Owner, argv []strin
 	if res.Paste.Name != "" {
 		_, _ = fmt.Fprintf(sess.Stderr(), "labeled %q.\n", res.Paste.Name)
 	}
-	s.emitURL(sess, owner, res.Paste.Slug)
+	// The commit answered the owner's total, so the quota warning needs no
+	// lookup of its own unless it fires.
+	s.printURL(sess, res.Paste.Slug)
+	if res.OwnerBytes > 0 {
+		s.warnQuotaAt(sess, owner, int(res.OwnerBytes), domain.UserQuotaBytes)
+	} else {
+		s.warnQuota(sess, owner)
+	}
+	_ = sess.Exit(ExitOK)
 }
 
 // emitSite ends a site deploy with the same response shape a single-file
@@ -642,26 +650,41 @@ func (s *Server) emitSite(sess gossh.Session, owner domain.Owner, res service.Si
 // `$(... | ssh -T apex)` capture stays clean, its QR code on stderr, then the
 // quota warning when the owner is nearly full.
 func (s *Server) emitURL(sess gossh.Session, owner domain.Owner, slug domain.Slug) {
-	url := s.BuildURL(slug)
-	_, _ = fmt.Fprintln(sess, url)
-	writeQR(sess.Stderr(), url)
+	s.printURL(sess, slug)
 	s.warnQuota(sess, owner)
 	_ = sess.Exit(ExitOK)
 }
 
-// warnQuota tells an owner past domain.QuotaWarnPercent of their quota how
-// full it is and where the space went, before an upload is first refused.
+// printURL writes the URL alone on stdout and its QR code on stderr.
+func (s *Server) printURL(sess gossh.Session, slug domain.Slug) {
+	url := s.BuildURL(slug)
+	_, _ = fmt.Fprintln(sess, url)
+	writeQR(sess.Stderr(), url)
+}
+
+// warnQuota is warnQuotaAt with the owner's usage looked up.
 // Best-effort: any lookup error stays silent, the upload already succeeded.
 func (s *Server) warnQuota(sess gossh.Session, owner domain.Owner) {
 	if s.Manage == nil {
 		return
 	}
 	info, err := s.Manage.Whoami(owner, "")
-	if err != nil || !domain.QuotaNearlyFull(info.UsedBytes, info.QuotaBytes) {
+	if err != nil {
+		return
+	}
+	s.warnQuotaAt(sess, owner, info.UsedBytes, info.QuotaBytes)
+}
+
+// warnQuotaAt tells an owner using used bytes of quota, once past
+// domain.QuotaWarnPercent, how full it is and where the space went, before an
+// upload is first refused. Best-effort: any lookup error stays silent, the
+// upload already succeeded.
+func (s *Server) warnQuotaAt(sess gossh.Session, owner domain.Owner, used, quota int) {
+	if s.Manage == nil || !domain.QuotaNearlyFull(used, quota) {
 		return
 	}
 	_, _ = fmt.Fprintf(sess.Stderr(), "note: quota %d%% full (%s of %s).\n",
-		info.UsedBytes*100/info.QuotaBytes, humanBytes(info.UsedBytes), humanBytes(info.QuotaBytes))
+		used*100/quota, humanBytes(used), humanBytes(quota))
 	pastes, err := s.Manage.List(owner)
 	if err != nil {
 		return

@@ -11,6 +11,7 @@ import { FORWARDED_HOST, isHostname, normalizeHost, publicHost, slugHostSuffix }
 import { CONTENT_CACHE_CONTROL } from "./public/reads.js";
 import { publicRouter } from "./public/router.js";
 import { publicReads } from "./public/surface.js";
+import { PUBLISH_PATH, publishRoute } from "./publish.js";
 
 export { Abuse } from "./cells/abuse.js";
 export { Denylist } from "./cells/denylist.js";
@@ -96,6 +97,11 @@ const internalRouter = {
     }
     if (url.pathname.startsWith("/purge/")) {
       return purgeRoute(request, env, url);
+    }
+    if (url.pathname === PUBLISH_PATH) {
+      // One request for a new paste's whole commit; the full token only, as
+      // no narrower scope names it.
+      return publishRoute(request, env);
     }
     if (url.pathname.startsWith("/paste/")) {
       const slug = url.searchParams.get("slug");

@@ -27,17 +27,11 @@ func rootKey(t *testing.T, manifest any) any {
 func TestInsertRowCarriesUploadID(t *testing.T) {
 	var row map[string]any
 	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			row, _ = c.fields(t)["row"].(map[string]any)
-			return cellResponse(http.StatusNoContent, ""), nil
-		case "/identity/confirm":
-			return cellResponse(http.StatusNoContent, ""), nil
+		if c.Path != "/publish/paste" {
+			t.Fatalf("unexpected path %q", c.Path)
 		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
+		row, _ = c.fields(t)["row"].(map[string]any)
+		return cellResponse(http.StatusOK, `{"active":3}`), nil
 	}}
 	p := createPaste()
 	p.UploadID = "upload-1"

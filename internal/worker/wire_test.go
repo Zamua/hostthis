@@ -12,33 +12,28 @@ import (
 // same values, same JSON types, and absent keys stay absent.
 func TestRequestBodiesKeepTheWireShape(t *testing.T) {
 	base := 3
+	noPod := ""
 	row := pasteRow{Slug: "slugone1", Identity: "id1", Status: "pending", Kind: "html"}
 	for _, tc := range []struct {
 		name string
 		body any
 		want map[string]any
 	}{
-		{"reserve", reserveRequest{
-			Generation: "g1", Kind: "html", Name: "n", Now: 5, Size: 7, Slug: "s1",
-			Status: domain.PasteStatusPending, UpdatedAt: 6, UserCap: 100,
-			Intent: createIntent{Fingerprint: "f", ID: "i", Kind: intentCreatePaste, StartedAt: 5, Subject: "s1"},
+		{"publish", publishRequest{
+			Fingerprint: "f", Generation: "g1", IntentID: "i", Now: 5, Row: row, UserCap: 100,
 		}, map[string]any{
-			"slug": "s1", "generation": "g1", "size": 7, "userCap": 100, "now": 5, "status": "pending",
-			"updatedAt": 6, "kind": "html", "name": "n",
-			"intent": map[string]any{"id": "i", "kind": "create_paste", "subject": "s1", "fingerprint": "f", "startedAt": 5},
+			"row": row, "generation": "g1", "fingerprint": "f", "intentId": "i", "userCap": 100, "now": 5,
 		}},
-		{"release", releaseRequest{Generation: "g1", IntentID: "i", Slug: "s1"},
-			map[string]any{"slug": "s1", "generation": "g1", "intentId": "i"}},
-		{"confirm", confirmRequest{Generation: "g1", IntentID: "i", Slug: "s1", Status: domain.PasteStatusReady},
-			map[string]any{"slug": "s1", "generation": "g1", "status": "ready", "intentId": "i"}},
+		{"publish naming no pod", publishRequest{Generation: "g1", Pod: &noPod, Row: row},
+			map[string]any{
+				"row": row, "generation": "g1", "fingerprint": "", "intentId": "", "userCap": 0, "now": 0, "pod": "",
+			}},
 		{"drop", dropRequest{Slug: "s1"}, map[string]any{"slug": "s1"}},
 		{"note subnet", noteSubnetRequest{Now: 5, Subnet: "10.0.0.0/24"},
 			map[string]any{"subnet": "10.0.0.0/24", "now": 5}},
 		{"link start", linkStartRequest{Expires: 9, Owner: "o", SecretHash: "h", WebID: "w"},
 			map[string]any{"owner": "o", "webid": "w", "secretHash": "h", "expires": 9}},
 		{"pod clear", podClearRequest{}, map[string]any{}},
-		{"paste put", pastePutRequest{Fingerprint: "f", Generation: "g1", Row: row},
-			map[string]any{"row": row, "generation": "g1", "fingerprint": "f"}},
 		{"ready", pasteStatusRequest{Generation: "g1", Status: domain.PasteStatusReady},
 			map[string]any{"status": "ready", "generation": "g1"}},
 		{"failed", pasteStatusRequest{Generation: "g1", OpID: "fail:g1", Status: domain.PasteStatusFailed},

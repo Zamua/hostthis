@@ -28,12 +28,12 @@ type slugLookalikeErrRepo struct {
 
 var errSlugLookalike = fmt.Errorf("room slug validation failed")
 
-func (r *slugLookalikeErrRepo) InsertWithQuotaCheck(context.Context, domain.Paste, int64, time.Time) error {
+func (r *slugLookalikeErrRepo) Publish(context.Context, domain.Paste, int64, time.Time, string) (int64, error) {
 	if r.failed {
-		return nil
+		return 0, nil
 	}
 	r.failed = true
-	return errSlugLookalike
+	return 0, errSlugLookalike
 }
 
 // TestUpload_Create_LookalikeErrorIsNotARemint pins the classification

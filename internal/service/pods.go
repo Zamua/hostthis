@@ -59,10 +59,10 @@ func (p *Pods) UploadID(owner domain.Owner) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if link == nil || !domain.ValidPodLinkID(link.ID) {
+	if link == nil {
 		return domain.NewUploadID(), nil
 	}
-	return domain.NewPodUploadID(link.ID), nil
+	return domain.NewUploadIDForLink(link.ID), nil
 }
 
 // UploadIDSource mints an upload id for an owner; nil mints bucket ids.

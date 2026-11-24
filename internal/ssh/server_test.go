@@ -167,11 +167,11 @@ type blockingPasteRepo struct {
 	paste   domain.Paste
 }
 
-func (r *blockingPasteRepo) InsertWithQuotaCheck(_ context.Context, paste domain.Paste, _ int64, _ time.Time) error {
+func (r *blockingPasteRepo) Publish(_ context.Context, paste domain.Paste, _ int64, _ time.Time, _ string) (int64, error) {
 	r.paste = paste
 	close(r.entered)
 	<-r.release
-	return nil
+	return 0, nil
 }
 
 func (r *blockingPasteRepo) Get(domain.Slug) (domain.Paste, error) { return r.paste, nil }

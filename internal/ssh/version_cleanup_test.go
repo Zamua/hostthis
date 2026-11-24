@@ -121,3 +121,26 @@ func TestUpload_WarnsNearFullQuota(t *testing.T) {
 		t.Fatalf("no quota warning naming the slug: %q", stderr)
 	}
 }
+
+// A create that lands past the warning threshold warns from the total its
+// commit answered, counting the paste it just made.
+func TestCreate_WarnsNearFullQuota(t *testing.T) {
+	s := startStack(t)
+	body := []byte("<!doctype html><p>a paste of some size</p>")
+	_, stderr, _ := s.run("", body)
+	if strings.Contains(stderr, "quota") {
+		t.Fatalf("warned far below the quota: %q", stderr)
+	}
+	u1 := usedBytes(t, s)
+	old := domain.UserQuotaBytes
+	t.Cleanup(func() { domain.UserQuotaBytes = old })
+	// A second paste the size of the first lands at about 90% of this quota.
+	domain.UserQuotaBytes = u1 * 2 * 110 / 100
+	_, stderr, exit := s.run("", body)
+	if exit != 0 {
+		t.Fatalf("create refused: %d %q", exit, stderr)
+	}
+	if !strings.Contains(stderr, "note: quota 9") || !strings.Contains(stderr, "largest: ") {
+		t.Fatalf("no quota warning at about 90%%: %q", stderr)
+	}
+}
