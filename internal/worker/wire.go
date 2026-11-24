@@ -51,9 +51,6 @@ func (rt route) target(val string) string {
 }
 
 var (
-	opIdentityReserve    = route{http.MethodPost, "/identity/reserve", byScope}
-	opIdentityRelease    = route{http.MethodPost, "/identity/release", byScope}
-	opIdentityConfirm    = route{http.MethodPost, "/identity/confirm", byScope}
 	opIdentityBytes      = route{http.MethodGet, "/identity/bytes", byScope}
 	opIdentityList       = route{http.MethodGet, "/identity/list", byScope}
 	opIdentityFirstSeen  = route{http.MethodGet, "/identity/firstSeen", byScope}
@@ -64,7 +61,9 @@ var (
 	opIdentityPodClear   = route{http.MethodPost, "/identity/podclear", byScope}
 	opIdentityLinkStart  = route{http.MethodPost, "/identity/linkstart", byScope}
 
-	opPastePut        = route{http.MethodPost, "/paste/put", bySlug}
+	// opPublish runs a new paste's reserve, put and confirm in one request.
+	opPublish = route{http.MethodPost, "/publish/paste", singleton}
+
 	opPasteGet        = route{http.MethodGet, "/paste/get", bySlug}
 	opPasteStatus     = route{http.MethodPost, "/paste/status", bySlug}
 	opPasteRename     = route{http.MethodPost, "/paste/rename", bySlug}
@@ -93,6 +92,7 @@ const (
 	codeBadReuse             = "bad-reuse"
 	codeVersionServed        = "version-served"
 	codePodsUnavailable      = "pods-unavailable"
+	codePodMoved             = "pod-moved"
 	codeTooManySubscriptions = "too-many-subscriptions"
 	codeTooManyItems         = "too-many-items"
 	reasonAbsent             = "absent"
@@ -103,43 +103,22 @@ type refusal struct {
 	Error string `json:"error"`
 }
 
+// --- publish route ----------------------------------------------------------
+
+// publishRequest is a whole create: the row names the slug and the owner, and
+// the Worker derives the reservation and its intent from it. Pod, when set, is
+// the pod link id ("" for none) the row's upload id was minted for.
+type publishRequest struct {
+	Fingerprint string   `json:"fingerprint"`
+	Generation  string   `json:"generation"`
+	IntentID    string   `json:"intentId"`
+	Now         int64    `json:"now"`
+	Pod         *string  `json:"pod,omitempty"`
+	Row         pasteRow `json:"row"`
+	UserCap     int64    `json:"userCap"`
+}
+
 // --- identity cell ----------------------------------------------------------
-
-const intentCreatePaste = "create_paste"
-
-type reserveRequest struct {
-	Generation string             `json:"generation"`
-	Intent     createIntent       `json:"intent"`
-	Kind       domain.ContentKind `json:"kind"`
-	Name       string             `json:"name"`
-	Now        int64              `json:"now"`
-	Size       int                `json:"size"`
-	Slug       string             `json:"slug"`
-	Status     domain.PasteStatus `json:"status"`
-	UpdatedAt  int64              `json:"updatedAt"`
-	UserCap    int64              `json:"userCap"`
-}
-
-type createIntent struct {
-	Fingerprint string `json:"fingerprint"`
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	StartedAt   int64  `json:"startedAt"`
-	Subject     string `json:"subject"`
-}
-
-type releaseRequest struct {
-	Generation string `json:"generation"`
-	IntentID   string `json:"intentId"`
-	Slug       string `json:"slug"`
-}
-
-type confirmRequest struct {
-	Generation string             `json:"generation"`
-	IntentID   string             `json:"intentId"`
-	Slug       string             `json:"slug"`
-	Status     domain.PasteStatus `json:"status"`
-}
 
 type dropRequest struct {
 	Slug string `json:"slug"`
@@ -161,12 +140,6 @@ type linkStartRequest struct {
 type podClearRequest struct{}
 
 // --- paste cell -------------------------------------------------------------
-
-type pastePutRequest struct {
-	Fingerprint string   `json:"fingerprint"`
-	Generation  string   `json:"generation"`
-	Row         pasteRow `json:"row"`
-}
 
 type pasteStatusRequest struct {
 	Generation string `json:"generation"`

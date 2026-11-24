@@ -19,8 +19,7 @@ import (
 //
 // A create spans two cells and no transaction spans cells. The row is
 // addressed by slug; the owner's index and quota are addressed by identity.
-//
-// The sequence is therefore:
+// The Worker's publish route runs the sequence in one request:
 //
 //  1. Identity cell: atomically admit quota, reserve bytes, and record intent.
 //  2. Paste cell: write the row.
@@ -104,96 +103,74 @@ func (r pasteRow) domain() domain.Paste {
 	}
 }
 
-// InsertWithQuotaCheck runs the three-step create described on the type.
+// InsertWithQuotaCheck runs the create described on the type, with no check of
+// the owner's pod link.
 func (r *PasteRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
-	owner := p.Identity.String()
+	_, err := r.publish(ctx, p, userCap, now, nil)
+	return err
+}
+
+// Publish runs the create described on the type in one request and answers
+// the owner's charged total after it. podLink is the pod link id ("" for none)
+// p's upload id was minted for: when the owner's link is another, nothing is
+// written and the error is a *domain.PodMovedError naming the current one.
+func (r *PasteRepo) Publish(ctx context.Context, p domain.Paste, userCap int64, now time.Time,
+	podLink string,
+) (int64, error) {
+	return r.publish(ctx, p, userCap, now, &podLink)
+}
+
+func (r *PasteRepo) publish(ctx context.Context, p domain.Paste, userCap int64, now time.Time,
+	podLink *string,
+) (int64, error) {
 	generation := p.Generation
 	if generation == "" {
 		generated, err := newOpaqueID("generation")
 		if err != nil {
-			return err
+			return 0, err
 		}
 		generation = generated
 	}
-	intentID := "create:" + p.Slug.String() + ":" + generation
 	wireRow := rowOf(p)
 	wireRow.Generation = generation
 	fingerprint, err := createFingerprint(wireRow)
 	if err != nil {
-		return err
+		return 0, err
 	}
-
-	// 1. Reserve. Over-quota is refused HERE, before any row exists, so a
-	//    rejected upload leaves nothing behind.
-	var refused refusal
-	status, err := r.call(ctx, opIdentityReserve, owner, reserveRequest{
-		Slug: p.Slug.String(), Generation: generation,
-		Size: p.Size, UserCap: userCap,
-		Now: now.UTC().UnixMilli(), Status: p.Status,
-		UpdatedAt: p.UpdatedAt.UTC().UnixMilli(),
-		Kind:      p.Kind, Name: p.Name,
-		Intent: createIntent{
-			ID: intentID, Kind: intentCreatePaste, Subject: p.Slug.String(),
-			Fingerprint: fingerprint,
-			StartedAt:   now.UTC().UnixMilli(),
-		},
-	}, &refused)
+	var res struct {
+		Active int64  `json:"active"`
+		Error  string `json:"error"`
+		Pod    string `json:"pod"`
+	}
+	// Sent once: a lost answer is ambiguous, and the durable intent, not a
+	// resend, resolves it. A resend of a create that completed would read as a
+	// taken slug and mint a second paste.
+	status, err := r.call(ctx, opPublish, "", publishRequest{
+		Row: wireRow, Generation: generation, Fingerprint: fingerprint,
+		IntentID: "create:" + p.Slug.String() + ":" + generation,
+		UserCap:  userCap,
+		Now:      now.UTC().UnixMilli(),
+		Pod:      podLink,
+	}, &res)
 	switch {
 	case err != nil:
-		return err
+		return 0, err
 	case status == http.StatusInsufficientStorage:
-		return domain.ErrOverUserQuota
-	case status == http.StatusConflict && refused.Error == codeSlugTaken:
-		return domain.ErrSlugTaken
-	case status >= 300:
-		return fmt.Errorf("worker: reserve: status %d %s", status, refused.Error)
-	}
-
-	// 2. A lost response is ambiguous: retry the exact generation once so the
-	//    cell's same-generation replay can prove whether the row landed. A
-	//    transport failure is NOT released: the durable intent owns resolution,
-	//    and releasing could erase a row whose success response was lost.
-	status, err = r.callArtifactMutation(ctx, opPastePut, p.Slug, pastePutRequest{
-		Row: wireRow, Generation: generation, Fingerprint: fingerprint,
-	}, &refused)
-	if err != nil {
-		return err
-	}
-	if status == http.StatusConflict && (refused.Error == codeSlugTaken || refused.Error == codeCreateAborted) {
-		// This generation's row can never land, so its charge is released.
-		_, _ = r.call(ctx, opIdentityRelease, owner,
-			releaseRequest{
-				Slug: p.Slug.String(), Generation: generation, IntentID: intentID,
-			}, nil)
-		return domain.ErrSlugTaken
-	}
-	if status == http.StatusRequestEntityTooLarge {
+		return 0, domain.ErrOverUserQuota
+	case status == http.StatusConflict && res.Error == codePodMoved:
+		return 0, &domain.PodMovedError{Link: res.Pod}
+	case status == http.StatusConflict && (res.Error == codeSlugTaken || res.Error == codeCreateAborted):
+		return 0, domain.ErrSlugTaken
+	case status == http.StatusRequestEntityTooLarge:
 		// The row was refused whole (its manifest is past what the cell stores),
-		// so it can never land and its charge is released.
-		_, _ = r.call(ctx, opIdentityRelease, owner,
-			releaseRequest{
-				Slug: p.Slug.String(), Generation: generation, IntentID: intentID,
-			}, nil)
-		return fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
-	}
-	if status >= 300 {
+		// so it can never land and its charge was released.
+		return 0, fmt.Errorf("%w: version too large to store", domain.ErrTooManyFiles)
+	case status >= 300:
 		// Any other conflict may name this generation's own row; the intent
 		// resolves it.
-		return fmt.Errorf("worker: paste put: status %d %s", status, refused.Error)
+		return 0, fmt.Errorf("worker: publish: status %d %s", status, res.Error)
 	}
-
-	// 3. Confirm. The intent is discharged only once the row is durable. A
-	//    lost response is fine: the resolver observes the matching row and
-	//    completes the confirm.
-	status, err = r.call(ctx, opIdentityConfirm, owner,
-		confirmRequest{
-			Slug: p.Slug.String(), Generation: generation,
-			Status: p.Status, IntentID: intentID,
-		}, nil)
-	if err != nil {
-		return nil
-	}
-	return answer("confirm", status, nil, nil)
+	return res.Active, nil
 }
 
 func (r *PasteRepo) getRow(slug domain.Slug) (pasteRow, error) {

@@ -69,6 +69,10 @@ export class Identity {
 
   // Quota admission, reservation, and intent creation must commit as one local
   // transaction. updatedAt comes from the paste because it defines list order.
+  // A body carrying `pod` names the pod link id ("" for none) the row's upload
+  // id was minted for; the reservation is refused `pod-moved`, naming the
+  // current link, when the owner's link is another, so the pod a create stores
+  // its bytes in is decided by the same commit that admits it.
   async reserve(body) {
     if (typeof body.size !== "number" || body.size < 0) {
       return Response.json({ error: "negative-size" }, { status: 400 });
@@ -85,7 +89,16 @@ export class Identity {
     )) {
       return Response.json({ error: "malformed-create-intent" }, { status: 400 });
     }
+    if (body.pod !== undefined && typeof body.pod !== "string") {
+      return Response.json({ error: "malformed-pod" }, { status: 400 });
+    }
     return this.state.storage.transaction(async (tx) => {
+      if (body.pod !== undefined) {
+        const pod = (await tx.get("pod"))?.id ?? "";
+        if (pod !== body.pod) {
+          return Response.json({ error: "pod-moved", pod }, { status: 409 });
+        }
+      }
       const entries = (await tx.get("entries")) ?? {};
       const active = await ownerTotal(tx, entries);
       const existing = entries[body.slug];

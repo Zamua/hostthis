@@ -19,9 +19,15 @@ import (
 )
 
 // PasteRepo is the persistence interface the upload service needs.
-// internal/storage.PasteRepo satisfies it.
+// internal/worker.PasteRepo satisfies it.
 type PasteRepo interface {
-	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
+	// Publish commits a new paste: quota checked, charge reserved and row
+	// written in one step, answering the owner's charged total after it.
+	// podLink is the owner's pod link id ("" for none) p's upload id was minted
+	// for; when the owner's link is another, nothing is written and the error
+	// is a *domain.PodMovedError naming it (docs/SPEC.md "Create: the
+	// synchronous half").
+	Publish(ctx context.Context, p domain.Paste, userCap int64, now time.Time, podLink string) (int64, error)
 	Get(domain.Slug) (domain.Paste, error)
 	// MarkReady / MarkFailed advance a still-PENDING paste only (MarkFailed
 	// also releases its reservation), so a late finalizer cannot resurrect a
@@ -51,9 +57,6 @@ type Upload struct {
 	// Archive handles the multi-file shape. nil disables archive uploads, which
 	// is what a deploy with no site support wants.
 	Archive ArchiveDeployer
-	// UploadIDs mints each upload's id, which decides where its bytes are
-	// stored (docs/SPEC.md "Pod storage"). nil stores them in the bucket.
-	UploadIDs UploadIDSource
 	// StagingDir holds upload spill files; "" is the OS temp dir.
 	StagingDir string
 	// finalizeWG tracks this instance's in-flight background finalizers.
@@ -82,6 +85,9 @@ func (u *Upload) logf(format string, args ...any) {
 // Result is what Create produced, for the SSH and HTTP layers to format.
 type Result struct {
 	Paste domain.Paste
+	// OwnerBytes is the owner's charged total after the create, as the quota
+	// counts it; 0 when the create did not report one.
+	OwnerBytes int64
 }
 
 // ArchiveDeployer is the multi-file half of an upload, injected so Create can
@@ -143,10 +149,6 @@ func (u *Upload) Create(ctx context.Context, body io.Reader, owner domain.Owner,
 		body = peeked
 	}
 
-	uploadID, err := u.UploadIDs.next(owner)
-	if err != nil {
-		return Result{}, fmt.Errorf("upload id: %w", err)
-	}
 	staged, err := streamUpload(body, u.StagingDir)
 	// Freed here EXCEPT where ownership transfers to the finalize goroutine,
 	// which discards it itself once the background write is done.
@@ -193,6 +195,11 @@ func (u *Upload) Create(ctx context.Context, body io.Reader, owner domain.Owner,
 		}
 	}()
 	now := u.Now().UTC()
+	// The upload id decides where the bytes are stored (docs/SPEC.md "Pod
+	// storage"). It is minted for no pod link; the commit checks that against
+	// the owner's link and names the right one when it differs.
+	podLink := ""
+	uploadID := domain.NewUploadIDForLink(podLink)
 	p := domain.Paste{
 		Identity:      owner.Identity(),
 		Generation:    domain.NewPasteGeneration(),
@@ -208,13 +215,20 @@ func (u *Upload) Create(ctx context.Context, body io.Reader, owner domain.Owner,
 	}
 	// Retry on slug collision; SlugAlphabet's 32^8 slugs make a collision
 	// inside 5 retries vanishingly unlikely. The quota check lives INSIDE
-	// InsertWithQuotaCheck so concurrent uploads cannot both pass and both
-	// insert, and it runs before any URL is handed out (docs/SPEC.md "Create:
-	// the synchronous half").
+	// Publish so concurrent uploads cannot both pass and both insert, and it
+	// runs before any URL is handed out (docs/SPEC.md "Create: the synchronous
+	// half"). A moved pod link spends an attempt too, so a link that keeps
+	// changing cannot loop.
 	const maxRetries = 5
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		p.Slug = domain.NewRandomSlug()
-		err := u.Repo.InsertWithQuotaCheck(context.Background(), p, int64(domain.UserQuotaBytes), now)
+		ownerBytes, err := u.Repo.Publish(context.Background(), p, int64(domain.UserQuotaBytes), now, podLink)
+		if moved, ok := errors.AsType[*domain.PodMovedError](err); ok {
+			podLink = moved.Link
+			p.UploadID = domain.NewUploadIDForLink(podLink)
+			p.Manifest = documentManifest(domain.UploadObjectKey(p.UploadID, 0), kind, staged)
+			continue
+		}
 		switch class, terr := classifyCommitErr(err); class {
 		case commitOK:
 			// The bytes land after the row, so the caller gets its URL now and
@@ -222,7 +236,7 @@ func (u *Upload) Create(ctx context.Context, body io.Reader, owner domain.Owner,
 			// of the spill file transfers to the goroutine.
 			transferred = true
 			u.startFinalize(writeCtx, releaseWrite, p, staged)
-			return Result{Paste: p}, nil
+			return Result{Paste: p, OwnerBytes: ownerBytes}, nil
 		case commitSlugTaken:
 			u.logf("upload: slug %s taken, re-minting (attempt %d/%d)", p.Slug, attempt, maxRetries)
 			continue

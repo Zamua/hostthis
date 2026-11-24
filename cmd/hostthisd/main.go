@@ -116,7 +116,7 @@ func main() {
 	// Linked owners' uploads store their bytes in their pod (docs/SPEC.md "Pod
 	// storage").
 	pods := service.NewPods(pasteRepo)
-	uploadSvc.UploadIDs = pods.UploadID
+	// A create mints its own and has the commit check the owner's link.
 	manageSvc.UploadIDs = pods.UploadID
 	deploySvc.UploadIDs = pods.UploadID
 

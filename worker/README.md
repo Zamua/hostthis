@@ -13,6 +13,7 @@ and HTTP remain owned by `hostthisd`.
 | `src/cells/` | one module per cell class (`identity`, `paste`, `room`, `subnet`, `denylist`, `abuse`, `feed`, `turn`, `intentlog`), the op-table machinery (`ops.js`), shared storage records and the allocation fence (`records.js`), and the cell image and restore routes (`image.js`) |
 | `src/push.js` | Web Push: encryption, VAPID, subscription and schedule validation, time zones |
 | `src/blobs.js` | the internal `/blob/` payload routes |
+| `src/publish.js` | the internal `/publish/paste` route: a new paste's reserve, put and confirm in one request |
 | `src/public/`, `src/read.js` | the public read surface |
 | `src/rooms/` | room policy, wire values and public room routes |
 | `src/solid/` | hostthis's Solid identity, pod link flow and pod payload store |

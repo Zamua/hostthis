@@ -69,45 +69,20 @@ func TestAppendIsNotFoundOnlyOnAnExplicitAbsentAnswer(t *testing.T) {
 
 func TestInsertMapsOnlyIdentifiedConflictsToSlugTaken(t *testing.T) {
 	for _, tc := range []struct {
-		name, step, body string
-		taken            bool
+		name, body string
+		taken      bool
 	}{
-		{"reserve slug taken", "/identity/reserve", `{"error":"slug-taken"}`, true},
-		{"reserve mismatch", "/identity/reserve", `{"error":"reservation-mismatch"}`, false},
-		{"put slug taken", "/paste/put", `{"error":"slug-taken"}`, true},
-		{"put aborted", "/paste/put", `{"error":"create-aborted"}`, true},
-		{"put mismatch", "/paste/put", `{"error":"create-mismatch"}`, false},
-		{"put bare conflict", "/paste/put", "", false},
+		{"slug taken", `{"error":"slug-taken"}`, true},
+		{"aborted", `{"error":"create-aborted"}`, true},
+		{"reservation mismatch", `{"error":"reservation-mismatch"}`, false},
+		{"create mismatch", `{"error":"create-mismatch"}`, false},
+		{"bare conflict", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var releases int
-			f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-				if c.Path == tc.step {
-					return cellResponse(http.StatusConflict, tc.body), nil
-				}
-				switch c.Path {
-				case "/identity/reserve":
-					return cellResponse(http.StatusOK, ""), nil
-				case "/paste/put", "/identity/confirm":
-					return cellResponse(http.StatusNoContent, ""), nil
-				case "/identity/release":
-					releases++
-					return cellResponse(http.StatusNoContent, ""), nil
-				}
-				t.Fatalf("unexpected path %q", c.Path)
-				return nil, nil
-			}}
-			repo := NewPasteRepo("https://cell", f.client())
+			repo := NewPasteRepo("https://cell", fixedCell(http.StatusConflict, tc.body).client())
 			err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now())
 			if err == nil || errors.Is(err, domain.ErrSlugTaken) != tc.taken || (!tc.taken && definitive(err)) {
 				t.Fatalf("insert = %v, want slug taken %v", err, tc.taken)
-			}
-			wantReleases := 0
-			if tc.taken && tc.step == "/paste/put" {
-				wantReleases = 1
-			}
-			if releases != wantReleases {
-				t.Fatalf("releases = %d, want %d", releases, wantReleases)
 			}
 		})
 	}

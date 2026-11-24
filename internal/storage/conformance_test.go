@@ -37,6 +37,7 @@ import (
 type conformanceRepo interface {
 	service.PasteRepo
 	service.PasteAdmin
+	InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error
 }
 
 // fixedNow is the reference clock for the suite. Truncated to the

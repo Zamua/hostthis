@@ -98,7 +98,9 @@ type slugTakenNTimesRepo struct {
 	failures int
 }
 
-func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain.Paste, userCap int64, now time.Time) error {
+func (r *slugTakenNTimesRepo) Publish(ctx context.Context, p domain.Paste, userCap int64, now time.Time,
+	podLink string,
+) (int64, error) {
 	r.mu.Lock()
 	fail := r.failures > 0
 	if fail {
@@ -108,9 +110,9 @@ func (r *slugTakenNTimesRepo) InsertWithQuotaCheck(ctx context.Context, p domain
 	if fail {
 		// Wrapped, not bare: the remint loop must detect the sentinel
 		// through wrapping (errors.Is), the way a backend may surface it.
-		return fmt.Errorf("insert: %w", storage.ErrSlugTaken)
+		return 0, fmt.Errorf("insert: %w", storage.ErrSlugTaken)
 	}
-	return r.PasteRepo.InsertWithQuotaCheck(ctx, p, userCap, now)
+	return r.PasteRepo.Publish(ctx, p, userCap, now, podLink)
 }
 
 // TestUpload_Create_LogsSlugRemint pins the remint observability: each

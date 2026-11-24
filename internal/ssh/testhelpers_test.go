@@ -81,6 +81,17 @@ type stackOpts struct {
 	logOut     io.Writer
 	purger     service.CachePurger
 	abuse      *abuselog.Logger
+	pods       bool
+	transport  func(http.RoundTripper) http.RoundTripper
+}
+
+// withPods mints upload ids from the owner's pod link, as cmd/hostthisd does.
+func withPods() stackOpt { return func(o *stackOpts) { o.pods = true } }
+
+// withTransport wraps the transport every Worker adapter sends through, so a
+// test can observe the requests hostthisd makes.
+func withTransport(wrap func(http.RoundTripper) http.RoundTripper) stackOpt {
+	return func(o *stackOpts) { o.transport = wrap }
 }
 
 // withAbuse wires the abuse-event logger.
@@ -153,7 +164,11 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	}
 	ns := workertest.PublicEndpoint(t)
 	endpoint := ns.Endpoint
-	authed, err := worker.Authorize(nil, endpoint, ns.Token)
+	var base http.RoundTripper
+	if o.transport != nil {
+		base = o.transport(http.DefaultTransport)
+	}
+	authed, err := worker.Authorize(base, endpoint, ns.Token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +193,11 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 	manage := service.NewManage(admin, blobUnit)
 	upload.Screen = o.screen
 	manage.Screen = o.screen
+	var pods *service.Pods
+	if o.pods {
+		pods = service.NewPods(repo)
+		manage.UploadIDs = pods.UploadID
+	}
 
 	sshSrv := &hostssh.Server{
 		ApexDomain: "paste.test",
@@ -186,6 +206,7 @@ func startStack(t *testing.T, opts ...stackOpt) *stack {
 		Pastes:     repo,
 		Uploads:    o.uploads,
 		Logger:     log.New(io.Discard, "", 0),
+		Pods:       pods,
 	}
 	sshSrv.AppRooms = &service.OwnerRooms{Slugs: repo, Rooms: worker.NewAppRoomsRepo(endpoint, client), Now: time.Now}
 	sshSrv.ProxyProtocol = o.proxyProto

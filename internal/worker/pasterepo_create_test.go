@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -21,169 +20,100 @@ func createPaste() domain.Paste {
 	}
 }
 
-func TestInsertCarriesOneCreationFingerprint(t *testing.T) {
-	var reserveFingerprint, putFingerprint string
-	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			intent, ok := c.fields(t)["intent"].(map[string]any)
-			if !ok {
-				t.Fatalf("reserve intent = %#v", c.fields(t)["intent"])
-			}
-			reserveFingerprint, _ = intent["fingerprint"].(string)
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			putFingerprint, _ = c.fields(t)["fingerprint"].(string)
-			return cellResponse(http.StatusNoContent, ""), nil
-		case "/identity/confirm":
-			return cellResponse(http.StatusNoContent, ""), nil
-		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
-	}}
+// A create is one request to the publish route, carrying the row, its
+// fingerprint and the intent naming this slug and generation.
+func TestPublishIsOneRequestCarryingTheWholeCreate(t *testing.T) {
+	f := fixedCell(http.StatusOK, `{"active":42}`)
+	repo := NewPasteRepo("https://cell", f.client())
+	active, err := repo.Publish(context.Background(), createPaste(), 10, time.UnixMilli(7), "")
+	if err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if active != 42 {
+		t.Fatalf("owner bytes = %d, want the 42 the route answered", active)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("requests = %d, want 1", len(f.calls))
+	}
+	c := f.last()
+	if c.Method != http.MethodPost || c.Path != "/publish/paste" {
+		t.Fatalf("request = %s %s, want POST /publish/paste", c.Method, c.Path)
+	}
+	body := c.fields(t)
+	row, _ := body["row"].(map[string]any)
+	if row["slug"] != "create23" || row["identity"] != "key:owner" || row["generation"] != "generation-1" {
+		t.Fatalf("row = %v", row)
+	}
+	if fp, _ := body["fingerprint"].(string); fp == "" {
+		t.Fatal("no fingerprint")
+	}
+	if body["intentId"] != "create:create23:generation-1" || body["userCap"] != float64(10) || body["now"] != float64(7) {
+		t.Fatalf("body = %v", body)
+	}
+	if pod, ok := body["pod"]; !ok || pod != "" {
+		t.Fatalf("pod = %v (present %v), want the empty link checked", pod, ok)
+	}
+}
 
+// A deploy's create, through InsertWithQuotaCheck, names no pod link, so none
+// is checked.
+func TestInsertWithQuotaCheckChecksNoPod(t *testing.T) {
+	f := fixedCell(http.StatusOK, `{"active":3}`)
 	repo := NewPasteRepo("https://cell", f.client())
 	if err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now()); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if reserveFingerprint == "" || reserveFingerprint != putFingerprint {
-		t.Fatalf("reserve/put fingerprints = %q/%q, want one non-empty value", reserveFingerprint, putFingerprint)
+	if _, ok := f.last().fields(t)["pod"]; ok {
+		t.Fatal("an insert named a pod link")
 	}
 }
 
-// A lost put response retries the same generation and never releases its reservation.
-func TestInsertRetriesAmbiguousPutWithSameGeneration(t *testing.T) {
-	var puts []cellRequest
-	var releases int
-	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			puts = append(puts, c)
-			if len(puts) == 1 {
-				return nil, io.ErrUnexpectedEOF
+// Each refusal the route answers maps to the sentinel the services act on.
+func TestPublishRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   func(error) bool
+	}{
+		{"over quota", http.StatusInsufficientStorage, `{"error":"over-quota"}`,
+			func(err error) bool { return errors.Is(err, domain.ErrOverUserQuota) }},
+		{"slug taken", http.StatusConflict, `{"error":"slug-taken"}`,
+			func(err error) bool { return errors.Is(err, domain.ErrSlugTaken) }},
+		{"create aborted", http.StatusConflict, `{"error":"create-aborted"}`,
+			func(err error) bool { return errors.Is(err, domain.ErrSlugTaken) }},
+		{"too large", http.StatusRequestEntityTooLarge, `{"error":"version-too-large"}`,
+			func(err error) bool { return errors.Is(err, domain.ErrTooManyFiles) }},
+		{"pod moved", http.StatusConflict, `{"error":"pod-moved","pod":"0123456789abcdef"}`,
+			func(err error) bool {
+				moved, ok := errors.AsType[*domain.PodMovedError](err)
+				return ok && moved.Link == "0123456789abcdef"
+			}},
+		{"another conflict", http.StatusConflict, `{"error":"create-mismatch"}`,
+			func(err error) bool { return err != nil && !errors.Is(err, domain.ErrSlugTaken) }},
+		{"confirm refused", http.StatusBadGateway, `{"error":"confirm-refused"}`,
+			func(err error) bool { return err != nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := NewPasteRepo("https://cell", fixedCell(tc.status, tc.body).client())
+			_, err := repo.Publish(context.Background(), createPaste(), 10, time.Now(), "")
+			if !tc.want(err) {
+				t.Fatalf("publish error = %v", err)
 			}
-			return cellResponse(http.StatusNoContent, ""), nil
-		case "/identity/confirm":
-			return cellResponse(http.StatusNoContent, ""), nil
-		case "/identity/release":
-			releases++
-			return cellResponse(http.StatusNoContent, ""), nil
-		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
-	}}
-
-	repo := NewPasteRepo("https://cell", f.client())
-	if err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now()); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-	if len(puts) != 2 || !bytes.Equal(puts[0].Body, puts[1].Body) {
-		t.Fatalf("put attempts = %#v, want two identical bodies", puts)
-	}
-	if releases != 0 {
-		t.Fatalf("release calls = %d, want 0 after ambiguous put", releases)
+		})
 	}
 }
 
-// Two ambiguous put failures leave the durable intent to resolve the reservation.
-func TestInsertDoesNotReleaseAfterAmbiguousPutFailure(t *testing.T) {
-	var puts, releases int
-	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			puts++
-			return nil, io.ErrUnexpectedEOF
-		case "/identity/release":
-			releases++
-			return cellResponse(http.StatusNoContent, ""), nil
-		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
-	}}
-
+// A lost answer is not resent: the create may have completed, and a resend
+// would then read as a taken slug and mint a second paste. The durable intent
+// resolves it instead.
+func TestPublishIsNotResentAfterALostAnswer(t *testing.T) {
+	f := &fakeCell{reply: func(cellRequest) (*http.Response, error) { return nil, io.ErrUnexpectedEOF }}
 	repo := NewPasteRepo("https://cell", f.client())
-	if err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now()); !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("insert error = %v, want transport error", err)
+	if _, err := repo.Publish(context.Background(), createPaste(), 10, time.Now(), ""); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("publish error = %v, want the transport error", err)
 	}
-	if puts != 2 || releases != 0 {
-		t.Fatalf("put/release calls = %d/%d, want 2/0", puts, releases)
-	}
-}
-
-// A definitive generation conflict releases the reservation.
-func TestInsertReleasesAfterDefinitivePutConflict(t *testing.T) {
-	var releases int
-	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			return cellResponse(http.StatusConflict, `{"error":"slug-taken"}`), nil
-		case "/identity/release":
-			releases++
-			return cellResponse(http.StatusNoContent, ""), nil
-		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
-	}}
-
-	repo := NewPasteRepo("https://cell", f.client())
-	if err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now()); !errors.Is(err, domain.ErrSlugTaken) {
-		t.Fatalf("insert error = %v, want ErrSlugTaken", err)
-	}
-	if releases != 1 {
-		t.Fatalf("release calls = %d, want 1", releases)
-	}
-}
-
-// A semantic confirm refusal is surfaced instead of being mistaken for success.
-func TestInsertInspectsConfirmStatus(t *testing.T) {
-	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			return cellResponse(http.StatusNoContent, ""), nil
-		case "/identity/confirm":
-			return cellResponse(http.StatusConflict, `{"error":"generation-mismatch"}`), nil
-		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
-	}}
-
-	repo := NewPasteRepo("https://cell", f.client())
-	if err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now()); err == nil {
-		t.Fatal("insert = nil, want semantic confirm error")
-	}
-}
-
-// A row the cell refuses as too large is a file-count refusal to the caller,
-// and its reservation is released since the row can never land.
-func TestInsertTooLargeRowIsRefusedAndReleased(t *testing.T) {
-	var released bool
-	f := &fakeCell{reply: func(c cellRequest) (*http.Response, error) {
-		switch c.Path {
-		case "/identity/reserve":
-			return cellResponse(http.StatusOK, ""), nil
-		case "/paste/put":
-			return cellResponse(http.StatusRequestEntityTooLarge, `{"error":"version-too-large"}`), nil
-		case "/identity/release":
-			released = true
-			return cellResponse(http.StatusNoContent, ""), nil
-		}
-		t.Fatalf("unexpected path %q", c.Path)
-		return nil, nil
-	}}
-	repo := NewPasteRepo("https://cell", f.client())
-	err := repo.InsertWithQuotaCheck(context.Background(), createPaste(), 10, time.Now())
-	if !errors.Is(err, domain.ErrTooManyFiles) {
-		t.Fatalf("insert = %v, want ErrTooManyFiles", err)
-	}
-	if !released {
-		t.Fatal("the reservation of a row that can never land was not released")
+	if len(f.calls) != 1 {
+		t.Fatalf("requests = %d, want 1", len(f.calls))
 	}
 }

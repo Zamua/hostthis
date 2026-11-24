@@ -90,7 +90,6 @@ func startPodStack(t *testing.T, acp, register bool, storages ...string) *podSta
 	repo := worker.NewPasteRepo(rt.URL, client)
 	pods := service.NewPods(repo)
 	upload := service.NewUpload(repo, blobUnit)
-	upload.UploadIDs = pods.UploadID
 	t.Cleanup(upload.WaitFinalize)
 	manage := service.NewManage(repo, blobUnit)
 	manage.UploadIDs = pods.UploadID

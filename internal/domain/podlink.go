@@ -76,6 +76,25 @@ func NewPodUploadID(link string) string {
 	return podUploadPrefix + link + "_" + NewUploadID()
 }
 
+// NewUploadIDForLink is a new upload id for an owner whose pod link id is link
+// ("" for none): stored in that pod when the id is a valid one, in the bucket
+// otherwise.
+func NewUploadIDForLink(link string) string {
+	if !ValidPodLinkID(link) {
+		return NewUploadID()
+	}
+	return NewPodUploadID(link)
+}
+
+// PodMovedError refuses a create whose upload id was minted for a pod link the
+// owner no longer has. Link is the owner's link id now, "" for none; nothing
+// was written, so the create may be retried under an upload id minted for it.
+type PodMovedError struct{ Link string }
+
+func (e *PodMovedError) Error() string {
+	return fmt.Sprintf("storage: owner's pod link is now %q", e.Link)
+}
+
 // PodLinkOfUploadID is the link a pod upload id names.
 func PodLinkOfUploadID(id string) (string, bool) {
 	rest, ok := strings.CutPrefix(id, podUploadPrefix)

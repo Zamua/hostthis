@@ -10,7 +10,7 @@ import (
 	"github.com/Zamua/hostthis/internal/domain"
 )
 
-// countingCreateRepo counts simultaneous InsertWithQuotaCheck entrants (the
+// countingCreateRepo counts simultaneous Publish entrants (the
 // number the gate must bound) and can hold one identity's inserts open on a
 // channel, so a test can wedge one owner while probing another. The embedded
 // nil PasteRepo makes any other call panic.
@@ -24,7 +24,7 @@ type countingCreateRepo struct {
 	holdFor   map[string]chan struct{} // identity -> block inserts until closed
 }
 
-func (r *countingCreateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Paste, _ int64, _ time.Time) error {
+func (r *countingCreateRepo) Publish(_ context.Context, p domain.Paste, _ int64, _ time.Time, _ string) (int64, error) {
 	r.mu.Lock()
 	r.inside++
 	if r.inside > r.maxInside {
@@ -44,7 +44,7 @@ func (r *countingCreateRepo) InsertWithQuotaCheck(_ context.Context, p domain.Pa
 	r.inside--
 	r.calls++
 	r.mu.Unlock()
-	return nil
+	return 0, nil
 }
 
 func (r *countingCreateRepo) insideNow() int {
@@ -62,7 +62,7 @@ func (r *countingCreateRepo) stats() (maxInside, calls int) {
 func gatedInsert(t *testing.T, repo PasteRepo, identity string) {
 	t.Helper()
 	p := domain.Paste{Identity: domain.Identity(identity), Slug: domain.NewRandomSlug()}
-	if err := repo.InsertWithQuotaCheck(context.Background(), p, 0, time.Now()); err != nil {
+	if _, err := repo.Publish(context.Background(), p, 0, time.Now(), ""); err != nil {
 		t.Errorf("insert for %s: %v", identity, err)
 	}
 }
